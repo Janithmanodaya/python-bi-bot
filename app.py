@@ -2035,7 +2035,7 @@ def run_bot_logic():
 
             for _ in range(180): 
                 if not bot_running: break
-                sleep(1)
+                
         except ClientError as ce:
             err_msg = f"API Error: {ce.error_message if hasattr(ce, 'error_message') and ce.error_message else ce}. Retrying..."
             print(err_msg); _status_set(err_msg); _activity_set("API Error. Retrying...")
