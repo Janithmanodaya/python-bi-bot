@@ -102,7 +102,17 @@ strategy1_active_trade_info_default = {'symbol': None, 'entry_time': None, 'entr
 strategy3_active_trade_info_default = {'symbol': None, 'entry_time': None, 'entry_price': None, 'side': None, 'initial_atr_for_profit_target': None, 'vwap_trail_active': False}
 strategy4_active_trade_info_default = {'symbol': None, 'entry_time': None, 'entry_price': None, 'side': None, 'divergence_price_point': None}
 
-pending_signals = {} # To store {'symbol': {'timestamp': pd.Timestamp, 'side': 'up'/'down', 'last_signal_eval_true': True/False, 'initial_conditions_met_count': 0, 'last_check_time': pd.Timestamp}}
+# pending_signals = {} # To store {'symbol': {'timestamp': pd.Timestamp, 'side': 'up'/'down', 'last_signal_eval_true': True/False, 'initial_conditions_met_count': 0, 'last_check_time': pd.Timestamp}}
+
+# g_conditional_pending_signals stores signals that have met partial conditions
+# and are in a 5-minute monitoring window before full confirmation.
+# Key: (symbol, strategy_id) tuple
+# Value: dict with fields like 'symbol', 'strategy_id', 'side', 'timestamp', 
+#        'current_conditions_met_count', 'conditions_to_start_wait_threshold',
+#        'conditions_for_full_signal_threshold', 
+#        'all_conditions_status_at_pending_start', 'last_evaluated_all_conditions_status',
+#        'entry_price_at_pending_start', 'potential_sl_price', 'potential_tp_price'
+g_conditional_pending_signals = {}
 
 TARGET_SYMBOLS = ["BTCUSDT", "ETHUSDT", "USDTUSDT", "XRPUSDT", "BNBUSDT", "SOLUSDT", "USDCUSDT", "DOGEUSDT", "TRXUSDT", "ADAUSDT"]
 ACCOUNT_RISK_PERCENT = 0.02
@@ -334,18 +344,28 @@ def klines(symbol):
 def scalping_strategy_signal(symbol):
     global LOCAL_HIGH_LOW_LOOKBACK_PERIOD, SCALPING_REQUIRED_BUY_CONDITIONS, SCALPING_REQUIRED_SELL_CONDITIONS
     
-    default_conditions = {
-        'ema_cross_up': False, 'rsi_long_ok': False, 'supertrend_green': False,
-        'volume_spike': False, 'price_breakout_high': False,
-        'ema_cross_down': False, 'rsi_short_ok': False, 'supertrend_red': False,
-        'price_breakout_low': False
+    return_data = {
+        'signal': 'none',
+        'conditions_met_count': 0,
+        'conditions_to_start_wait_threshold': 2, # Standard for S0
+        'conditions_for_full_signal_threshold': SCALPING_REQUIRED_BUY_CONDITIONS, # Default, adjusted later
+        'all_conditions_status': {
+            'ema_cross_up': False, 'rsi_long_ok': False, 'supertrend_green': False,
+            'volume_spike': False, 'price_breakout_high': False,
+            'ema_cross_down': False, 'rsi_short_ok': False, 'supertrend_red': False,
+            'price_breakout_low': False,
+            'num_buy_conditions_met': 0,
+            'num_sell_conditions_met': 0
+        },
+        'sl_price': None, # Not applicable for S0 at this stage
+        'tp_price': None, # Not applicable for S0 at this stage
+        'error': None
     }
-    default_return = {'signal': 'none', 'conditions': default_conditions, 'error': None}
 
     kl = klines(symbol)
     if kl is None or len(kl) < max(21, LOCAL_HIGH_LOW_LOOKBACK_PERIOD + 1): # Ensure enough data
-        default_return['error'] = 'Insufficient kline data'
-        return default_return
+        return_data['error'] = 'Insufficient kline data'
+        return return_data
     
     try:
         ema9 = ta.trend.EMAIndicator(close=kl['Close'], window=9).ema_indicator()
@@ -356,14 +376,14 @@ def scalping_strategy_signal(symbol):
 
         if any(x is None for x in [ema9, ema21, rsi, supertrend, volume_ma10]) or \
            any(x.empty for x in [ema9, ema21, rsi, supertrend]) or volume_ma10.isnull().all():
-            default_return['error'] = 'One or more indicators are None or empty'
-            return default_return
+            return_data['error'] = 'One or more indicators are None or empty'
+            return return_data
 
         required_length = max(10, LOCAL_HIGH_LOW_LOOKBACK_PERIOD + 1)
         if len(ema9) < 2 or len(ema21) < 2 or len(rsi) < 1 or len(supertrend) < 1 or \
            len(volume_ma10.dropna()) < 1 or len(kl['Volume']) < required_length:
-            default_return['error'] = 'Indicator series too short for required length'
-            return default_return
+            return_data['error'] = 'Indicator series too short for required length'
+            return return_data
 
         last_ema9, prev_ema9 = ema9.iloc[-1], ema9.iloc[-2]
         last_ema21, prev_ema21 = ema21.iloc[-1], ema21.iloc[-2]
@@ -374,8 +394,8 @@ def scalping_strategy_signal(symbol):
         current_price = kl['Close'].iloc[-1]
 
         if any(pd.isna(val) for val in [last_ema9, prev_ema9, last_ema21, prev_ema21, last_rsi, last_supertrend, last_volume, current_price]) or pd.isna(last_volume_ma10):
-            default_return['error'] = 'NaN value in one of the critical indicators or price'
-            return default_return
+            return_data['error'] = 'NaN value in one of the critical indicators or price'
+            return return_data
             
         actual_lookback = min(LOCAL_HIGH_LOW_LOOKBACK_PERIOD, len(kl['High']) - 1)
         recent_high = kl['High'].iloc[-(actual_lookback + 1):-1].max() if actual_lookback > 0 else kl['High'].iloc[-2] if len(kl['High']) > 1 else current_price
@@ -399,40 +419,51 @@ def scalping_strategy_signal(symbol):
         num_buy_conditions_true = sum(buy_conditions_met)
         num_sell_conditions_true = sum(sell_conditions_met)
 
-        conditions_status = {
+        return_data['all_conditions_status'].update({
             'ema_cross_up': ema_crossed_up, 'rsi_long_ok': rsi_valid_long, 
             'supertrend_green': supertrend_is_green, 'volume_spike': volume_is_strong, 
             'price_breakout_high': price_broke_high,
             'ema_cross_down': ema_crossed_down, 'rsi_short_ok': rsi_valid_short, 
             'supertrend_red': supertrend_is_red, 'price_breakout_low': price_broke_low,
-            # Optionally, add the counts to the status for debugging or display
             'num_buy_conditions_met': num_buy_conditions_true,
             'num_sell_conditions_met': num_sell_conditions_true
-        }
+        })
 
-        final_signal_str = 'none'
         if num_buy_conditions_true >= SCALPING_REQUIRED_BUY_CONDITIONS:
-            final_signal_str = 'up'
+            return_data['signal'] = 'up'
+            return_data['conditions_met_count'] = num_buy_conditions_true
+            return_data['conditions_for_full_signal_threshold'] = SCALPING_REQUIRED_BUY_CONDITIONS
         elif num_sell_conditions_true >= SCALPING_REQUIRED_SELL_CONDITIONS:
-            final_signal_str = 'down'
+            return_data['signal'] = 'down'
+            return_data['conditions_met_count'] = num_sell_conditions_true
+            return_data['conditions_for_full_signal_threshold'] = SCALPING_REQUIRED_SELL_CONDITIONS
+        else: # No full signal, set met_count to the higher of the two for partial/wait check
+            if num_buy_conditions_true >= num_sell_conditions_true: # Prioritize buy if equal
+                return_data['conditions_met_count'] = num_buy_conditions_true
+                return_data['conditions_for_full_signal_threshold'] = SCALPING_REQUIRED_BUY_CONDITIONS
+            else:
+                return_data['conditions_met_count'] = num_sell_conditions_true
+                return_data['conditions_for_full_signal_threshold'] = SCALPING_REQUIRED_SELL_CONDITIONS
         
-        return {'signal': final_signal_str, 'conditions': conditions_status, 'error': None}
+        return return_data
 
     except Exception as e:
         # print(f"Error in scalping_strategy_signal for {symbol}: {e}") # Can be noisy
-        default_return['error'] = str(e)
-        return default_return
+        return_data['error'] = str(e)
+        return return_data
 
 def strategy_ema_supertrend(symbol):
-    default_conditions = {
-        'ema_cross_up': False, 'st_green': False, 'rsi_long_ok': False,
-        'ema_cross_down': False, 'st_red': False, 'rsi_short_ok': False,
-    }
     base_return = {
-        'signal': 'none', 
-        'conditions': default_conditions, 
-        'sl_price': None, 
-        'tp_price': None, 
+        'signal': 'none',
+        'conditions_met_count': 0,
+        'conditions_to_start_wait_threshold': 2,
+        'conditions_for_full_signal_threshold': 3,
+        'all_conditions_status': {
+            'ema_cross_up': False, 'st_green': False, 'rsi_long_ok': False,
+            'ema_cross_down': False, 'st_red': False, 'rsi_short_ok': False,
+        },
+        'sl_price': None,
+        'tp_price': None,
         'error': None,
         'account_risk_percent': 0.01 # Strategy 1 specific risk
     }
@@ -479,76 +510,108 @@ def strategy_ema_supertrend(symbol):
             return base_return
             
         # --- Define Conditions ---
-        conditions = {}
-        conditions['ema_cross_up'] = prev_ema9 < prev_ema21 and last_ema9 > last_ema21
-        conditions['st_green'] = last_supertrend_signal == 'green'
-        conditions['rsi_long_ok'] = 40 <= last_rsi <= 70
+        # Update all_conditions_status in base_return directly
+        base_return['all_conditions_status']['ema_cross_up'] = prev_ema9 < prev_ema21 and last_ema9 > last_ema21
+        base_return['all_conditions_status']['st_green'] = last_supertrend_signal == 'green'
+        base_return['all_conditions_status']['rsi_long_ok'] = 40 <= last_rsi <= 70
 
-        conditions['ema_cross_down'] = prev_ema9 > prev_ema21 and last_ema9 < last_ema21
-        conditions['st_red'] = last_supertrend_signal == 'red'
-        conditions['rsi_short_ok'] = 30 <= last_rsi <= 60 # Adjusted RSI for short as per common practice, original was 30-50
+        base_return['all_conditions_status']['ema_cross_down'] = prev_ema9 > prev_ema21 and last_ema9 < last_ema21
+        base_return['all_conditions_status']['st_red'] = last_supertrend_signal == 'red'
+        base_return['all_conditions_status']['rsi_short_ok'] = 30 <= last_rsi <= 60
 
-        final_signal = 'none'
-        sl_price, tp_price = None, None
-        price_precision = get_price_precision(symbol)
+        # Calculate met conditions count
+        met_buy_conditions = sum([base_return['all_conditions_status']['ema_cross_up'], 
+                                  base_return['all_conditions_status']['st_green'], 
+                                  base_return['all_conditions_status']['rsi_long_ok']])
+        met_sell_conditions = sum([base_return['all_conditions_status']['ema_cross_down'], 
+                                   base_return['all_conditions_status']['st_red'], 
+                                   base_return['all_conditions_status']['rsi_short_ok']])
 
-        if len(kl['Low']) < 3 or len(kl['High']) < 3: # Need at least T-1 and T-2 for swing
+        final_signal_str = 'none' # Temporary variable for signal before SL/TP validation
+        sl_price_calc, tp_price_calc = None, None # Use temporary vars for calculations
+        
+        if len(kl['Low']) < 3 or len(kl['High']) < 3: 
             base_return['error'] = "Not enough kline data for SL/TP calculation (need T-1, T-2)"
-            base_return['conditions'] = conditions # Still return conditions evaluated so far
+            if met_buy_conditions >= met_sell_conditions: # Prioritize buy if counts are equal or buy is greater
+                 base_return['conditions_met_count'] = met_buy_conditions
+            else:
+                 base_return['conditions_met_count'] = met_sell_conditions
+            # all_conditions_status is already populated
             return base_return
 
-        if conditions['ema_cross_up'] and conditions['st_green'] and conditions['rsi_long_ok']:
-            final_signal = 'up'
+        price_precision = get_price_precision(symbol)
+
+        if met_buy_conditions == base_return['conditions_for_full_signal_threshold']:
+            final_signal_str = 'up'
+            base_return['conditions_met_count'] = met_buy_conditions
             swing_low = min(kl['Low'].iloc[-2], kl['Low'].iloc[-3])
-            sl_price = round(swing_low - (kl['Low'].iloc[-1] * 0.001), price_precision) # Buffer
-            if current_price <= sl_price: # SL would be at or above entry
-                base_return['error'] = f"SL price {sl_price} is at or above entry {current_price} for LONG"
-                final_signal = 'none' # Invalidate signal
+            sl_price_calc = round(swing_low - (kl['Low'].iloc[-1] * 0.001), price_precision) 
+            if current_price <= sl_price_calc: 
+                base_return['error'] = f"SL price {sl_price_calc} is at or above entry {current_price} for LONG"
+                final_signal_str = 'none' 
             else:
-                risk_amount = current_price - sl_price
-                tp_price = round(current_price + (risk_amount * 1.5), price_precision)
-                if tp_price <= current_price: # TP would be at or below entry
-                    base_return['error'] = f"TP price {tp_price} is at or below entry {current_price} for LONG"
-                    final_signal = 'none' # Invalidate signal
-
-
-        elif conditions['ema_cross_down'] and conditions['st_red'] and conditions['rsi_short_ok']:
-            final_signal = 'down'
-            swing_high = max(kl['High'].iloc[-2], kl['High'].iloc[-3])
-            sl_price = round(swing_high + (kl['High'].iloc[-1] * 0.001), price_precision) # Buffer
-            if current_price >= sl_price: # SL would be at or below entry
-                base_return['error'] = f"SL price {sl_price} is at or below entry {current_price} for SHORT"
-                final_signal = 'none' # Invalidate signal
-            else:
-                risk_amount = sl_price - current_price
-                tp_price = round(current_price - (risk_amount * 1.5), price_precision)
-                if tp_price >= current_price: # TP would be at or above entry
-                    base_return['error'] = f"TP price {tp_price} is at or above entry {current_price} for SHORT"
-                    final_signal = 'none' # Invalidate signal
+                risk_amount = current_price - sl_price_calc
+                tp_price_calc = round(current_price + (risk_amount * 1.5), price_precision)
+                if tp_price_calc <= current_price: 
+                    base_return['error'] = f"TP price {tp_price_calc} is at or below entry {current_price} for LONG"
+                    final_signal_str = 'none' 
         
-        if final_signal == 'none' and base_return['error']:
-             print(f"Strategy {STRATEGIES[1]} for {symbol}: Signal invalidated due to SL/TP error: {base_return['error']}")
+        elif met_sell_conditions == base_return['conditions_for_full_signal_threshold']:
+            final_signal_str = 'down'
+            base_return['conditions_met_count'] = met_sell_conditions
+            swing_high = max(kl['High'].iloc[-2], kl['High'].iloc[-3])
+            sl_price_calc = round(swing_high + (kl['High'].iloc[-1] * 0.001), price_precision) 
+            if current_price >= sl_price_calc: 
+                base_return['error'] = f"SL price {sl_price_calc} is at or below entry {current_price} for SHORT"
+                final_signal_str = 'none' 
+            else:
+                risk_amount = sl_price_calc - current_price
+                tp_price_calc = round(current_price - (risk_amount * 1.5), price_precision)
+                if tp_price_calc >= current_price: 
+                    base_return['error'] = f"TP price {tp_price_calc} is at or above entry {current_price} for SHORT"
+                    final_signal_str = 'none' 
+        else: # Not a full signal, determine conditions_met_count for partial/wait check
+            if met_buy_conditions >= met_sell_conditions:
+                 base_return['conditions_met_count'] = met_buy_conditions
+            else:
+                 base_return['conditions_met_count'] = met_sell_conditions
 
-
-        base_return['signal'] = final_signal
-        base_return['conditions'] = conditions
-        base_return['sl_price'] = sl_price if final_signal != 'none' else None
-        base_return['tp_price'] = tp_price if final_signal != 'none' else None
-        # Error already set if any specific issue, or remains None
+        base_return['signal'] = final_signal_str 
+        if final_signal_str != 'none': # Only set SL/TP if signal is valid
+            base_return['sl_price'] = sl_price_calc
+            base_return['tp_price'] = tp_price_calc
+        else: # Ensure SL/TP are None if signal is 'none'
+            base_return['sl_price'] = None
+            base_return['tp_price'] = None
+            if base_return['error']: # Print error only if it was set (e.g. by SL/TP validation)
+                 print(f"Strategy {STRATEGIES[1]} for {symbol}: Signal invalidated due to SL/TP error: {base_return['error']}")
+        
         return base_return
 
     except Exception as e:
         base_return['error'] = f"Exception in strategy_ema_supertrend: {str(e)}"
+        # Ensure all_conditions_status is populated even in case of early exception
+        # This might be redundant if base_return is initialized with defaults, but safe
+        base_return['all_conditions_status'].update({
+            'ema_cross_up': False, 'st_green': False, 'rsi_long_ok': False,
+            'ema_cross_down': False, 'st_red': False, 'rsi_short_ok': False,
+        })
         return base_return
 
 def strategy_bollinger_band_mean_reversion(symbol):
     global strategy2_active_trades # Used to check concurrent trade limit
 
     base_return = {
-        'signal': 'none', 
-        'conditions': {}, 
-        'sl_price': None, 
-        'tp_price': None, 
+        'signal': 'none',
+        'conditions_met_count': 0,
+        'conditions_to_start_wait_threshold': 2,
+        'conditions_for_full_signal_threshold': 3,
+        'all_conditions_status': {
+            'price_below_lower_bb': False, 'rsi_oversold': False, 'volume_confirms_long': False,
+            'price_above_upper_bb': False, 'rsi_overbought': False, 'volume_confirms_short': False,
+        },
+        'sl_price': None,
+        'tp_price': None,
         'error': None,
         'account_risk_percent': 0.008 # Strategy 2 specific risk
     }
@@ -556,12 +619,7 @@ def strategy_bollinger_band_mean_reversion(symbol):
     # Max 2 Concurrent Trades Check for this strategy
     if len(strategy2_active_trades) >= 2:
         base_return['error'] = "Max 2 concurrent S2 trades reached"
-        # Optional: Check if this specific symbol is already in strategy2_active_trades
-        # for trade in strategy2_active_trades:
-        #     if trade['symbol'] == symbol:
-        #         base_return['error'] = f"S2 trade already active for {symbol}"
-        #         return base_return
-        if base_return['error'] == "Max 2 concurrent S2 trades reached": # Only return if global limit hit
+        if base_return['error'] == "Max 2 concurrent S2 trades reached": 
              print(f"Strategy 2 ({symbol}): Skipped due to max concurrent trade limit (2).")
              return base_return
 
@@ -606,77 +664,75 @@ def strategy_bollinger_band_mean_reversion(symbol):
             return base_return
             
         # --- Define Conditions ---
-        conditions = {}
-        final_signal = 'none'
+        base_return['all_conditions_status']['price_below_lower_bb'] = current_price < last_lower_bb
+        base_return['all_conditions_status']['rsi_oversold'] = last_rsi_val < 30
+        base_return['all_conditions_status']['volume_confirms_long'] = last_volume_val > last_volume_sma_val
         
-        # Long Entry
-        price_below_lower_bb = current_price < last_lower_bb
-        rsi_oversold = last_rsi_val < 30
-        volume_confirms_long = last_volume_val > last_volume_sma_val
+        base_return['all_conditions_status']['price_above_upper_bb'] = current_price > last_upper_bb
+        base_return['all_conditions_status']['rsi_overbought'] = last_rsi_val > 70
+        # For Strategy 2, volume_confirms_short is the same as volume_confirms_long
+        base_return['all_conditions_status']['volume_confirms_short'] = last_volume_val > last_volume_sma_val 
+
+        met_buy_conditions = sum([base_return['all_conditions_status']['price_below_lower_bb'],
+                                  base_return['all_conditions_status']['rsi_oversold'],
+                                  base_return['all_conditions_status']['volume_confirms_long']])
+        met_sell_conditions = sum([base_return['all_conditions_status']['price_above_upper_bb'],
+                                   base_return['all_conditions_status']['rsi_overbought'],
+                                   base_return['all_conditions_status']['volume_confirms_short']])
+
+        final_signal_str = 'none'
+        sl_price_calc, tp_price_calc = None, None # Initialize calc variables
+        price_precision = get_price_precision(symbol)
+        buffer_percentage = 0.001
+
+        if met_buy_conditions == base_return['conditions_for_full_signal_threshold']:
+            final_signal_str = 'up'
+            base_return['conditions_met_count'] = met_buy_conditions
+            sl_price_calc = round(last_lower_bb - (current_price * buffer_percentage), price_precision)
+            tp_price_calc = round(last_middle_bb, price_precision)
+            if current_price <= sl_price_calc:
+                base_return['error'] = f"SL price {sl_price_calc} is at or above entry {current_price} for LONG"
+                final_signal_str = 'none'
+            elif tp_price_calc <= current_price: # Changed from elif to if for independent check
+                base_return['error'] = f"TP price {tp_price_calc} is at or below entry {current_price} for LONG"
+                final_signal_str = 'none'
         
-        conditions['price_below_lower_bb'] = price_below_lower_bb
-        conditions['rsi_oversold'] = rsi_oversold
-        conditions['volume_confirms_long'] = volume_confirms_long
-
-        if price_below_lower_bb and rsi_oversold and volume_confirms_long:
-            final_signal = 'up'
+        elif met_sell_conditions == base_return['conditions_for_full_signal_threshold']:
+            final_signal_str = 'down'
+            base_return['conditions_met_count'] = met_sell_conditions
+            sl_price_calc = round(last_upper_bb + (current_price * buffer_percentage), price_precision)
+            tp_price_calc = round(last_middle_bb, price_precision)
+            if current_price >= sl_price_calc:
+                base_return['error'] = f"SL price {sl_price_calc} is at or below entry {current_price} for SHORT"
+                final_signal_str = 'none'
+            elif tp_price_calc >= current_price: # Changed from elif to if for independent check
+                base_return['error'] = f"TP price {tp_price_calc} is at or above entry {current_price} for SHORT"
+                final_signal_str = 'none'
+        else: # Not a full signal
+            if met_buy_conditions >= met_sell_conditions: 
+                 base_return['conditions_met_count'] = met_buy_conditions
+            else:
+                 base_return['conditions_met_count'] = met_sell_conditions
         
-        # Short Entry (only if no long signal)
-        if final_signal == 'none':
-            price_above_upper_bb = current_price > last_upper_bb
-            rsi_overbought = last_rsi_val > 70
-            volume_confirms_short = last_volume_val > last_volume_sma_val # Same volume condition for now
-
-            conditions['price_above_upper_bb'] = price_above_upper_bb
-            conditions['rsi_overbought'] = rsi_overbought
-            conditions['volume_confirms_short'] = volume_confirms_short
-            
-            if price_above_upper_bb and rsi_overbought and volume_confirms_short:
-                final_signal = 'down'
-        
-        base_return['conditions'] = conditions
-        sl_price, tp_price = None, None
-        
-        if final_signal != 'none':
-            price_precision = get_price_precision(symbol)
-            buffer_percentage = 0.001 # 0.1% buffer, adjust as needed
-
-            if final_signal == 'up':
-                sl_price = round(last_lower_bb - (current_price * buffer_percentage), price_precision)
-                tp_price = round(last_middle_bb, price_precision)
-                
-                if current_price <= sl_price:
-                    base_return['error'] = f"SL price {sl_price} is at or above entry {current_price} for LONG"
-                    final_signal = 'none'
-                elif tp_price <= current_price:
-                    base_return['error'] = f"TP price {tp_price} is at or below entry {current_price} for LONG"
-                    final_signal = 'none'
-
-            elif final_signal == 'down':
-                sl_price = round(last_upper_bb + (current_price * buffer_percentage), price_precision)
-                tp_price = round(last_middle_bb, price_precision)
-
-                if current_price >= sl_price:
-                    base_return['error'] = f"SL price {sl_price} is at or below entry {current_price} for SHORT"
-                    final_signal = 'none'
-                elif tp_price >= current_price:
-                    base_return['error'] = f"TP price {tp_price} is at or above entry {current_price} for SHORT"
-                    final_signal = 'none'
-            
-            if final_signal == 'none' and base_return['error']:
-                print(f"Strategy {STRATEGIES[2]} for {symbol}: Signal invalidated due to SL/TP error: {base_return['error']}")
-
-        base_return['signal'] = final_signal
-        base_return['sl_price'] = sl_price if final_signal != 'none' else None
-        base_return['tp_price'] = tp_price if final_signal != 'none' else None
+        base_return['signal'] = final_signal_str
+        if final_signal_str != 'none':
+            base_return['sl_price'] = sl_price_calc
+            base_return['tp_price'] = tp_price_calc
+        else:
+            base_return['sl_price'] = None
+            base_return['tp_price'] = None
+            if base_return['error']: 
+                 print(f"Strategy {STRATEGIES[2]} for {symbol}: Signal invalidated due to SL/TP error: {base_return['error']}")
         
         return base_return
 
     except Exception as e:
         base_return['error'] = f"Exception in strategy_bollinger_band_mean_reversion for {symbol}: {str(e)}"
-        # Consider logging the full traceback here for debugging if needed
-        # import traceback
-        # print(traceback.format_exc())
+        # Ensure all_conditions_status is populated even in case of early exception
+        base_return['all_conditions_status'].update({
+            'price_below_lower_bb': False, 'rsi_oversold': False, 'volume_confirms_long': False,
+            'price_above_upper_bb': False, 'rsi_overbought': False, 'volume_confirms_short': False,
+        })
         return base_return
 
 # --- VWAP Calculation Helper ---
@@ -697,10 +753,16 @@ def calculate_daily_vwap(kl_df_current_day):
 
 def strategy_vwap_breakout_momentum(symbol):
     base_return = {
-        'signal': 'none', 
-        'conditions': {}, 
-        'sl_price': None, 
-        'tp_price': None, 
+        'signal': 'none',
+        'conditions_met_count': 0,
+        'conditions_to_start_wait_threshold': 2,
+        'conditions_for_full_signal_threshold': 3,
+        'all_conditions_status': {
+            'price_above_vwap_2bar_long': False, 'macd_positive_rising': False, 'atr_volatility_confirms_long': False,
+            'price_below_vwap_2bar_short': False, 'macd_negative_falling': False, 'atr_volatility_confirms_short': False,
+        },
+        'sl_price': None,
+        'tp_price': None,
         'error': None,
         'account_risk_percent': 0.01 # Strategy 3 specific risk
     }
@@ -709,7 +771,6 @@ def strategy_vwap_breakout_momentum(symbol):
     now_utc = pd.Timestamp.now(tz='UTC')
     if not (13 <= now_utc.hour <= 17):
         base_return['error'] = "Outside London/NY overlap (13-17 UTC)"
-        # print(f"Strategy 3 ({symbol}): Skipped, {base_return['error']}") # Can be noisy
         return base_return
 
     # Fetch Kline Data for the current day
@@ -720,8 +781,7 @@ def strategy_vwap_breakout_momentum(symbol):
     
     kl_day_df = None
     try:
-        start_of_day_utc = now_utc.normalize() # Gets 00:00:00 of the current UTC day
-        # Fetch 5m klines from the start of the current UTC day up to now
+        start_of_day_utc = now_utc.normalize() 
         raw_klines = client.klines(symbol, '5m', startTime=int(start_of_day_utc.timestamp() * 1000))
         if not raw_klines:
             base_return['error'] = "No kline data returned for the current day"
@@ -738,7 +798,7 @@ def strategy_vwap_breakout_momentum(symbol):
         base_return['error'] = f"Error fetching/processing daily klines for S3 {symbol}: {e}"
         return base_return
 
-    min_data_len_for_indicators = 26 # Max of MACD slow (26) or ATR lookback (14) + some buffer
+    min_data_len_for_indicators = 26 
     if len(kl_day_df) < min_data_len_for_indicators:
         base_return['error'] = f"Insufficient daily kline data for indicators (need {min_data_len_for_indicators}, got {len(kl_day_df)})"
         return base_return
@@ -759,9 +819,8 @@ def strategy_vwap_breakout_momentum(symbol):
             base_return['error'] = "One or more S3 indicators (VWAP, ATR, MACD) are None or empty"
             return base_return
         
-        # Ensure enough data points after indicator calculation
-        min_lookback = 20 # For avg_atr_20
-        if len(vwap_series) < 2 or len(atr_series) < min_lookback or len(macd_hist) < 2 : # Need at least 2 for prev checks, 20 for ATR avg
+        min_lookback = 20 
+        if len(vwap_series) < 2 or len(atr_series) < min_lookback or len(macd_hist) < 2 : 
             base_return['error'] = "S3 indicator series too short after calculation"
             return base_return
 
@@ -782,75 +841,74 @@ def strategy_vwap_breakout_momentum(symbol):
             return base_return
             
         # --- Define Conditions ---
-        conditions = {}
-        final_signal = 'none'
+        base_return['all_conditions_status']['price_above_vwap_2bar_long'] = kl_day_df['Close'].iloc[-1] > last_vwap and kl_day_df['Close'].iloc[-2] > prev_vwap
+        base_return['all_conditions_status']['macd_positive_rising'] = last_macd_hist > 0 and last_macd_hist > prev_macd_hist
+        base_return['all_conditions_status']['atr_volatility_confirms_long'] = last_atr > avg_atr_20
         
-        # Long Entry
-        price_above_vwap_2bar = kl_day_df['Close'].iloc[-1] > last_vwap and kl_day_df['Close'].iloc[-2] > prev_vwap
-        macd_positive_rising = last_macd_hist > 0 and last_macd_hist > prev_macd_hist
-        atr_volatility_confirms = last_atr > avg_atr_20
+        base_return['all_conditions_status']['price_below_vwap_2bar_short'] = kl_day_df['Close'].iloc[-1] < last_vwap and kl_day_df['Close'].iloc[-2] < prev_vwap
+        base_return['all_conditions_status']['macd_negative_falling'] = last_macd_hist < 0 and last_macd_hist < prev_macd_hist
+        # For Strategy 3, atr_volatility_confirms_short is the same as atr_volatility_confirms_long
+        base_return['all_conditions_status']['atr_volatility_confirms_short'] = last_atr > avg_atr_20 
+
+        met_buy_conditions = sum([base_return['all_conditions_status']['price_above_vwap_2bar_long'],
+                                  base_return['all_conditions_status']['macd_positive_rising'],
+                                  base_return['all_conditions_status']['atr_volatility_confirms_long']])
+        met_sell_conditions = sum([base_return['all_conditions_status']['price_below_vwap_2bar_short'],
+                                   base_return['all_conditions_status']['macd_negative_falling'],
+                                   base_return['all_conditions_status']['atr_volatility_confirms_short']])
         
-        conditions['price_above_vwap_2bar_long'] = price_above_vwap_2bar
-        conditions['macd_positive_rising'] = macd_positive_rising
-        conditions['atr_volatility_confirms_long'] = atr_volatility_confirms
+        final_signal_str = 'none'
+        sl_price_calc, tp_price_calc = None, None # Initialize calc variables
+        price_precision = get_price_precision(symbol)
 
-        if price_above_vwap_2bar and macd_positive_rising and atr_volatility_confirms:
-            final_signal = 'up'
-        
-        # Short Entry (only if no long signal)
-        if final_signal == 'none':
-            price_below_vwap_2bar = kl_day_df['Close'].iloc[-1] < last_vwap and kl_day_df['Close'].iloc[-2] < prev_vwap
-            macd_negative_falling = last_macd_hist < 0 and last_macd_hist < prev_macd_hist
-            # atr_volatility_confirms_short is same as atr_volatility_confirms
-            
-            conditions['price_below_vwap_2bar_short'] = price_below_vwap_2bar
-            conditions['macd_negative_falling'] = macd_negative_falling
-            conditions['atr_volatility_confirms_short'] = atr_volatility_confirms # Same condition
+        if met_buy_conditions == base_return['conditions_for_full_signal_threshold']:
+            final_signal_str = 'up'
+            base_return['conditions_met_count'] = met_buy_conditions
+            sl_price_calc = round(last_vwap, price_precision)
+            tp_price_calc = round(current_price + (last_atr * 1.2), price_precision)
+            if current_price <= sl_price_calc: 
+                base_return['error'] = f"S3 SL price {sl_price_calc} is at or above entry {current_price} for LONG"
+                final_signal_str = 'none'
+            elif tp_price_calc <= current_price: 
+                base_return['error'] = f"S3 TP price {tp_price_calc} is at or below entry {current_price} for LONG"
+                final_signal_str = 'none'
 
-            if price_below_vwap_2bar and macd_negative_falling and atr_volatility_confirms:
-                final_signal = 'down'
-        
-        base_return['conditions'] = conditions
-        sl_price, tp_price = None, None
-        
-        if final_signal != 'none':
-            price_precision = get_price_precision(symbol)
+        elif met_sell_conditions == base_return['conditions_for_full_signal_threshold']:
+            final_signal_str = 'down'
+            base_return['conditions_met_count'] = met_sell_conditions
+            sl_price_calc = round(last_vwap, price_precision)
+            tp_price_calc = round(current_price - (last_atr * 1.2), price_precision)
+            if current_price >= sl_price_calc: 
+                base_return['error'] = f"S3 SL price {sl_price_calc} is at or above entry {current_price} for SHORT"
+                final_signal_str = 'none'
+            elif tp_price_calc >= current_price: 
+                base_return['error'] = f"S3 TP price {tp_price_calc} is at or above entry {current_price} for SHORT"
+                final_signal_str = 'none'
+        else: # Not a full signal
+            if met_buy_conditions >= met_sell_conditions:
+                 base_return['conditions_met_count'] = met_buy_conditions
+            else:
+                 base_return['conditions_met_count'] = met_sell_conditions
 
-            if final_signal == 'up':
-                sl_price = round(last_vwap, price_precision)
-                tp_price = round(current_price + (last_atr * 1.2), price_precision)
-                
-                if current_price <= sl_price: # SL is through entry or worse
-                    base_return['error'] = f"S3 SL price {sl_price} is at or above entry {current_price} for LONG"
-                    final_signal = 'none'
-                elif tp_price <= current_price: # TP is at or below entry
-                    base_return['error'] = f"S3 TP price {tp_price} is at or below entry {current_price} for LONG"
-                    final_signal = 'none'
-
-            elif final_signal == 'down':
-                sl_price = round(last_vwap, price_precision)
-                tp_price = round(current_price - (last_atr * 1.2), price_precision)
-
-                if current_price >= sl_price: # SL is through entry or worse
-                    base_return['error'] = f"S3 SL price {sl_price} is at or below entry {current_price} for SHORT"
-                    final_signal = 'none'
-                elif tp_price >= current_price: # TP is at or above entry
-                    base_return['error'] = f"S3 TP price {tp_price} is at or above entry {current_price} for SHORT"
-                    final_signal = 'none'
-            
-            if final_signal == 'none' and base_return['error']:
+        base_return['signal'] = final_signal_str
+        if final_signal_str != 'none':
+            base_return['sl_price'] = sl_price_calc
+            base_return['tp_price'] = tp_price_calc
+        else:
+            base_return['sl_price'] = None
+            base_return['tp_price'] = None
+            if base_return['error']:
                 print(f"Strategy {STRATEGIES[3]} for {symbol}: Signal invalidated due to SL/TP error: {base_return['error']}")
-
-        base_return['signal'] = final_signal
-        base_return['sl_price'] = sl_price if final_signal != 'none' else None
-        base_return['tp_price'] = tp_price if final_signal != 'none' else None
         
         return base_return
 
     except Exception as e:
-        # import traceback # For detailed debugging
-        # print(f"Exception in strategy_vwap_breakout_momentum for {symbol}: {str(e)}\n{traceback.format_exc()}")
         base_return['error'] = f"Exception in S3 {symbol}: {str(e)}"
+        # Ensure all_conditions_status is populated even in case of early exception
+        base_return['all_conditions_status'].update({
+            'price_above_vwap_2bar_long': False, 'macd_positive_rising': False, 'atr_volatility_confirms_long': False,
+            'price_below_vwap_2bar_short': False, 'macd_negative_falling': False, 'atr_volatility_confirms_short': False,
+        })
         return base_return
 
 # --- Pivot Points Calculation Helper ---
@@ -1418,7 +1476,7 @@ def toggle_environment():
 
 def run_bot_logic():
     global bot_running, status_var, client, start_button, stop_button, testnet_radio, mainnet_radio
-    global qty_concurrent_positions, type, leverage, pending_signals, current_price_var # Added current_price_var
+    global qty_concurrent_positions, type, leverage, g_conditional_pending_signals, current_price_var # Changed pending_signals to g_conditional_pending_signals
     global balance_var, positions_text_widget, history_text_widget, activity_status_var
     # Make all strategy-specific trackers global for modification
     global strategy1_active_trade_info, strategy1_cooldown_active, strategy1_last_trade_was_loss
@@ -1462,9 +1520,120 @@ def run_bot_logic():
                 if not bot_running: break
                 continue
 
-            current_balance_msg_for_status = f"Bal: {balance:.2f} USDT."
-            _status_set(current_balance_msg_for_status + " Managing active trades & timeouts...")
+            current_balance_msg_for_status = f"Bal: {balance:.2f} USDT." # Keep this line
+            
+            # --- Manage Active Conditional Pending Signals (Part 2) ---
+            if g_conditional_pending_signals: 
+                _activity_set(f"Managing {len(g_conditional_pending_signals)} conditional signals...")
+                current_time_utc_for_pending_manage = pd.Timestamp.now(tz='UTC')
 
+                for key, item in list(g_conditional_pending_signals.items()):
+                    if not bot_running: break
+                    
+                    symbol = item['symbol']
+                    strategy_id = item['strategy_id'] # This is item['strategy_id'], not current_active_strategy_id
+                    side = item['side']
+                    timestamp = item['timestamp']
+                    conditions_to_start_wait_threshold = item['conditions_to_start_wait_threshold']
+                    conditions_for_full_signal_threshold = item['conditions_for_full_signal_threshold'] # Get from item
+
+                    time_elapsed_seconds = (current_time_utc_for_pending_manage - timestamp).total_seconds()
+
+                    current_strategy_output = {}
+                    if strategy_id == 0: current_strategy_output = scalping_strategy_signal(symbol)
+                    elif strategy_id == 1: current_strategy_output = strategy_ema_supertrend(symbol)
+                    elif strategy_id == 2: current_strategy_output = strategy_bollinger_band_mean_reversion(symbol)
+                    elif strategy_id == 3: current_strategy_output = strategy_vwap_breakout_momentum(symbol)
+                    # Strategy 4 is not part of g_conditional_pending_signals yet
+                    
+                    current_met_count = 0
+                    if current_strategy_output and current_strategy_output.get('all_conditions_status'):
+                        all_conds = current_strategy_output['all_conditions_status']
+                        if strategy_id == 0:
+                            if side == 'up': current_met_count = all_conds.get('num_buy_conditions_met', 0)
+                            elif side == 'down': current_met_count = all_conds.get('num_sell_conditions_met', 0)
+                        elif strategy_id == 1:
+                            if side == 'up': relevant_keys = ['ema_cross_up', 'st_green', 'rsi_long_ok']
+                            else: relevant_keys = ['ema_cross_down', 'st_red', 'rsi_short_ok']
+                            current_met_count = sum(1 for k, v in all_conds.items() if k in relevant_keys and v)
+                        elif strategy_id == 2:
+                            if side == 'up': relevant_keys = ['price_below_lower_bb', 'rsi_oversold', 'volume_confirms_long']
+                            else: relevant_keys = ['price_above_upper_bb', 'rsi_overbought', 'volume_confirms_short']
+                            current_met_count = sum(1 for k, v in all_conds.items() if k in relevant_keys and v)
+                        elif strategy_id == 3:
+                            if side == 'up': relevant_keys = ['price_above_vwap_2bar_long', 'macd_positive_rising', 'atr_volatility_confirms_long']
+                            else: relevant_keys = ['price_below_vwap_2bar_short', 'macd_negative_falling', 'atr_volatility_confirms_short']
+                            current_met_count = sum(1 for k, v in all_conds.items() if k in relevant_keys and v)
+
+                    if key in g_conditional_pending_signals: # Check if not deleted by another condition
+                        g_conditional_pending_signals[key]['current_conditions_met_count'] = current_met_count
+                        if current_strategy_output: # Ensure output exists
+                            g_conditional_pending_signals[key]['last_evaluated_all_conditions_status'] = current_strategy_output.get('all_conditions_status', {}).copy()
+                            g_conditional_pending_signals[key]['potential_sl_price'] = current_strategy_output.get('sl_price')
+                            g_conditional_pending_signals[key]['potential_tp_price'] = current_strategy_output.get('tp_price')
+                            if strategy_id == 0: # Update threshold for S0 as it's dynamic
+                                g_conditional_pending_signals[key]['conditions_for_full_signal_threshold'] = current_strategy_output.get('conditions_for_full_signal_threshold', conditions_for_full_signal_threshold)
+                                conditions_for_full_signal_threshold = g_conditional_pending_signals[key]['conditions_for_full_signal_threshold'] # update local var for current iteration
+
+                    remaining_seconds = max(0, 300 - time_elapsed_seconds)
+                    
+                    # Enhanced UI Update for pending signals
+                    if strategy_id == 0: # Check item's strategy_id here
+                        live_signal_is_true = current_strategy_output.get('signal') != 'none' if current_strategy_output else False
+                        s0_pending_msg = (f"S0 Pending: Confirming {symbol} ({side}) - {int(remaining_seconds)}s left. "
+                                          f"Last eval: {'TRUE' if live_signal_is_true else 'FALSE'}.")
+                        _activity_set(s0_pending_msg)
+                    else:
+                        # Generic message for other strategies if they use this pending system
+                        _activity_set(f"S{strategy_id} {symbol} ({side}): {current_met_count}/{conditions_for_full_signal_threshold} cond. {int(remaining_seconds)}s left.")
+
+                    if root and root.winfo_exists() and current_strategy_output:
+                         root.after(0, update_conditions_display_content, symbol, current_strategy_output.get('all_conditions_status'), current_strategy_output.get('error'))
+
+                    if current_met_count >= conditions_for_full_signal_threshold and not current_strategy_output.get('error'):
+                        print(f"CONFIRMED: {STRATEGIES[strategy_id]} for {symbol} ({side}). Met {current_met_count}/{conditions_for_full_signal_threshold}.")
+                        _status_set(f"Ordering {symbol} ({side}) via {STRATEGIES[strategy_id]}...")
+                        set_mode(symbol, type); sleep(0.1)
+                        set_leverage(symbol, leverage); sleep(0.1)
+                        
+                        sl_to_use = g_conditional_pending_signals[key]['potential_sl_price'] # Use the latest from re-eval
+                        tp_to_use = g_conditional_pending_signals[key]['potential_tp_price'] # Use the latest from re-eval
+                        risk_percent = current_strategy_output.get('account_risk_percent')
+                        
+                        entry_price_for_tracking = None
+                        try: entry_price_for_tracking = float(client.ticker_price(symbol)['price'])
+                        except Exception as e_track_price: print(f"Error fetching entry price for tracking {symbol}: {e_track_price}")
+
+                        open_order(symbol, side, strategy_sl=sl_to_use, strategy_tp=tp_to_use, strategy_account_risk_percent=risk_percent)
+                        
+                        trade_entry_ts = pd.Timestamp.now(tz='UTC')
+                        if strategy_id == 1: strategy1_active_trade_info.update({'symbol': symbol, 'entry_time': trade_entry_ts, 'entry_price': entry_price_for_tracking, 'side': side})
+                        elif strategy_id == 2: strategy2_active_trades.append({'symbol': symbol, 'entry_time': trade_entry_ts, 'entry_price': entry_price_for_tracking, 'side': side})
+                        elif strategy_id == 3: strategy3_active_trade_info.update({'symbol': symbol, 'entry_time': trade_entry_ts, 'entry_price': entry_price_for_tracking, 'side': side, 'initial_atr_for_profit_target': current_strategy_output.get('last_atr'), 'vwap_trail_active': False })
+                        
+                        if key in g_conditional_pending_signals: del g_conditional_pending_signals[key]
+                        sleep(1); continue
+
+                    if time_elapsed_seconds >= 300:
+                        print(f"TIMEOUT: {STRATEGIES[strategy_id]} for {symbol} ({side}). Did not confirm. Met {current_met_count}/{conditions_for_full_signal_threshold}.")
+                        _activity_set(f"TIMEOUT: S{strategy_id} for {symbol} ({side}).")
+                        if key in g_conditional_pending_signals: del g_conditional_pending_signals[key]
+                        continue
+
+                    if current_met_count < conditions_to_start_wait_threshold:
+                        print(f"KILLED (Degraded): {STRATEGIES[strategy_id]} for {symbol} ({side}). Conditions fell to {current_met_count}/{conditions_to_start_wait_threshold}.")
+                        _activity_set(f"KILLED (Degraded): S{strategy_id} for {symbol} ({side}).")
+                        if key in g_conditional_pending_signals: del g_conditional_pending_signals[key]
+                        continue
+                    
+                    if current_strategy_output.get('error'):
+                        print(f"KILLED (Error on re-eval): {STRATEGIES[strategy_id]} for {symbol} ({side}). Error: {current_strategy_output['error']}")
+                        _activity_set(f"KILLED (Error): S{strategy_id} for {symbol} ({side}).")
+                        if key in g_conditional_pending_signals: del g_conditional_pending_signals[key]
+                        continue
+                    sleep(0.1) 
+            
+            _status_set(current_balance_msg_for_status + " Managing active trades & timeouts...")
             # --- Active Trade Management & Timeouts (BEFORE checking for new trades) ---
             now_utc_for_timeout = pd.Timestamp.now(tz='UTC')
 
@@ -1584,188 +1753,278 @@ def run_bot_logic():
                 if strategy4_active_trade_info['symbol'] is None: can_open_new_trade_overall = True; _activity_set(activity_msg_prefix + "Ready. Seeking.")
                 else: _activity_set(activity_msg_prefix + f"Trade active on {strategy4_active_trade_info['symbol']}. Monitoring.")
             
-            # --- Manage Pending Signals (Strategy 0 - Scalping) ---
-            if ACTIVE_STRATEGY_ID == 0: # Only apply this logic for scalping strategy
-                current_time_utc = pd.Timestamp.now(tz='UTC')
-                for symbol, signal_info in list(pending_signals.items()): # Iterate over a copy
+            # --- Manage Pending Signals (Part 2) ---
+            # (This loop was inserted in the previous step and is assumed to be correct)
+            if g_conditional_pending_signals: 
+                _activity_set(f"Managing {len(g_conditional_pending_signals)} conditional signals...")
+                current_time_utc_for_pending_manage = pd.Timestamp.now(tz='UTC')
+                for key, item in list(g_conditional_pending_signals.items()):
                     if not bot_running: break
-                    _activity_set(f"S0 Pending: Checking {symbol} ({signal_info['side']})...")
-                    
-                    try:
-                        # Fetch real-time price for the pending symbol
-                        ticker = client.ticker_price(symbol) # 'symbol' is the key from pending_signals
-                        latest_price = float(ticker['price'])
-                        if root and root.winfo_exists() and current_price_var:
-                            root.after(0, lambda s=symbol, p=latest_price: current_price_var.set(f"Pending: {s} - Price: {p:.{get_price_precision(s)}f}"))
-                    except Exception as e_price_fetch:
-                        print(f"Error fetching price for pending {symbol} for display: {e_price_fetch}")
-                        if root and root.winfo_exists() and current_price_var:
-                            root.after(0, lambda s=symbol: current_price_var.set(f"Pending: {s} - Price: Error"))
-
-                    # Re-evaluate signal for the pending symbol
-                    live_signal_data = scalping_strategy_signal(symbol)
-                    live_signal_is_true = live_signal_data.get('signal', 'none') == signal_info['side']
-
-                    pending_signals[symbol]['last_signal_eval_true'] = live_signal_is_true
-                    pending_signals[symbol]['last_check_time'] = current_time_utc
-                    
-                    if root and root.winfo_exists():
-                         root.after(0, update_conditions_display_content, symbol, live_signal_data.get('conditions'), live_signal_data.get('error'))
-                    sleep(0.1) # Small delay after API call for klines in scalping_strategy_signal
-
-                    if (current_time_utc - signal_info['timestamp']).total_seconds() >= 300: # 5 minutes passed
-                        if live_signal_is_true:
-                            # Check if we can open a new position before ordering
-                            active_positions_data_before_order = get_active_positions_data()
-                            open_pos_count_before_order = len([p for p in active_positions_data_before_order if float(p.get('positionAmt',0)) != 0]) if active_positions_data_before_order else 0
-                            if open_pos_count_before_order < qty_concurrent_positions:
-                                _status_set(f"S0 Pending: 5min confirmed for {symbol} ({signal_info['side']}). Ordering...")
-                                print(f"S0 Pending: Signal for {symbol} ({signal_info['side']}) confirmed after 5 mins. Conditions met: {live_signal_data.get('conditions')}. Opening order.")
-                                
-                                set_mode(symbol, type); sleep(0.1) 
-                                set_leverage(symbol, leverage); sleep(0.1) 
-                                open_order(symbol, signal_info['side']) # Scalping uses global SL/TP %
-                            else:
-                                _status_set(f"S0 Pending: {symbol} ({signal_info['side']}) confirmed but max positions ({qty_concurrent_positions}) reached. Not ordering.")
-                                print(f"S0 Pending: Signal for {symbol} ({signal_info['side']}) confirmed, but max positions reached. Not opening order.")
-                        else:
-                            _status_set(f"S0 Pending: {symbol} ({signal_info['side']}) timed out & conditions NOT met. Signal killed.")
-                            print(f"S0 Pending: Signal for {symbol} ({signal_info['side']}) killed after 5 mins. Conditions no longer met. Last check: {live_signal_data.get('conditions')}")
-                        
-                        del pending_signals[symbol] 
-                    else:
-                        status_msg = f"S0 Pending: {symbol} ({signal_info['side']}) waiting. {int((current_time_utc - signal_info['timestamp']).total_seconds())}s passed. Last eval: {'TRUE' if live_signal_is_true else 'FALSE'}."
-                        _activity_set(status_msg)
-                        # print(status_msg) # This might be too verbose for console
-                if not bot_running: break
-
-
-            if can_open_new_trade_overall or (ACTIVE_STRATEGY_ID == 0 and any(pending_signals)): # For S0, also scan if there are pending signals to update their status
+                    symbol = item['symbol']
+                    strategy_id = item['strategy_id'] 
+                    side = item['side']
+                    timestamp = item['timestamp']
+                    conditions_to_start_wait_threshold = item['conditions_to_start_wait_threshold']
+                    conditions_for_full_signal_threshold = item['conditions_for_full_signal_threshold']
+                    time_elapsed_seconds = (current_time_utc_for_pending_manage - timestamp).total_seconds()
+                    current_strategy_output = {}
+                    if strategy_id == 0: current_strategy_output = scalping_strategy_signal(symbol)
+                    elif strategy_id == 1: current_strategy_output = strategy_ema_supertrend(symbol)
+                    elif strategy_id == 2: current_strategy_output = strategy_bollinger_band_mean_reversion(symbol)
+                    elif strategy_id == 3: current_strategy_output = strategy_vwap_breakout_momentum(symbol)
+                    current_met_count = 0
+                    if current_strategy_output and current_strategy_output.get('all_conditions_status'):
+                        all_conds = current_strategy_output['all_conditions_status']
+                        if strategy_id == 0:
+                            if side == 'up': current_met_count = all_conds.get('num_buy_conditions_met', 0)
+                            elif side == 'down': current_met_count = all_conds.get('num_sell_conditions_met', 0)
+                        elif strategy_id == 1:
+                            if side == 'up': relevant_keys = ['ema_cross_up', 'st_green', 'rsi_long_ok']
+                            else: relevant_keys = ['ema_cross_down', 'st_red', 'rsi_short_ok']
+                            current_met_count = sum(1 for k, v in all_conds.items() if k in relevant_keys and v)
+                        elif strategy_id == 2:
+                            if side == 'up': relevant_keys = ['price_below_lower_bb', 'rsi_oversold', 'volume_confirms_long']
+                            else: relevant_keys = ['price_above_upper_bb', 'rsi_overbought', 'volume_confirms_short']
+                            current_met_count = sum(1 for k, v in all_conds.items() if k in relevant_keys and v)
+                        elif strategy_id == 3:
+                            if side == 'up': relevant_keys = ['price_above_vwap_2bar_long', 'macd_positive_rising', 'atr_volatility_confirms_long']
+                            else: relevant_keys = ['price_below_vwap_2bar_short', 'macd_negative_falling', 'atr_volatility_confirms_short']
+                            current_met_count = sum(1 for k, v in all_conds.items() if k in relevant_keys and v)
+                    if key in g_conditional_pending_signals:
+                        g_conditional_pending_signals[key]['current_conditions_met_count'] = current_met_count
+                        if current_strategy_output:
+                            g_conditional_pending_signals[key]['last_evaluated_all_conditions_status'] = current_strategy_output.get('all_conditions_status', {}).copy()
+                            g_conditional_pending_signals[key]['potential_sl_price'] = current_strategy_output.get('sl_price')
+                            g_conditional_pending_signals[key]['potential_tp_price'] = current_strategy_output.get('tp_price')
+                            if strategy_id == 0:
+                                 g_conditional_pending_signals[key]['conditions_for_full_signal_threshold'] = current_strategy_output.get('conditions_for_full_signal_threshold', conditions_for_full_signal_threshold)
+                                 conditions_for_full_signal_threshold = g_conditional_pending_signals[key]['conditions_for_full_signal_threshold']
+                    remaining_seconds = max(0, 300 - time_elapsed_seconds)
+                    _activity_set(f"S{strategy_id} {symbol} ({side}): {current_met_count}/{conditions_for_full_signal_threshold} cond. {int(remaining_seconds)}s left.")
+                    if root and root.winfo_exists() and current_strategy_output:
+                         root.after(0, update_conditions_display_content, symbol, current_strategy_output.get('all_conditions_status'), current_strategy_output.get('error'))
+                    if current_met_count >= conditions_for_full_signal_threshold and not current_strategy_output.get('error'):
+                        print(f"CONFIRMED: {STRATEGIES[strategy_id]} for {symbol} ({side}). Met {current_met_count}/{conditions_for_full_signal_threshold}.")
+                        _status_set(f"Ordering {symbol} ({side}) via {STRATEGIES[strategy_id]}...")
+                        set_mode(symbol, type); sleep(0.1)
+                        set_leverage(symbol, leverage); sleep(0.1)
+                        sl_to_use = g_conditional_pending_signals[key]['potential_sl_price']
+                        tp_to_use = g_conditional_pending_signals[key]['potential_tp_price']
+                        risk_percent = current_strategy_output.get('account_risk_percent')
+                        entry_price_for_tracking = None
+                        try: entry_price_for_tracking = float(client.ticker_price(symbol)['price'])
+                        except Exception as e_track_price: print(f"Error fetching entry price for tracking {symbol}: {e_track_price}")
+                        open_order(symbol, side, strategy_sl=sl_to_use, strategy_tp=tp_to_use, strategy_account_risk_percent=risk_percent)
+                        trade_entry_ts = pd.Timestamp.now(tz='UTC')
+                        if strategy_id == 1: strategy1_active_trade_info.update({'symbol': symbol, 'entry_time': trade_entry_ts, 'entry_price': entry_price_for_tracking, 'side': side})
+                        elif strategy_id == 2: strategy2_active_trades.append({'symbol': symbol, 'entry_time': trade_entry_ts, 'entry_price': entry_price_for_tracking, 'side': side})
+                        elif strategy_id == 3: strategy3_active_trade_info.update({'symbol': symbol, 'entry_time': trade_entry_ts, 'entry_price': entry_price_for_tracking, 'side': side, 'initial_atr_for_profit_target': current_strategy_output.get('last_atr'), 'vwap_trail_active': False })
+                        if key in g_conditional_pending_signals: del g_conditional_pending_signals[key]
+                        sleep(1); continue
+                    if time_elapsed_seconds >= 300:
+                        print(f"TIMEOUT: {STRATEGIES[strategy_id]} for {symbol} ({side}). Did not confirm. Met {current_met_count}/{conditions_for_full_signal_threshold}.")
+                        _activity_set(f"TIMEOUT: S{strategy_id} for {symbol} ({side}).")
+                        if key in g_conditional_pending_signals: del g_conditional_pending_signals[key]
+                        continue
+                    if current_met_count < conditions_to_start_wait_threshold:
+                        print(f"KILLED (Degraded): {STRATEGIES[strategy_id]} for {symbol} ({side}). Conditions fell to {current_met_count}/{conditions_to_start_wait_threshold}.")
+                        _activity_set(f"KILLED (Degraded): S{strategy_id} for {symbol} ({side}).")
+                        if key in g_conditional_pending_signals: del g_conditional_pending_signals[key]
+                        continue
+                    if current_strategy_output.get('error'):
+                        print(f"KILLED (Error on re-eval): {STRATEGIES[strategy_id]} for {symbol} ({side}). Error: {current_strategy_output['error']}")
+                        _activity_set(f"KILLED (Error): S{strategy_id} for {symbol} ({side}).")
+                        if key in g_conditional_pending_signals: del g_conditional_pending_signals[key]
+                        continue
+                    sleep(0.1) 
+            
+            _status_set(current_balance_msg_for_status + " Managing active trades & timeouts...") # This line should be after pending mgmt
+            # --- Active Trade Management & Timeouts (BEFORE checking for new trades) ---
+            now_utc_for_timeout = pd.Timestamp.now(tz='UTC')
+            
+            # --- Signal Detection and Pending State Initiation (Part 1) ---
+            if can_open_new_trade_overall : 
                 symbols_to_check = TARGET_SYMBOLS 
                 for sym_to_check in symbols_to_check:
                     if not bot_running: break
                     
-                    # Initial activity set for scanning this symbol. Will be updated based on logic below.
-                    _activity_set(f"S{current_active_strategy_id}: Scanning {sym_to_check}...")
-
+                    current_active_strategy_id = ACTIVE_STRATEGY_ID 
+                    
+                    # Price fetching should happen before strategy-specific logic if it's common
+                    _activity_set(f"S{current_active_strategy_id}: Scanning {sym_to_check}...") # General scanning message
+                    latest_price = None
                     try:
-                        # Fetch real-time price
                         ticker = client.ticker_price(sym_to_check)
                         latest_price = float(ticker['price'])
                         if root and root.winfo_exists() and current_price_var:
-                            root.after(0, lambda s=sym_to_check, p=latest_price: current_price_var.set(f"Scanning: {s} - Price: {p:.{get_price_precision(s)}f}")) # Format price precision
+                            root.after(0, lambda s=sym_to_check, p=latest_price: current_price_var.set(f"Scanning: {s} - Price: {p:.{get_price_precision(s)}f}")) 
                     except Exception as e_price_fetch:
                         print(f"Error fetching price for {sym_to_check} for display: {e_price_fetch}")
-                        if root and root.winfo_exists() and current_price_var: # Update with error or last known
+                        if root and root.winfo_exists() and current_price_var: 
                             root.after(0, lambda s=sym_to_check: current_price_var.set(f"Scanning: {s} - Price: Error"))
-                    
-                    # Skip if symbol already has an active trade for certain strategies
-                    if current_active_strategy_id == 0 and sym_to_check in open_position_symbols and sym_to_check not in pending_signals: # S0 can scan pending symbols again
-                        sleep(0.05); continue 
-                    if current_active_strategy_id == 2 and any(t['symbol'] == sym_to_check for t in strategy2_active_trades):
-                         sleep(0.05); continue
-                    
-                    signal_data = {}
-                    if current_active_strategy_id == 0: signal_data = scalping_strategy_signal(sym_to_check)
-                    elif current_active_strategy_id == 1: signal_data = strategy_ema_supertrend(sym_to_check)
-                    elif current_active_strategy_id == 2: signal_data = strategy_bollinger_band_mean_reversion(sym_to_check)
-                    elif current_active_strategy_id == 3: signal_data = strategy_vwap_breakout_momentum(sym_to_check)
-                    elif current_active_strategy_id == 4: signal_data = strategy_macd_divergence_pivot(sym_to_check)
-                    else:
-                        signal_data = {'signal': 'none', 'error': f"Unknown strategy ID: {current_active_strategy_id}"}
-                        print(signal_data['error'])
-                    
-                    current_signal = signal_data.get('signal', 'none')
-                    # Update GUI conditions display for this symbol if it's not pending S0 (S0 pending updates its GUI in its own loop)
-                    if not (ACTIVE_STRATEGY_ID == 0 and sym_to_check in pending_signals):
+                        sleep(0.1); continue # Skip this symbol if price fetch fails
+
+                    # Strategy-specific handling
+                    if current_active_strategy_id == 4:
+                        if strategy4_active_trade_info['symbol'] is not None:
+                            _activity_set(f"S4: Already in an active trade with {strategy4_active_trade_info['symbol']}. Skipping scan for {sym_to_check}")
+                            sleep(0.05)
+                            continue 
+
+                        _activity_set(f"S4: Scanning {sym_to_check}...") # More specific S4 scan message
+                        
+                        signal_data_s4 = strategy_macd_divergence_pivot(sym_to_check)
+                        current_signal_s4 = signal_data_s4.get('signal', 'none')
+                        error_message_s4 = signal_data_s4.get('error')
+
                         if root and root.winfo_exists():
-                            root.after(0, update_conditions_display_content, sym_to_check, signal_data.get('conditions'), signal_data.get('error'))
-                    
-                    if not bot_running: break
+                            root.after(0, update_conditions_display_content, sym_to_check, signal_data_s4.get('conditions'), error_message_s4)
 
-                    if ACTIVE_STRATEGY_ID == 0:
-                        if current_signal in ['up', 'down']:
-                            if sym_to_check not in pending_signals:
-                                # Only add to pending if we are below max concurrent positions limit for actual open trades
-                                # This prevents filling up pending_signals if we can't trade them soon.
-                                active_positions_data_check = get_active_positions_data()
-                                open_pos_count_check = len([p for p in active_positions_data_check if float(p.get('positionAmt',0)) != 0]) if active_positions_data_check else 0
-                                if open_pos_count_check < qty_concurrent_positions:
-                                    _status_set(f"S0 New: Initial signal {current_signal.upper()} for {sym_to_check}. Starting 5min wait.")
-                                    print(f"S0 New: Initial signal {current_signal.upper()} for {sym_to_check}. Adding to pending_signals. Conditions: {signal_data.get('conditions')}")
-                                    pending_signals[sym_to_check] = {
-                                        'timestamp': pd.Timestamp.now(tz='UTC'),
-                                        'side': current_signal,
-                                        'last_signal_eval_true': True, 
-                                        'last_check_time': pd.Timestamp.now(tz='UTC')
-                                    }
-                                else:
-                                    _activity_set(f"S0 Scan: Signal for {sym_to_check} but max positions {qty_concurrent_positions} open. Not adding to pending.")
-                                    print(f"S0 Scan: Signal for {sym_to_check} but max positions {qty_concurrent_positions} open. Not adding to pending.")
-                            else: # Symbol is already pending
-                                # Update its status based on current scan. The main manager also does this.
-                                pending_signals[sym_to_check]['last_signal_eval_true'] = True 
-                                pending_signals[sym_to_check]['last_check_time'] = pd.Timestamp.now(tz='UTC')
-                                _activity_set(f"S0 Scan: {sym_to_check} ({pending_signals[sym_to_check]['side']}) re-confirmed. Manager will handle.")
-                                # print(f"S0 Scan: {sym_to_check} is already in pending_signals and re-confirmed. Manager will handle.")
-                        
-                        else: # current_signal is 'none' for sym_to_check (Strategy 0)
-                            if sym_to_check in pending_signals:
-                                pending_signals[sym_to_check]['last_signal_eval_true'] = False
-                                pending_signals[sym_to_check]['last_check_time'] = pd.Timestamp.now(tz='UTC')
-                                _activity_set(f"S0 Scan: {sym_to_check} ({pending_signals[sym_to_check]['side']}) conditions became FALSE.")
-                                # print(f"S0 Scan: {sym_to_check} was pending, but conditions are now false. Updated pending_signals.")
-                            # else: # Not pending and no signal, normal for S0
-                            #    _activity_set(f"S0: No signal: {sym_to_check}. Next...") # Generic message handles this
-                        # For S0, orders are not opened here. Loop continues.
-                    
-                    elif current_signal in ['up', 'down']: # For strategies OTHER than 0
-                        _status_set(f"{current_signal.upper()} signal for {sym_to_check} (S{current_active_strategy_id}). Ordering...");
-                        set_mode(sym_to_check, type); sleep(0.1)
-                        set_leverage(sym_to_check, leverage); sleep(0.1)
-                        
-                        current_price_for_entry = None
-                        try: current_price_for_entry = float(client.ticker_price(sym_to_check)['price'])
-                        except Exception as e_price: print(f"Could not fetch entry price for {sym_to_check} for tracking: {e_price}")
+                        if error_message_s4:
+                            print(f"Error from Strategy 4 for {sym_to_check}: {error_message_s4}")
+                            sleep(0.1)
+                            continue
 
-                        strategy_risk = signal_data.get('account_risk_percent')
+                        if current_signal_s4 in ['up', 'down']:
+                            print(f"Strategy 4: {current_signal_s4.upper()} signal for {sym_to_check}. Ordering immediately...")
+                            _status_set(f"S4: {current_signal_s4.upper()} signal for {sym_to_check}. Ordering...")
+                            
+                            set_mode(sym_to_check, type)
+                            sleep(0.1)
+                            set_leverage(sym_to_check, leverage)
+                            sleep(0.1)
 
-                        open_order(sym_to_check, current_signal, 
-                                   strategy_sl=signal_data.get('sl_price'), 
-                                   strategy_tp=signal_data.get('tp_price'),
-                                   strategy_account_risk_percent=strategy_risk)
+                            sl_price_s4 = signal_data_s4.get('sl_price')
+                            tp_price_s4 = signal_data_s4.get('tp_price')
+                            strategy_risk_s4 = signal_data_s4.get('account_risk_percent')
+                            
+                            entry_price_for_tracking_s4 = None # Use latest_price if direct pre-order fetch fails
+                            try:
+                                entry_price_for_tracking_s4 = float(client.ticker_price(sym_to_check)['price'])
+                            except Exception as e_price_s4:
+                                print(f"S4: Error fetching entry price for tracking {sym_to_check}: {e_price_s4}. Using last known price: {latest_price}")
+                                entry_price_for_tracking_s4 = latest_price # Fallback to previously fetched price
+                            
+                            if entry_price_for_tracking_s4 is None: # Still None, means initial fetch also failed
+                                print(f"S4: Critical error - no price available for {sym_to_check} to place order. Skipping.")
+                                continue
+
+
+                            open_order(sym_to_check, current_signal_s4, 
+                                       strategy_sl=sl_price_s4, 
+                                       strategy_tp=tp_price_s4, 
+                                       strategy_account_risk_percent=strategy_risk_s4)
+                            
+                            trade_entry_timestamp_s4 = pd.Timestamp.now(tz='UTC')
+                            strategy4_active_trade_info.update({
+                                'symbol': sym_to_check, 
+                                'entry_time': trade_entry_timestamp_s4, 
+                                'entry_price': entry_price_for_tracking_s4,
+                                'side': current_signal_s4, 
+                                'divergence_price_point': signal_data_s4.get('divergence_price_point')
+                            })
+                            _activity_set(f"S4: Trade initiated for {sym_to_check}. Monitoring.")
+                            sleep(3) 
+                            break # Strategy 4 handles one trade at a time
+                        else:
+                            _activity_set(f"S4: No signal for {sym_to_check}. Next...")
+                        sleep(0.1) # After processing S4 for a symbol if no break
+
+                    elif current_active_strategy_id in [0, 1, 2, 3]:
+                        if (sym_to_check, current_active_strategy_id) in g_conditional_pending_signals:
+                            continue # Already pending for this strategy (S0-S3)
                         
-                        trade_entry_timestamp = pd.Timestamp.now(tz='UTC')
+                        # Skip if symbol already has an active trade for certain single-trade strategies (S1, S3)
+                        # S2 allows multiple trades on different symbols, S0 allows up to overall limit.
+                        if current_active_strategy_id == 1 and strategy1_active_trade_info['symbol'] is not None:
+                            sleep(0.05); continue 
+                        if current_active_strategy_id == 2 and any(t['symbol'] == sym_to_check for t in strategy2_active_trades):
+                             sleep(0.05); continue
+                        if current_active_strategy_id == 3 and strategy3_active_trade_info['symbol'] is not None:
+                             sleep(0.05); continue
                         
-                        # Strategy-specific post-order updates (for non-S0 strategies)
-                        if current_active_strategy_id == 1:
-                            strategy1_active_trade_info.update({'symbol': sym_to_check, 'entry_time': trade_entry_timestamp, 'entry_price': current_price_for_entry, 'side': current_signal})
-                            _activity_set(f"S1: Trade initiated for {sym_to_check}. Monitoring."); break 
-                        elif current_active_strategy_id == 2:
-                            strategy2_active_trades.append({'symbol': sym_to_check, 'entry_time': trade_entry_timestamp, 'entry_price': current_price_for_entry, 'side': current_signal})
-                            _activity_set(f"S2: Trade for {sym_to_check} initiated. Active S2: {len(strategy2_active_trades)}.")
-                            if len(strategy2_active_trades) >= 2 : break 
-                        elif current_active_strategy_id == 3:
-                            strategy3_active_trade_info.update({'symbol': sym_to_check, 'entry_time': trade_entry_timestamp, 'entry_price': current_price_for_entry, 'side': current_signal, 'initial_atr_for_profit_target': signal_data.get('last_atr'), 'vwap_trail_active': False })
-                            _activity_set(f"S3: Trade initiated for {sym_to_check}. Monitoring."); break
-                        elif current_active_strategy_id == 4:
-                            strategy4_active_trade_info.update({'symbol': sym_to_check, 'entry_time': trade_entry_timestamp, 'entry_price': current_price_for_entry, 'side': current_signal, 'divergence_price_point': signal_data.get('divergence_price_point')})
-                            _activity_set(f"S4: Trade initiated for {sym_to_check}. Monitoring."); break
+                        strategy_output = {}
+                        if current_active_strategy_id == 0: strategy_output = scalping_strategy_signal(sym_to_check)
+                        elif current_active_strategy_id == 1: strategy_output = strategy_ema_supertrend(sym_to_check)
+                        elif current_active_strategy_id == 2: strategy_output = strategy_bollinger_band_mean_reversion(sym_to_check)
+                        elif current_active_strategy_id == 3: strategy_output = strategy_vwap_breakout_momentum(sym_to_check)
                         
-                        # No break for S0 here as orders are not placed in this loop.
-                        sleep(3) # Sleep after non-S0 order placement
-                    
-                    # This handles "No signal" for S0 as well if not caught by specific S0 logic above
-                    if current_signal == 'none':
-                         _activity_set(f"S{current_active_strategy_id}: No signal: {sym_to_check}. Next...")
-                    sleep(0.1) # General sleep after processing each symbol
+                        if not strategy_output: 
+                            sleep(0.1); continue
+
+                        if root and root.winfo_exists():
+                            root.after(0, update_conditions_display_content, sym_to_check, strategy_output.get('all_conditions_status'), strategy_output.get('error'))
+
+                        if strategy_output.get('error'):
+                            print(f"Error from {STRATEGIES[current_active_strategy_id]} for {sym_to_check}: {strategy_output['error']}")
+                            sleep(0.1); continue
+
+                        side_to_consider = None
+                        actual_met_count = 0
+                        if current_active_strategy_id == 0:
+                            buy_met_s0 = strategy_output['all_conditions_status'].get('num_buy_conditions_met', 0)
+                            sell_met_s0 = strategy_output['all_conditions_status'].get('num_sell_conditions_met', 0)
+                            wait_threshold_s0 = strategy_output.get('conditions_to_start_wait_threshold', 2)
+                            if buy_met_s0 >= wait_threshold_s0 and buy_met_s0 >= sell_met_s0 :
+                                side_to_consider = 'up'; actual_met_count = buy_met_s0
+                            elif sell_met_s0 >= wait_threshold_s0:
+                                side_to_consider = 'down'; actual_met_count = sell_met_s0
+                        else: 
+                            temp_buy_met, temp_sell_met = 0, 0
+                            if current_active_strategy_id == 1:
+                                temp_buy_met = sum(1 for k,v in strategy_output['all_conditions_status'].items() if k in ['ema_cross_up', 'st_green', 'rsi_long_ok'] and v)
+                                temp_sell_met = sum(1 for k,v in strategy_output['all_conditions_status'].items() if k in ['ema_cross_down', 'st_red', 'rsi_short_ok'] and v)
+                            elif current_active_strategy_id == 2:
+                                temp_buy_met = sum(1 for k,v in strategy_output['all_conditions_status'].items() if k in ['price_below_lower_bb', 'rsi_oversold', 'volume_confirms_long'] and v)
+                                temp_sell_met = sum(1 for k,v in strategy_output['all_conditions_status'].items() if k in ['price_above_upper_bb', 'rsi_overbought', 'volume_confirms_short'] and v)
+                            elif current_active_strategy_id == 3:
+                                temp_buy_met = sum(1 for k,v in strategy_output['all_conditions_status'].items() if k in ['price_above_vwap_2bar_long', 'macd_positive_rising', 'atr_volatility_confirms_long'] and v)
+                                temp_sell_met = sum(1 for k,v in strategy_output['all_conditions_status'].items() if k in ['price_below_vwap_2bar_short', 'macd_negative_falling', 'atr_volatility_confirms_short'] and v)
+
+                            if temp_buy_met >= strategy_output.get('conditions_to_start_wait_threshold', 2) and temp_buy_met >= temp_sell_met:
+                                side_to_consider = 'up'; actual_met_count = temp_buy_met
+                            elif temp_sell_met >= strategy_output.get('conditions_to_start_wait_threshold', 2):
+                                side_to_consider = 'down'; actual_met_count = temp_sell_met
+                            if strategy_output.get('signal') in ['up', 'down']: # Full signal overrides partial
+                                side_to_consider = strategy_output['signal']
+                                actual_met_count = strategy_output.get('conditions_met_count', 0)
+
+                        if side_to_consider and actual_met_count >= strategy_output.get('conditions_to_start_wait_threshold',2):
+                            pending_key = (sym_to_check, current_active_strategy_id)
+                            full_signal_thresh = strategy_output['conditions_for_full_signal_threshold']
+                            g_conditional_pending_signals[pending_key] = {
+                                'symbol': sym_to_check, 'strategy_id': current_active_strategy_id,
+                                'side': side_to_consider, 'timestamp': pd.Timestamp.now(tz='UTC'),
+                                'current_conditions_met_count': actual_met_count,
+                                'conditions_to_start_wait_threshold': strategy_output['conditions_to_start_wait_threshold'],
+                                'conditions_for_full_signal_threshold': full_signal_thresh,
+                                'all_conditions_status_at_pending_start': strategy_output['all_conditions_status'].copy(),
+                                'last_evaluated_all_conditions_status': strategy_output['all_conditions_status'].copy(),
+                                'entry_price_at_pending_start': latest_price,
+                                'potential_sl_price': strategy_output.get('sl_price'), 
+                                'potential_tp_price': strategy_output.get('tp_price')  
+                            }
+                            if current_active_strategy_id == 0:
+                                ui_msg = f"S0 New: {sym_to_check} ({side_to_consider}) added. 5min confirmation window started."
+                                print(ui_msg); _activity_set(ui_msg)
+                            else:
+                                log_msg = (f"S{current_active_strategy_id} {sym_to_check} ({side_to_consider}): "
+                                           f"{actual_met_count}/{full_signal_thresh} cond. met. Monitoring.")
+                                print(log_msg); _activity_set(log_msg)
+                        sleep(0.1) 
+                    else: # Unknown strategy
+                        _activity_set(f"Unknown strategy ID {current_active_strategy_id}. Skipping scan for {sym_to_check}.")
+                        sleep(0.1)
+                        continue
             
             if not bot_running: break
             
             if strategy1_cooldown_active and strategy1_last_trade_was_loss:
-                print("Strategy 1: Cooldown was active. Resetting cooldown status for next full scan cycle.")
-                strategy1_cooldown_active = False
+                # print("Strategy 1: Cooldown was active. Resetting cooldown status for next full scan cycle.")
+                # strategy1_cooldown_active = False
+                # Cooldown is now persistent until manually reset or bot restarts.
                 # strategy1_last_trade_was_loss = False # Optional: reset this flag too, or keep it for longer-term tracking
+                pass # Explicitly do nothing here, cooldown remains active.
             
             loop_count +=1
             wait_message = f"{current_balance_msg_for_status} Scan cycle {loop_count} done. Waiting..."
@@ -1979,11 +2238,7 @@ def handle_strategy_checkbox_select(selected_id):
 # --- Main Application Window ---
 if __name__ == "__main__":
     root = tk.Tk(); root.title("Binance Scalping Bot")
-    # global status_var, current_env_var, start_button, stop_button, testnet_radio, mainnet_radio, balance_var, positions_text_widget, history_text_widget # This line caused SyntaxError
-    global account_risk_percent_var, tp_percent_var, sl_percent_var, leverage_var, qty_concurrent_positions_var, local_high_low_lookback_var, margin_type_var, target_symbols_var, activity_status_var, conditions_text_widget, selected_strategy_var, current_price_var # Added current_price_var
-    global account_risk_percent_entry, tp_percent_entry, sl_percent_entry, leverage_entry, qty_concurrent_positions_entry, local_high_low_lookback_entry, margin_type_isolated_radio, margin_type_cross_radio, target_symbols_entry, strategy_radio_buttons
-    global params_widgets
-    
+
     current_price_var = None # Will be initialized after root Tk()
 
     status_var = tk.StringVar(value="Welcome! Select environment."); current_env_var = tk.StringVar(value=current_env); balance_var = tk.StringVar(value="N/A")
