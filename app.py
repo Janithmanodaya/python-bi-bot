@@ -102,9 +102,12 @@ strategy1_active_trade_info_default = {'symbol': None, 'entry_time': None, 'entr
 strategy3_active_trade_info_default = {'symbol': None, 'entry_time': None, 'entry_price': None, 'side': None, 'initial_atr_for_profit_target': None, 'vwap_trail_active': False}
 strategy4_active_trade_info_default = {'symbol': None, 'entry_time': None, 'entry_price': None, 'side': None, 'divergence_price_point': None}
 
+pending_signals = {} # To store {'symbol': {'timestamp': pd.Timestamp, 'side': 'up'/'down', 'last_signal_eval_true': True/False, 'initial_conditions_met_count': 0, 'last_check_time': pd.Timestamp}}
 
 TARGET_SYMBOLS = ["BTCUSDT", "ETHUSDT", "USDTUSDT", "XRPUSDT", "BNBUSDT", "SOLUSDT", "USDCUSDT", "DOGEUSDT", "TRXUSDT", "ADAUSDT"]
 ACCOUNT_RISK_PERCENT = 0.02
+SCALPING_REQUIRED_BUY_CONDITIONS = 3
+SCALPING_REQUIRED_SELL_CONDITIONS = 3
 TP_PERCENT = 0.01
 SL_PERCENT = 0.005
 leverage = 5
@@ -329,7 +332,7 @@ def klines(symbol):
     return None
 
 def scalping_strategy_signal(symbol):
-    global LOCAL_HIGH_LOW_LOOKBACK_PERIOD
+    global LOCAL_HIGH_LOW_LOOKBACK_PERIOD, SCALPING_REQUIRED_BUY_CONDITIONS, SCALPING_REQUIRED_SELL_CONDITIONS
     
     default_conditions = {
         'ema_cross_up': False, 'rsi_long_ok': False, 'supertrend_green': False,
@@ -390,18 +393,27 @@ def scalping_strategy_signal(symbol):
         supertrend_is_red = last_supertrend == 'red'
         price_broke_low = current_price < recent_low
 
+        buy_conditions_met = [ema_crossed_up, rsi_valid_long, supertrend_is_green, volume_is_strong, price_broke_high]
+        sell_conditions_met = [ema_crossed_down, rsi_valid_short, supertrend_is_red, volume_is_strong, price_broke_low]
+        
+        num_buy_conditions_true = sum(buy_conditions_met)
+        num_sell_conditions_true = sum(sell_conditions_met)
+
         conditions_status = {
             'ema_cross_up': ema_crossed_up, 'rsi_long_ok': rsi_valid_long, 
             'supertrend_green': supertrend_is_green, 'volume_spike': volume_is_strong, 
             'price_breakout_high': price_broke_high,
             'ema_cross_down': ema_crossed_down, 'rsi_short_ok': rsi_valid_short, 
-            'supertrend_red': supertrend_is_red, 'price_breakout_low': price_broke_low
+            'supertrend_red': supertrend_is_red, 'price_breakout_low': price_broke_low,
+            # Optionally, add the counts to the status for debugging or display
+            'num_buy_conditions_met': num_buy_conditions_true,
+            'num_sell_conditions_met': num_sell_conditions_true
         }
 
         final_signal_str = 'none'
-        if ema_crossed_up and rsi_valid_long and supertrend_is_green and volume_is_strong and price_broke_high:
+        if num_buy_conditions_true >= SCALPING_REQUIRED_BUY_CONDITIONS:
             final_signal_str = 'up'
-        elif ema_crossed_down and rsi_valid_short and supertrend_is_red and volume_is_strong and price_broke_low:
+        elif num_sell_conditions_true >= SCALPING_REQUIRED_SELL_CONDITIONS:
             final_signal_str = 'down'
         
         return {'signal': final_signal_str, 'conditions': conditions_status, 'error': None}
@@ -1406,7 +1418,7 @@ def toggle_environment():
 
 def run_bot_logic():
     global bot_running, status_var, client, start_button, stop_button, testnet_radio, mainnet_radio
-    global qty_concurrent_positions, type, leverage
+    global qty_concurrent_positions, type, leverage, pending_signals, current_price_var # Added current_price_var
     global balance_var, positions_text_widget, history_text_widget, activity_status_var
     # Make all strategy-specific trackers global for modification
     global strategy1_active_trade_info, strategy1_cooldown_active, strategy1_last_trade_was_loss
@@ -1547,8 +1559,16 @@ def run_bot_logic():
             
             activity_msg_prefix = f"S{current_active_strategy_id}: "
             if current_active_strategy_id == 0:
+                # For strategy 0, can_open_new_trade_overall depends on actual open positions,
+                # as pending signals don't count towards qty_concurrent_positions yet.
                 if len(open_position_symbols) < qty_concurrent_positions: can_open_new_trade_overall = True
-                _activity_set(activity_msg_prefix + (f"Max {qty_concurrent_positions}. Open: {len(open_position_symbols)}. " + ("Seeking." if can_open_new_trade_overall else "Monitoring.")))
+                else: can_open_new_trade_overall = False # Explicitly false if max positions are open
+                
+                # Activity message for S0 should also consider pending signals
+                pending_s0_count = len([s for s, info in pending_signals.items() if info.get('side')]) # Count valid pending signals
+                _activity_set(activity_msg_prefix + 
+                              (f"MaxOpen {qty_concurrent_positions}. ActualOpen: {len(open_position_symbols)}. Pending: {pending_s0_count}. " + 
+                               ("Seeking/Managing." if can_open_new_trade_overall or pending_s0_count > 0 else "Monitoring.")))
             elif current_active_strategy_id == 1:
                 if strategy1_active_trade_info['symbol'] is None:
                     if strategy1_cooldown_active: _activity_set(activity_msg_prefix + "Cooldown active.")
@@ -1564,14 +1584,83 @@ def run_bot_logic():
                 if strategy4_active_trade_info['symbol'] is None: can_open_new_trade_overall = True; _activity_set(activity_msg_prefix + "Ready. Seeking.")
                 else: _activity_set(activity_msg_prefix + f"Trade active on {strategy4_active_trade_info['symbol']}. Monitoring.")
             
+            # --- Manage Pending Signals (Strategy 0 - Scalping) ---
+            if ACTIVE_STRATEGY_ID == 0: # Only apply this logic for scalping strategy
+                current_time_utc = pd.Timestamp.now(tz='UTC')
+                for symbol, signal_info in list(pending_signals.items()): # Iterate over a copy
+                    if not bot_running: break
+                    _activity_set(f"S0 Pending: Checking {symbol} ({signal_info['side']})...")
+                    
+                    try:
+                        # Fetch real-time price for the pending symbol
+                        ticker = client.ticker_price(symbol) # 'symbol' is the key from pending_signals
+                        latest_price = float(ticker['price'])
+                        if root and root.winfo_exists() and current_price_var:
+                            root.after(0, lambda s=symbol, p=latest_price: current_price_var.set(f"Pending: {s} - Price: {p:.{get_price_precision(s)}f}"))
+                    except Exception as e_price_fetch:
+                        print(f"Error fetching price for pending {symbol} for display: {e_price_fetch}")
+                        if root and root.winfo_exists() and current_price_var:
+                            root.after(0, lambda s=symbol: current_price_var.set(f"Pending: {s} - Price: Error"))
 
-            if can_open_new_trade_overall:
+                    # Re-evaluate signal for the pending symbol
+                    live_signal_data = scalping_strategy_signal(symbol)
+                    live_signal_is_true = live_signal_data.get('signal', 'none') == signal_info['side']
+
+                    pending_signals[symbol]['last_signal_eval_true'] = live_signal_is_true
+                    pending_signals[symbol]['last_check_time'] = current_time_utc
+                    
+                    if root and root.winfo_exists():
+                         root.after(0, update_conditions_display_content, symbol, live_signal_data.get('conditions'), live_signal_data.get('error'))
+                    sleep(0.1) # Small delay after API call for klines in scalping_strategy_signal
+
+                    if (current_time_utc - signal_info['timestamp']).total_seconds() >= 300: # 5 minutes passed
+                        if live_signal_is_true:
+                            # Check if we can open a new position before ordering
+                            active_positions_data_before_order = get_active_positions_data()
+                            open_pos_count_before_order = len([p for p in active_positions_data_before_order if float(p.get('positionAmt',0)) != 0]) if active_positions_data_before_order else 0
+                            if open_pos_count_before_order < qty_concurrent_positions:
+                                _status_set(f"S0 Pending: 5min confirmed for {symbol} ({signal_info['side']}). Ordering...")
+                                print(f"S0 Pending: Signal for {symbol} ({signal_info['side']}) confirmed after 5 mins. Conditions met: {live_signal_data.get('conditions')}. Opening order.")
+                                
+                                set_mode(symbol, type); sleep(0.1) 
+                                set_leverage(symbol, leverage); sleep(0.1) 
+                                open_order(symbol, signal_info['side']) # Scalping uses global SL/TP %
+                            else:
+                                _status_set(f"S0 Pending: {symbol} ({signal_info['side']}) confirmed but max positions ({qty_concurrent_positions}) reached. Not ordering.")
+                                print(f"S0 Pending: Signal for {symbol} ({signal_info['side']}) confirmed, but max positions reached. Not opening order.")
+                        else:
+                            _status_set(f"S0 Pending: {symbol} ({signal_info['side']}) timed out & conditions NOT met. Signal killed.")
+                            print(f"S0 Pending: Signal for {symbol} ({signal_info['side']}) killed after 5 mins. Conditions no longer met. Last check: {live_signal_data.get('conditions')}")
+                        
+                        del pending_signals[symbol] 
+                    else:
+                        status_msg = f"S0 Pending: {symbol} ({signal_info['side']}) waiting. {int((current_time_utc - signal_info['timestamp']).total_seconds())}s passed. Last eval: {'TRUE' if live_signal_is_true else 'FALSE'}."
+                        _activity_set(status_msg)
+                        # print(status_msg) # This might be too verbose for console
+                if not bot_running: break
+
+
+            if can_open_new_trade_overall or (ACTIVE_STRATEGY_ID == 0 and any(pending_signals)): # For S0, also scan if there are pending signals to update their status
                 symbols_to_check = TARGET_SYMBOLS 
                 for sym_to_check in symbols_to_check:
                     if not bot_running: break
-                    _activity_set(f"S{current_active_strategy_id}: Scanning {sym_to_check}...")
                     
-                    if current_active_strategy_id == 0 and sym_to_check in open_position_symbols:
+                    # Initial activity set for scanning this symbol. Will be updated based on logic below.
+                    _activity_set(f"S{current_active_strategy_id}: Scanning {sym_to_check}...")
+
+                    try:
+                        # Fetch real-time price
+                        ticker = client.ticker_price(sym_to_check)
+                        latest_price = float(ticker['price'])
+                        if root and root.winfo_exists() and current_price_var:
+                            root.after(0, lambda s=sym_to_check, p=latest_price: current_price_var.set(f"Scanning: {s} - Price: {p:.{get_price_precision(s)}f}")) # Format price precision
+                    except Exception as e_price_fetch:
+                        print(f"Error fetching price for {sym_to_check} for display: {e_price_fetch}")
+                        if root and root.winfo_exists() and current_price_var: # Update with error or last known
+                            root.after(0, lambda s=sym_to_check: current_price_var.set(f"Scanning: {s} - Price: Error"))
+                    
+                    # Skip if symbol already has an active trade for certain strategies
+                    if current_active_strategy_id == 0 and sym_to_check in open_position_symbols and sym_to_check not in pending_signals: # S0 can scan pending symbols again
                         sleep(0.05); continue 
                     if current_active_strategy_id == 2 and any(t['symbol'] == sym_to_check for t in strategy2_active_trades):
                          sleep(0.05); continue
@@ -1587,11 +1676,50 @@ def run_bot_logic():
                         print(signal_data['error'])
                     
                     current_signal = signal_data.get('signal', 'none')
-                    if root and root.winfo_exists():
-                        root.after(0, update_conditions_display_content, sym_to_check, signal_data.get('conditions'), signal_data.get('error'))
+                    # Update GUI conditions display for this symbol if it's not pending S0 (S0 pending updates its GUI in its own loop)
+                    if not (ACTIVE_STRATEGY_ID == 0 and sym_to_check in pending_signals):
+                        if root and root.winfo_exists():
+                            root.after(0, update_conditions_display_content, sym_to_check, signal_data.get('conditions'), signal_data.get('error'))
+                    
                     if not bot_running: break
 
-                    if current_signal in ['up', 'down']:
+                    if ACTIVE_STRATEGY_ID == 0:
+                        if current_signal in ['up', 'down']:
+                            if sym_to_check not in pending_signals:
+                                # Only add to pending if we are below max concurrent positions limit for actual open trades
+                                # This prevents filling up pending_signals if we can't trade them soon.
+                                active_positions_data_check = get_active_positions_data()
+                                open_pos_count_check = len([p for p in active_positions_data_check if float(p.get('positionAmt',0)) != 0]) if active_positions_data_check else 0
+                                if open_pos_count_check < qty_concurrent_positions:
+                                    _status_set(f"S0 New: Initial signal {current_signal.upper()} for {sym_to_check}. Starting 5min wait.")
+                                    print(f"S0 New: Initial signal {current_signal.upper()} for {sym_to_check}. Adding to pending_signals. Conditions: {signal_data.get('conditions')}")
+                                    pending_signals[sym_to_check] = {
+                                        'timestamp': pd.Timestamp.now(tz='UTC'),
+                                        'side': current_signal,
+                                        'last_signal_eval_true': True, 
+                                        'last_check_time': pd.Timestamp.now(tz='UTC')
+                                    }
+                                else:
+                                    _activity_set(f"S0 Scan: Signal for {sym_to_check} but max positions {qty_concurrent_positions} open. Not adding to pending.")
+                                    print(f"S0 Scan: Signal for {sym_to_check} but max positions {qty_concurrent_positions} open. Not adding to pending.")
+                            else: # Symbol is already pending
+                                # Update its status based on current scan. The main manager also does this.
+                                pending_signals[sym_to_check]['last_signal_eval_true'] = True 
+                                pending_signals[sym_to_check]['last_check_time'] = pd.Timestamp.now(tz='UTC')
+                                _activity_set(f"S0 Scan: {sym_to_check} ({pending_signals[sym_to_check]['side']}) re-confirmed. Manager will handle.")
+                                # print(f"S0 Scan: {sym_to_check} is already in pending_signals and re-confirmed. Manager will handle.")
+                        
+                        else: # current_signal is 'none' for sym_to_check (Strategy 0)
+                            if sym_to_check in pending_signals:
+                                pending_signals[sym_to_check]['last_signal_eval_true'] = False
+                                pending_signals[sym_to_check]['last_check_time'] = pd.Timestamp.now(tz='UTC')
+                                _activity_set(f"S0 Scan: {sym_to_check} ({pending_signals[sym_to_check]['side']}) conditions became FALSE.")
+                                # print(f"S0 Scan: {sym_to_check} was pending, but conditions are now false. Updated pending_signals.")
+                            # else: # Not pending and no signal, normal for S0
+                            #    _activity_set(f"S0: No signal: {sym_to_check}. Next...") # Generic message handles this
+                        # For S0, orders are not opened here. Loop continues.
+                    
+                    elif current_signal in ['up', 'down']: # For strategies OTHER than 0
                         _status_set(f"{current_signal.upper()} signal for {sym_to_check} (S{current_active_strategy_id}). Ordering...");
                         set_mode(sym_to_check, type); sleep(0.1)
                         set_leverage(sym_to_check, leverage); sleep(0.1)
@@ -1600,15 +1728,16 @@ def run_bot_logic():
                         try: current_price_for_entry = float(client.ticker_price(sym_to_check)['price'])
                         except Exception as e_price: print(f"Could not fetch entry price for {sym_to_check} for tracking: {e_price}")
 
-                        strategy_risk = signal_data.get('account_risk_percent') # Get strategy-specific risk
+                        strategy_risk = signal_data.get('account_risk_percent')
 
                         open_order(sym_to_check, current_signal, 
                                    strategy_sl=signal_data.get('sl_price'), 
                                    strategy_tp=signal_data.get('tp_price'),
-                                   strategy_account_risk_percent=strategy_risk) # Pass it to open_order
+                                   strategy_account_risk_percent=strategy_risk)
                         
                         trade_entry_timestamp = pd.Timestamp.now(tz='UTC')
                         
+                        # Strategy-specific post-order updates (for non-S0 strategies)
                         if current_active_strategy_id == 1:
                             strategy1_active_trade_info.update({'symbol': sym_to_check, 'entry_time': trade_entry_timestamp, 'entry_price': current_price_for_entry, 'side': current_signal})
                             _activity_set(f"S1: Trade initiated for {sym_to_check}. Monitoring."); break 
@@ -1623,15 +1752,13 @@ def run_bot_logic():
                             strategy4_active_trade_info.update({'symbol': sym_to_check, 'entry_time': trade_entry_timestamp, 'entry_price': current_price_for_entry, 'side': current_signal, 'divergence_price_point': signal_data.get('divergence_price_point')})
                             _activity_set(f"S4: Trade initiated for {sym_to_check}. Monitoring."); break
                         
-                        if current_active_strategy_id == 0:
-                            active_positions_data_after_order = get_active_positions_data() 
-                            open_pos_count_after_order = len([p for p in active_positions_data_after_order if float(p.get('positionAmt',0)) != 0]) if active_positions_data_after_order else 0
-                            if open_pos_count_after_order >= qty_concurrent_positions:
-                                print(f"S0: Reached max concurrent positions ({qty_concurrent_positions}). Pausing scan."); break
-                        sleep(3)
-                    else: 
+                        # No break for S0 here as orders are not placed in this loop.
+                        sleep(3) # Sleep after non-S0 order placement
+                    
+                    # This handles "No signal" for S0 as well if not caught by specific S0 logic above
+                    if current_signal == 'none':
                          _activity_set(f"S{current_active_strategy_id}: No signal: {sym_to_check}. Next...")
-                         sleep(0.1)
+                    sleep(0.1) # General sleep after processing each symbol
             
             if not bot_running: break
             
@@ -1667,6 +1794,8 @@ def run_bot_logic():
             continue
 
     _activity_set("Bot Idle")
+    if root and root.winfo_exists() and current_price_var:
+        root.after(0, lambda: current_price_var.set("Scanning: N/A - Price: N/A"))
     if root and root.winfo_exists():
         root.after(0, update_conditions_display_content, "Bot Idle", None, "Bot stopped.")
     print("Bot logic thread stopped.")
@@ -1765,9 +1894,12 @@ def apply_settings():
         return False
 
 def start_bot():
-    global bot_running, bot_thread, status_var, client, start_button, stop_button, testnet_radio, mainnet_radio, conditions_text_widget
+    global bot_running, bot_thread, status_var, client, start_button, stop_button, testnet_radio, mainnet_radio, conditions_text_widget, current_price_var
     _status_set = lambda msg: status_var.set(msg) if status_var and root and root.winfo_exists() else None
     
+    if root and root.winfo_exists() and current_price_var:
+        current_price_var.set("Starting... Price: N/A")
+
     if not apply_settings(): # This will show its own error messages
         _status_set("Bot not started. Please correct settings.")
         if root and root.winfo_exists(): root.after(0, update_conditions_display_content, "Settings Error", None, "Correct settings before starting.")
@@ -1798,13 +1930,17 @@ def start_bot():
     bot_thread = threading.Thread(target=run_bot_logic, daemon=True); bot_thread.start()
 
 def stop_bot():
-    global bot_running, bot_thread, status_var, start_button, stop_button, testnet_radio, mainnet_radio, activity_status_var, conditions_text_widget
+    global bot_running, bot_thread, status_var, start_button, stop_button, testnet_radio, mainnet_radio, activity_status_var, conditions_text_widget, current_price_var
     _status_set = lambda msg: status_var.set(msg) if status_var and root and root.winfo_exists() else None
     _activity_set = lambda msg: activity_status_var.set(msg) if activity_status_var and root and root.winfo_exists() else None
 
+    if root and root.winfo_exists() and current_price_var:
+        current_price_var.set("Stopping... Price: N/A")
+
     if not bot_running and (bot_thread is None or not bot_thread.is_alive()):
         _status_set("Bot is not running.")
-        _activity_set("Bot Idle") 
+        _activity_set("Bot Idle")
+        if root and root.winfo_exists() and current_price_var: current_price_var.set("Scanning: N/A - Price: N/A")
         if root and root.winfo_exists(): root.after(0, update_conditions_display_content, "Bot Idle", None, "Bot is not running.")
         if start_button: start_button.config(state=tk.NORMAL)
         if stop_button: stop_button.config(state=tk.DISABLED)
@@ -1844,9 +1980,11 @@ def handle_strategy_checkbox_select(selected_id):
 if __name__ == "__main__":
     root = tk.Tk(); root.title("Binance Scalping Bot")
     # global status_var, current_env_var, start_button, stop_button, testnet_radio, mainnet_radio, balance_var, positions_text_widget, history_text_widget # This line caused SyntaxError
-    global account_risk_percent_var, tp_percent_var, sl_percent_var, leverage_var, qty_concurrent_positions_var, local_high_low_lookback_var, margin_type_var, target_symbols_var, activity_status_var, conditions_text_widget, selected_strategy_var
+    global account_risk_percent_var, tp_percent_var, sl_percent_var, leverage_var, qty_concurrent_positions_var, local_high_low_lookback_var, margin_type_var, target_symbols_var, activity_status_var, conditions_text_widget, selected_strategy_var, current_price_var # Added current_price_var
     global account_risk_percent_entry, tp_percent_entry, sl_percent_entry, leverage_entry, qty_concurrent_positions_entry, local_high_low_lookback_entry, margin_type_isolated_radio, margin_type_cross_radio, target_symbols_entry, strategy_radio_buttons
     global params_widgets
+    
+    current_price_var = None # Will be initialized after root Tk()
 
     status_var = tk.StringVar(value="Welcome! Select environment."); current_env_var = tk.StringVar(value=current_env); balance_var = tk.StringVar(value="N/A")
     activity_status_var = tk.StringVar(value="Bot Idle") # Initialize activity status
@@ -1969,6 +2107,13 @@ if __name__ == "__main__":
     activity_display_frame.pack(pady=(2,2), padx=5, fill="x")
     ttk.Label(activity_display_frame, text="Current Activity:").pack(side=tk.LEFT, padx=(0,5))
     ttk.Label(activity_display_frame, textvariable=activity_status_var).pack(side=tk.LEFT)
+
+    # Real-time Price Display Frame
+    price_display_frame = ttk.Frame(data_frame)
+    price_display_frame.pack(pady=(2,2), padx=5, fill="x")
+    current_price_var = tk.StringVar(value="Scanning: N/A - Price: N/A") # Initialize here
+    price_label = ttk.Label(price_display_frame, textvariable=current_price_var)
+    price_label.pack(side=tk.LEFT)
 
     balance_display_frame = ttk.Frame(data_frame); balance_display_frame.pack(pady=(5,2), padx=5, fill="x")
     ttk.Label(balance_display_frame, text="Account Balance:").pack(side=tk.LEFT, padx=(0,5))
