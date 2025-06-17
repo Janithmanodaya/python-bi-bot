@@ -54,6 +54,9 @@ target_symbols_var = None # For Target Symbols CSV
 activity_status_var = None # For bot activity display
 selected_strategy_var = None # For strategy selection
 
+# GUI Variables for Strategy Checkboxes
+strategy_checkbox_vars = {}
+
 # Entry widgets (to be made global for enabling/disabling)
 account_risk_percent_entry = None
 tp_percent_entry = None
@@ -76,11 +79,30 @@ BINANCE_TESTNET_URL = "https://testnet.binancefuture.com"
 # Global Configuration Variables
 STRATEGIES = {
     0: "Original Scalping",
-    1: "EMA Cross + SuperTrend"
-    # Placeholder for more strategies
+    1: "EMA Cross + SuperTrend",
+    2: "Bollinger Band Mean-Reversion",
+    3: "VWAP Breakout Momentum",
+    4: "MACD Divergence + Pivot-Point"
 }
 ACTIVE_STRATEGY_ID = 0 # Default to original
+
+# Strategy-specific state variables
+strategy1_cooldown_active = False # For EMA Cross + SuperTrend: True if cooling down after a loss
+strategy1_last_trade_was_loss = False # Tracks if the last trade for strategy 1 was a loss
+# Removed 'entry_candle_klines_count' from S1 info, will rely on dynamic kline fetching for timeout
 strategy1_active_trade_info = {'symbol': None, 'entry_time': None, 'entry_price': None, 'position_qty': 0, 'side': None, 'sl_order_id': None, 'tp_order_id': None}
+
+strategy2_active_trades = [] # For Bollinger Bands: List of dicts, e.g., [{'symbol': 'BTCUSDT', 'entry_time': ...}, ...]
+
+strategy3_active_trade_info = {'symbol': None, 'entry_time': None, 'entry_price': None, 'side': None, 'initial_atr_for_profit_target': None, 'vwap_trail_active': False}
+strategy4_active_trade_info = {'symbol': None, 'entry_time': None, 'entry_price': None, 'side': None, 'divergence_price_point': None}
+
+# Default reset structures for strategy-specific info
+strategy1_active_trade_info_default = {'symbol': None, 'entry_time': None, 'entry_price': None, 'position_qty': 0, 'side': None, 'sl_order_id': None, 'tp_order_id': None}
+strategy3_active_trade_info_default = {'symbol': None, 'entry_time': None, 'entry_price': None, 'side': None, 'initial_atr_for_profit_target': None, 'vwap_trail_active': False}
+strategy4_active_trade_info_default = {'symbol': None, 'entry_time': None, 'entry_price': None, 'side': None, 'divergence_price_point': None}
+
+
 TARGET_SYMBOLS = ["BTCUSDT", "ETHUSDT", "USDTUSDT", "XRPUSDT", "BNBUSDT", "SOLUSDT", "USDCUSDT", "DOGEUSDT", "TRXUSDT", "ADAUSDT"]
 ACCOUNT_RISK_PERCENT = 0.02
 TP_PERCENT = 0.01
@@ -394,7 +416,21 @@ def strategy_ema_supertrend(symbol):
         'ema_cross_up': False, 'st_green': False, 'rsi_long_ok': False,
         'ema_cross_down': False, 'st_red': False, 'rsi_short_ok': False,
     }
-    base_return = {'signal': 'none', 'conditions': default_conditions, 'sl_price': None, 'tp_price': None, 'error': None}
+    base_return = {
+        'signal': 'none',
+        'conditions': default_conditions,
+        'sl_price': None,
+        'tp_price': None,
+        'error': None,
+        'account_risk_percent': 0.01 # Strategy 1 specific risk
+    }
+
+    global strategy1_cooldown_active
+    if strategy1_cooldown_active:
+        print(f"Strategy 1 ({symbol}): Cooldown active, skipping signal generation.")
+        # The reset of strategy1_cooldown_active will be handled in run_bot_logic or a dedicated cooldown management function.
+        base_return['error'] = "Cooldown active after loss"
+        return base_return
 
     kl = klines(symbol) # Default 5m interval
     if kl is None or len(kl) < 21: # Need enough for EMAs and SuperTrend lookback
@@ -493,6 +529,522 @@ def strategy_ema_supertrend(symbol):
         base_return['error'] = f"Exception in strategy_ema_supertrend: {str(e)}"
         return base_return
 
+def strategy_bollinger_band_mean_reversion(symbol):
+    global strategy2_active_trades # Used to check concurrent trade limit
+
+    base_return = {
+        'signal': 'none',
+        'conditions': {},
+        'sl_price': None,
+        'tp_price': None,
+        'error': None,
+        'account_risk_percent': 0.008 # Strategy 2 specific risk
+    }
+
+    # Max 2 Concurrent Trades Check for this strategy
+    if len(strategy2_active_trades) >= 2:
+        base_return['error'] = "Max 2 concurrent S2 trades reached"
+        # Optional: Check if this specific symbol is already in strategy2_active_trades
+        # for trade in strategy2_active_trades:
+        #     if trade['symbol'] == symbol:
+        #         base_return['error'] = f"S2 trade already active for {symbol}"
+        #         return base_return
+        if base_return['error'] == "Max 2 concurrent S2 trades reached": # Only return if global limit hit
+             print(f"Strategy 2 ({symbol}): Skipped due to max concurrent trade limit (2).")
+             return base_return
+
+
+    kl = klines(symbol) # Default 5m interval
+    min_data_len = 20 # For BB and Volume SMA
+    if kl is None or len(kl) < min_data_len:
+        base_return['error'] = f"Insufficient kline data (need at least {min_data_len} candles)"
+        return base_return
+
+    try:
+        # Calculate Indicators
+        bb_indicator = ta.volatility.BollingerBands(close=kl['Close'], window=20, window_dev=2)
+        rsi_indicator = ta.momentum.RSIIndicator(close=kl['Close'], window=14)
+
+        upper_bb = bb_indicator.bollinger_hband()
+        lower_bb = bb_indicator.bollinger_lband()
+        middle_bb = bb_indicator.bollinger_mavg()
+        rsi = rsi_indicator.rsi()
+        volume_sma = kl['Volume'].rolling(window=20).mean()
+
+        if any(x is None for x in [upper_bb, lower_bb, middle_bb, rsi, volume_sma]) or \
+           any(x.empty for x in [upper_bb, lower_bb, middle_bb, rsi, volume_sma]):
+            base_return['error'] = "One or more core indicators (BB, RSI, Vol SMA) are None or empty"
+            return base_return
+
+        if len(upper_bb) < 1 or len(lower_bb) < 1 or len(middle_bb) < 1 or len(rsi) < 1 or len(volume_sma.dropna()) < 1:
+            base_return['error'] = "Indicator series too short after calculation"
+            return base_return
+
+        # Extract latest values
+        current_price = kl['Close'].iloc[-1]
+        last_upper_bb = upper_bb.iloc[-1]
+        last_lower_bb = lower_bb.iloc[-1]
+        last_middle_bb = middle_bb.iloc[-1]
+        last_rsi_val = rsi.iloc[-1]
+        last_volume_val = kl['Volume'].iloc[-1]
+        last_volume_sma_val = volume_sma.iloc[-1] # This can be NaN if volume_sma window > available data points for it
+
+        if any(pd.isna(v) for v in [current_price, last_upper_bb, last_lower_bb, last_middle_bb, last_rsi_val, last_volume_val]) or pd.isna(last_volume_sma_val):
+            base_return['error'] = "NaN value in critical indicator or price data for BB strategy"
+            return base_return
+
+        # --- Define Conditions ---
+        conditions = {}
+        final_signal = 'none'
+
+        # Long Entry
+        price_below_lower_bb = current_price < last_lower_bb
+        rsi_oversold = last_rsi_val < 30
+        volume_confirms_long = last_volume_val > last_volume_sma_val
+
+        conditions['price_below_lower_bb'] = price_below_lower_bb
+        conditions['rsi_oversold'] = rsi_oversold
+        conditions['volume_confirms_long'] = volume_confirms_long
+
+        if price_below_lower_bb and rsi_oversold and volume_confirms_long:
+            final_signal = 'up'
+
+        # Short Entry (only if no long signal)
+        if final_signal == 'none':
+            price_above_upper_bb = current_price > last_upper_bb
+            rsi_overbought = last_rsi_val > 70
+            volume_confirms_short = last_volume_val > last_volume_sma_val # Same volume condition for now
+
+            conditions['price_above_upper_bb'] = price_above_upper_bb
+            conditions['rsi_overbought'] = rsi_overbought
+            conditions['volume_confirms_short'] = volume_confirms_short
+
+            if price_above_upper_bb and rsi_overbought and volume_confirms_short:
+                final_signal = 'down'
+
+        base_return['conditions'] = conditions
+        sl_price, tp_price = None, None
+
+        if final_signal != 'none':
+            price_precision = get_price_precision(symbol)
+            buffer_percentage = 0.001 # 0.1% buffer, adjust as needed
+
+            if final_signal == 'up':
+                sl_price = round(last_lower_bb - (current_price * buffer_percentage), price_precision)
+                tp_price = round(last_middle_bb, price_precision)
+
+                if current_price <= sl_price:
+                    base_return['error'] = f"SL price {sl_price} is at or above entry {current_price} for LONG"
+                    final_signal = 'none'
+                elif tp_price <= current_price:
+                    base_return['error'] = f"TP price {tp_price} is at or below entry {current_price} for LONG"
+                    final_signal = 'none'
+
+            elif final_signal == 'down':
+                sl_price = round(last_upper_bb + (current_price * buffer_percentage), price_precision)
+                tp_price = round(last_middle_bb, price_precision)
+
+                if current_price >= sl_price:
+                    base_return['error'] = f"SL price {sl_price} is at or below entry {current_price} for SHORT"
+                    final_signal = 'none'
+                elif tp_price >= current_price:
+                    base_return['error'] = f"TP price {tp_price} is at or above entry {current_price} for SHORT"
+                    final_signal = 'none'
+
+            if final_signal == 'none' and base_return['error']:
+                print(f"Strategy {STRATEGIES[2]} for {symbol}: Signal invalidated due to SL/TP error: {base_return['error']}")
+
+        base_return['signal'] = final_signal
+        base_return['sl_price'] = sl_price if final_signal != 'none' else None
+        base_return['tp_price'] = tp_price if final_signal != 'none' else None
+
+        return base_return
+
+    except Exception as e:
+        base_return['error'] = f"Exception in strategy_bollinger_band_mean_reversion for {symbol}: {str(e)}"
+        # Consider logging the full traceback here for debugging if needed
+        # import traceback
+        # print(traceback.format_exc())
+        return base_return
+
+# --- VWAP Calculation Helper ---
+def calculate_daily_vwap(kl_df_current_day):
+    if not all(col in kl_df_current_day.columns for col in ['High', 'Low', 'Close', 'Volume']):
+        print("Error: VWAP calculation requires 'High', 'Low', 'Close', 'Volume' columns.")
+        return None
+    if kl_df_current_day.empty or kl_df_current_day['Volume'].sum() == 0:
+        # Return a series of NaNs of the same length if volume is zero or df is empty
+        return pd.Series([float('nan')] * len(kl_df_current_day), index=kl_df_current_day.index)
+
+    tp = (kl_df_current_day['High'] + kl_df_current_day['Low'] + kl_df_current_day['Close']) / 3
+    tpv = tp * kl_df_current_day['Volume']
+
+    # Cumulative sum of typical price * volume / cumulative sum of volume
+    vwap = tpv.cumsum() / kl_df_current_day['Volume'].cumsum()
+    return vwap
+
+def strategy_vwap_breakout_momentum(symbol):
+    base_return = {
+        'signal': 'none',
+        'conditions': {},
+        'sl_price': None,
+        'tp_price': None,
+        'error': None,
+        'account_risk_percent': 0.01 # Strategy 3 specific risk
+    }
+
+    # Time-based Filter (London/NY Overlap: 13:00-17:00 UTC)
+    now_utc = pd.Timestamp.now(tz='UTC')
+    if not (13 <= now_utc.hour <= 17):
+        base_return['error'] = "Outside London/NY overlap (13-17 UTC)"
+        # print(f"Strategy 3 ({symbol}): Skipped, {base_return['error']}") # Can be noisy
+        return base_return
+
+    # Fetch Kline Data for the current day
+    global client
+    if not client:
+        base_return['error'] = "Client not initialized for S3"
+        return base_return
+
+    kl_day_df = None
+    try:
+        start_of_day_utc = now_utc.normalize() # Gets 00:00:00 of the current UTC day
+        # Fetch 5m klines from the start of the current UTC day up to now
+        raw_klines = client.klines(symbol, '5m', startTime=int(start_of_day_utc.timestamp() * 1000))
+        if not raw_klines:
+            base_return['error'] = "No kline data returned for the current day"
+            return base_return
+
+        kl_day_df = pd.DataFrame(raw_klines)
+        kl_day_df = kl_day_df.iloc[:,:6]
+        kl_day_df.columns = ['Time', 'Open', 'High', 'Low', 'Close', 'Volume']
+        kl_day_df['Time'] = pd.to_datetime(kl_day_df['Time'], unit='ms')
+        kl_day_df = kl_day_df.set_index('Time')
+        kl_day_df = kl_day_df.astype(float)
+
+    except Exception as e:
+        base_return['error'] = f"Error fetching/processing daily klines for S3 {symbol}: {e}"
+        return base_return
+
+    min_data_len_for_indicators = 26 # Max of MACD slow (26) or ATR lookback (14) + some buffer
+    if len(kl_day_df) < min_data_len_for_indicators:
+        base_return['error'] = f"Insufficient daily kline data for indicators (need {min_data_len_for_indicators}, got {len(kl_day_df)})"
+        return base_return
+
+    try:
+        # Calculate Indicators
+        vwap_series = calculate_daily_vwap(kl_day_df)
+        atr_indicator = ta.volatility.AverageTrueRange(high=kl_day_df['High'], low=kl_day_df['Low'], close=kl_day_df['Close'], window=14)
+        atr_series = atr_indicator.average_true_range()
+
+        macd_obj = ta.trend.MACD(close=kl_day_df['Close'], window_slow=26, window_fast=12, window_sign=9)
+        macd_line = macd_obj.macd()
+        macd_signal_line = macd_obj.macd_signal() # Not directly used in logic but calculated
+        macd_hist = macd_obj.macd_diff()
+
+        if any(s is None for s in [vwap_series, atr_series, macd_line, macd_signal_line, macd_hist]) or \
+           any(s.empty for s in [vwap_series, atr_series, macd_line, macd_signal_line, macd_hist]):
+            base_return['error'] = "One or more S3 indicators (VWAP, ATR, MACD) are None or empty"
+            return base_return
+
+        # Ensure enough data points after indicator calculation
+        min_lookback = 20 # For avg_atr_20
+        if len(vwap_series) < 2 or len(atr_series) < min_lookback or len(macd_hist) < 2 : # Need at least 2 for prev checks, 20 for ATR avg
+            base_return['error'] = "S3 indicator series too short after calculation"
+            return base_return
+
+        # Extract latest values
+        current_price = kl_day_df['Close'].iloc[-1]
+        last_vwap = vwap_series.iloc[-1]
+        prev_vwap = vwap_series.iloc[-2]
+
+        last_macd_hist = macd_hist.iloc[-1]
+        prev_macd_hist = macd_hist.iloc[-2]
+
+        last_atr = atr_series.iloc[-1]
+        avg_atr_20 = atr_series.rolling(window=20).mean().iloc[-1]
+
+
+        if any(pd.isna(v) for v in [current_price, last_vwap, prev_vwap, last_macd_hist, prev_macd_hist, last_atr, avg_atr_20]):
+            base_return['error'] = "NaN value in critical S3 indicator or price data"
+            return base_return
+
+        # --- Define Conditions ---
+        conditions = {}
+        final_signal = 'none'
+
+        # Long Entry
+        price_above_vwap_2bar = kl_day_df['Close'].iloc[-1] > last_vwap and kl_day_df['Close'].iloc[-2] > prev_vwap
+        macd_positive_rising = last_macd_hist > 0 and last_macd_hist > prev_macd_hist
+        atr_volatility_confirms = last_atr > avg_atr_20
+
+        conditions['price_above_vwap_2bar_long'] = price_above_vwap_2bar
+        conditions['macd_positive_rising'] = macd_positive_rising
+        conditions['atr_volatility_confirms_long'] = atr_volatility_confirms
+
+        if price_above_vwap_2bar and macd_positive_rising and atr_volatility_confirms:
+            final_signal = 'up'
+
+        # Short Entry (only if no long signal)
+        if final_signal == 'none':
+            price_below_vwap_2bar = kl_day_df['Close'].iloc[-1] < last_vwap and kl_day_df['Close'].iloc[-2] < prev_vwap
+            macd_negative_falling = last_macd_hist < 0 and last_macd_hist < prev_macd_hist
+            # atr_volatility_confirms_short is same as atr_volatility_confirms
+
+            conditions['price_below_vwap_2bar_short'] = price_below_vwap_2bar
+            conditions['macd_negative_falling'] = macd_negative_falling
+            conditions['atr_volatility_confirms_short'] = atr_volatility_confirms # Same condition
+
+            if price_below_vwap_2bar and macd_negative_falling and atr_volatility_confirms:
+                final_signal = 'down'
+
+        base_return['conditions'] = conditions
+        sl_price, tp_price = None, None
+
+        if final_signal != 'none':
+            price_precision = get_price_precision(symbol)
+
+            if final_signal == 'up':
+                sl_price = round(last_vwap, price_precision)
+                tp_price = round(current_price + (last_atr * 1.2), price_precision)
+
+                if current_price <= sl_price: # SL is through entry or worse
+                    base_return['error'] = f"S3 SL price {sl_price} is at or above entry {current_price} for LONG"
+                    final_signal = 'none'
+                elif tp_price <= current_price: # TP is at or below entry
+                    base_return['error'] = f"S3 TP price {tp_price} is at or below entry {current_price} for LONG"
+                    final_signal = 'none'
+
+            elif final_signal == 'down':
+                sl_price = round(last_vwap, price_precision)
+                tp_price = round(current_price - (last_atr * 1.2), price_precision)
+
+                if current_price >= sl_price: # SL is through entry or worse
+                    base_return['error'] = f"S3 SL price {sl_price} is at or below entry {current_price} for SHORT"
+                    final_signal = 'none'
+                elif tp_price >= current_price: # TP is at or above entry
+                    base_return['error'] = f"S3 TP price {tp_price} is at or above entry {current_price} for SHORT"
+                    final_signal = 'none'
+
+            if final_signal == 'none' and base_return['error']:
+                print(f"Strategy {STRATEGIES[3]} for {symbol}: Signal invalidated due to SL/TP error: {base_return['error']}")
+
+        base_return['signal'] = final_signal
+        base_return['sl_price'] = sl_price if final_signal != 'none' else None
+        base_return['tp_price'] = tp_price if final_signal != 'none' else None
+
+        return base_return
+
+    except Exception as e:
+        # import traceback # For detailed debugging
+        # print(f"Exception in strategy_vwap_breakout_momentum for {symbol}: {str(e)}\n{traceback.format_exc()}")
+        base_return['error'] = f"Exception in S3 {symbol}: {str(e)}"
+        return base_return
+
+# --- Pivot Points Calculation Helper ---
+def calculate_daily_pivot_points(prev_day_high, prev_day_low, prev_day_close):
+    if any(v is None for v in [prev_day_high, prev_day_low, prev_day_close]):
+        return None
+    try:
+        P = (prev_day_high + prev_day_low + prev_day_close) / 3
+        S1 = (P * 2) - prev_day_high
+        R1 = (P * 2) - prev_day_low
+        S2 = P - (prev_day_high - prev_day_low)
+        R2 = P + (prev_day_high - prev_day_low)
+        return {'P': P, 'S1': S1, 'R1': R1, 'S2': S2, 'R2': R2}
+    except Exception as e:
+        print(f"Error calculating pivot points: {e}")
+        return None
+
+def strategy_macd_divergence_pivot(symbol):
+    global client, strategy4_active_trade_info
+
+    base_return = {
+        'signal': 'none',
+        'conditions': {},
+        'sl_price': None,
+        'tp_price': None,
+        'error': None,
+        'divergence_price_point': None, # Specific to S4
+        'account_risk_percent': 0.012 # Strategy 4 specific risk
+    }
+
+    if strategy4_active_trade_info['symbol'] is not None:
+        base_return['error'] = "Strategy 4 already has an active trade."
+        # print(f"Strategy 4 ({symbol}): Skipped, active trade exists for {strategy4_active_trade_info['symbol']}") # Can be noisy
+        return base_return
+
+    # Fetch Previous Day's Data for Pivots
+    pivots = None
+    try:
+        today_utc = pd.Timestamp.now(tz='UTC').normalize()
+        start_prev_day_utc = today_utc - pd.Timedelta(days=1)
+        # end_prev_day_utc = today_utc - pd.Timedelta(microseconds=1) # Ensure it's strictly previous day
+        # Binance API endTime is exclusive, so to get full previous day, up to 00:00 of current day is fine
+        # However, client.klines '1d' interval typically refers to the day starting at startTime.
+        # For 1d kline of *previous* day, we can ask for startTime=prev_day_start, limit=1.
+
+        prev_day_klines_raw = client.klines(
+            symbol=symbol,
+            interval='1d',
+            startTime=int(start_prev_day_utc.timestamp() * 1000),
+            limit=1 # We only need the single 1D kline for the previous day
+        )
+
+        if prev_day_klines_raw and len(prev_day_klines_raw) > 0:
+            # Ensure the kline is indeed for the previous day
+            kline_ts = pd.to_datetime(prev_day_klines_raw[0][0], unit='ms').normalize()
+            if kline_ts == start_prev_day_utc:
+                prev_day_high = float(prev_day_klines_raw[0][2])
+                prev_day_low = float(prev_day_klines_raw[0][3])
+                prev_day_close = float(prev_day_klines_raw[0][4])
+                pivots = calculate_daily_pivot_points(prev_day_high, prev_day_low, prev_day_close)
+                if pivots is None:
+                    base_return['error'] = "Failed to calculate pivot points."
+                    return base_return
+            else:
+                base_return['error'] = "Could not get valid previous day kline for pivots."
+                return base_return
+        else:
+            base_return['error'] = "No previous day kline data returned for pivots."
+            return base_return
+    except Exception as e:
+        base_return['error'] = f"Error fetching prev day klines for S4 pivots: {e}"
+        return base_return
+
+    # Fetch Current 5m Kline Data
+    kl = klines(symbol) # Uses the existing klines function, which should fetch e.g. last 500 5m candles
+    min_candles_for_indicators = 35 # MACD needs ~26+9, Stoch needs ~14+3. Divergence lookback adds more.
+    div_lookback = 15 # Candles for divergence detection
+
+    if kl is None or len(kl) < min_candles_for_indicators + div_lookback:
+        base_return['error'] = f"Insufficient 5m kline data for S4 (need ~{min_candles_for_indicators + div_lookback})"
+        return base_return
+
+    try:
+        # Calculate Indicators
+        macd_hist = ta.trend.MACD(close=kl['Close'], window_slow=26, window_fast=12, window_sign=9).macd_diff()
+        stoch_obj = ta.momentum.StochasticOscillator(high=kl['High'], low=kl['Low'], close=kl['Close'], window=14, smooth_window=3, fillna=False)
+        stoch_k = stoch_obj.stoch()
+        atr_series = ta.volatility.AverageTrueRange(high=kl['High'], low=kl['Low'], close=kl['Close'], window=14).average_true_range()
+
+        if any(s is None for s in [macd_hist, stoch_k, atr_series]) or \
+           any(s.empty for s in [macd_hist, stoch_k, atr_series]):
+            base_return['error'] = "One or more S4 indicators (MACD, Stoch, ATR) are None or empty"
+            return base_return
+
+        if len(macd_hist) < div_lookback + 1 or len(stoch_k) < 2 or len(atr_series) < 1:
+            base_return['error'] = "S4 indicator series too short after calculation"
+            return base_return
+
+        # Divergence Detection
+        bullish_divergence_found = False
+        divergence_low_price = None
+        # Look from 2nd to last candle (-2) back to `div_lookback`+1 candle ago
+        for i in range(2, div_lookback + 2): # Ensure index -i is valid
+            if len(kl) <= i or len(macd_hist) <=i : continue # Boundary check
+            # Standard Bullish: Price makes lower low, MACD makes higher low.
+            # Current low is kl['Low'].iloc[-1], prev low is kl['Low'].iloc[-i]
+            # Current MACD hist is macd_hist.iloc[-1], prev MACD hist is macd_hist.iloc[-i]
+            if kl['Low'].iloc[-1] < kl['Low'].iloc[-i] and macd_hist.iloc[-1] > macd_hist.iloc[-i]:
+                bullish_divergence_found = True
+                divergence_low_price = kl['Low'].iloc[-1] # The low of the current candle where divergence is confirmed
+                base_return['divergence_price_point'] = divergence_low_price
+                break
+
+        bearish_divergence_found = False
+        divergence_high_price = None
+        if not bullish_divergence_found: # Only check for bearish if bullish not found
+            for i in range(2, div_lookback + 2):
+                if len(kl) <= i or len(macd_hist) <=i : continue
+                # Standard Bearish: Price makes higher high, MACD makes lower high.
+                if kl['High'].iloc[-1] > kl['High'].iloc[-i] and macd_hist.iloc[-1] < macd_hist.iloc[-i]:
+                    bearish_divergence_found = True
+                    divergence_high_price = kl['High'].iloc[-1]
+                    base_return['divergence_price_point'] = divergence_high_price
+                    break
+
+        # Extract latest values for conditions
+        current_price = kl['Close'].iloc[-1]
+        last_stoch_k = stoch_k.iloc[-1]
+        prev_stoch_k = stoch_k.iloc[-2] # Requires stoch_k to have at least 2 values
+        last_atr = atr_series.iloc[-1]
+
+        if any(pd.isna(v) for v in [current_price, last_stoch_k, prev_stoch_k, last_atr]):
+            base_return['error'] = "NaN value in critical S4 indicator/price for entry decision"
+            return base_return
+
+        # Entry Conditions
+        conditions = base_return['conditions']
+        final_signal = 'none'
+
+        conditions['bullish_divergence'] = bullish_divergence_found
+        conditions['bearish_divergence'] = bearish_divergence_found
+        conditions['stoch_k'] = last_stoch_k
+        conditions['prev_stoch_k'] = prev_stoch_k
+        conditions['pivot_P'] = pivots['P']
+        conditions['pivot_S1'] = pivots['S1']
+        conditions['pivot_R1'] = pivots['R1']
+
+
+        if bullish_divergence_found:
+            # Price at/above Support (S1 or S2)
+            # Check if the low of the signal candle touched or was near S1/S2
+            price_at_support = (pivots['S2'] <= kl['Low'].iloc[-1] <= pivots['S1'] * 1.005) or \
+                               (pivots['S1'] <= kl['Low'].iloc[-1] <= pivots['P'] * 1.005 and kl['Low'].iloc[-1] < pivots['P']) # Allow if between S1 and P but closer to S1
+            stoch_oversold_turning_up = last_stoch_k < 20 and last_stoch_k > prev_stoch_k
+
+            conditions['price_at_support_long'] = price_at_support
+            conditions['stoch_oversold_turning_up'] = stoch_oversold_turning_up
+
+            if price_at_support and stoch_oversold_turning_up:
+                final_signal = 'up'
+
+        elif bearish_divergence_found:
+            # Price at/below Resistance (R1 or R2)
+            price_at_resistance = (pivots['R1'] * 0.995 <= kl['High'].iloc[-1] <= pivots['R2']) or \
+                                  (pivots['P'] * 0.995 <= kl['High'].iloc[-1] <= pivots['R1'] and kl['High'].iloc[-1] > pivots['P'])
+            stoch_overbought_turning_down = last_stoch_k > 80 and last_stoch_k < prev_stoch_k
+
+            conditions['price_at_resistance_short'] = price_at_resistance
+            conditions['stoch_overbought_turning_down'] = stoch_overbought_turning_down
+
+            if price_at_resistance and stoch_overbought_turning_down:
+                final_signal = 'down'
+
+        # SL/TP Calculation
+        if final_signal != 'none':
+            price_precision = get_price_precision(symbol)
+            if final_signal == 'up':
+                sl_price = round(divergence_low_price - last_atr, price_precision)
+                tp_price = round(pivots['P'], price_precision) # Target Pivot P
+                if current_price <= sl_price or tp_price <= current_price:
+                    base_return['error'] = f"S4 LONG SL/TP invalid: SL={sl_price}, TP={tp_price}, Entry={current_price}"
+                    final_signal = 'none'
+            elif final_signal == 'down':
+                sl_price = round(divergence_high_price + last_atr, price_precision)
+                tp_price = round(pivots['P'], price_precision) # Target Pivot P
+                if current_price >= sl_price or tp_price >= current_price:
+                    base_return['error'] = f"S4 SHORT SL/TP invalid: SL={sl_price}, TP={tp_price}, Entry={current_price}"
+                    final_signal = 'none'
+
+            if final_signal == 'none' and base_return['error']:
+                 print(f"Strategy {STRATEGIES[4]} for {symbol}: Signal invalidated: {base_return['error']}")
+
+
+        base_return['signal'] = final_signal
+        base_return['sl_price'] = sl_price if final_signal != 'none' else None
+        base_return['tp_price'] = tp_price if final_signal != 'none' else None
+        # divergence_price_point already set when divergence found
+
+        return base_return
+
+    except Exception as e:
+        # import traceback
+        # print(f"Exception in strategy_macd_divergence_pivot for {symbol}: {str(e)}\n{traceback.format_exc()}")
+        base_return['error'] = f"Exception in S4 {symbol}: {str(e)}"
+        return base_return
+
 def set_leverage(symbol, level):
     global client
     if not client: return
@@ -531,7 +1083,7 @@ def get_qty_precision(symbol):
     except Exception as e: print(f"Error getting quantity precision for {symbol}: {e}")
     return 0
 
-def open_order(symbol, side, strategy_sl=None, strategy_tp=None):
+def open_order(symbol, side, strategy_sl=None, strategy_tp=None, strategy_account_risk_percent=None):
     global client, ACCOUNT_RISK_PERCENT, SL_PERCENT, TP_PERCENT # SL_PERCENT, TP_PERCENT used if strategy_sl/tp are None
     if not client: return
     try:
@@ -541,15 +1093,46 @@ def open_order(symbol, side, strategy_sl=None, strategy_tp=None):
 
         account_balance = get_balance_usdt()
         if account_balance is None or account_balance <= 0: return
-        capital_to_risk_usdt = account_balance * ACCOUNT_RISK_PERCENT
-        if capital_to_risk_usdt <= 0: return
-        if SL_PERCENT <= 0: return
 
-        position_size_usdt = capital_to_risk_usdt / SL_PERCENT
+        current_account_risk = ACCOUNT_RISK_PERCENT # Global default
+        if strategy_account_risk_percent is not None and 0 < strategy_account_risk_percent < 1:
+            current_account_risk = strategy_account_risk_percent
+            print(f"Using strategy-defined account risk: {current_account_risk*100:.2f}% for {symbol}")
+        else:
+            print(f"Using global account risk: {current_account_risk*100:.2f}% for {symbol}")
+
+        capital_to_risk_usdt = account_balance * current_account_risk
+        if capital_to_risk_usdt <= 0:
+            print(f"Warning: Capital to risk is {capital_to_risk_usdt:.2f} for {symbol}. Aborting order.")
+            return
+
+        # Ensure SL_PERCENT is used here for position sizing calculation,
+        # as it represents the distance to SL, not the total risk capital for the account.
+        # The strategy-specific SL price (strategy_sl) will define this distance.
+        # If strategy_sl is None, then global SL_PERCENT is used to calculate sl_actual later.
+        # The risk amount (current_account_risk) determines the capital, the SL distance (derived from strategy_sl or SL_PERCENT) determines the quantity.
+
+        sl_for_sizing = SL_PERCENT # Default global SL percent for sizing if strategy SL not provided or invalid
+        if strategy_sl is not None:
+            if side == 'buy' and strategy_sl < price :
+                sl_for_sizing = (price - strategy_sl) / price
+            elif side == 'sell' and strategy_sl > price:
+                sl_for_sizing = (strategy_sl - price) / price
+            else: # Strategy SL is invalid (e.g. on wrong side of price or zero)
+                print(f"Warning: Invalid strategy_sl ({strategy_sl}) for sizing on {symbol} {side} at price {price}. Defaulting to global SL_PERCENT for sizing.")
+                # sl_for_sizing remains global SL_PERCENT
+
+        if sl_for_sizing <= 0:
+            print(f"Warning: Stop loss for sizing is {sl_for_sizing*100:.2f}% for {symbol}. Aborting order.")
+            return
+
+        position_size_usdt = capital_to_risk_usdt / sl_for_sizing
         calculated_qty_asset = round(position_size_usdt / price, qty_precision)
-        if calculated_qty_asset <= 0: return
+        if calculated_qty_asset <= 0:
+            print(f"Warning: Calculated quantity is {calculated_qty_asset} for {symbol}. Aborting order.")
+            return
 
-        print(f"Order Details ({symbol}): Bal={account_balance:.2f}, RiskCap={capital_to_risk_usdt:.2f}, PosSize={position_size_usdt:.2f}, Qty={calculated_qty_asset}")
+        print(f"Order Details ({symbol}): Bal={account_balance:.2f}, RiskCap={capital_to_risk_usdt:.2f} (using {current_account_risk*100:.2f}% risk), SL_Dist_for_Sizing={sl_for_sizing*100:.2f}%, PosSizeUSD={position_size_usdt:.2f}, Qty={calculated_qty_asset}")
 
         sl_actual, tp_actual = None, None
 
@@ -825,6 +1408,14 @@ def run_bot_logic():
     global bot_running, status_var, client, start_button, stop_button, testnet_radio, mainnet_radio
     global qty_concurrent_positions, type, leverage
     global balance_var, positions_text_widget, history_text_widget, activity_status_var
+    # Make all strategy-specific trackers global for modification
+    global strategy1_active_trade_info, strategy1_cooldown_active, strategy1_last_trade_was_loss
+    global strategy2_active_trades
+    global strategy3_active_trade_info
+    global strategy4_active_trade_info
+    # And their default reset structures
+    global strategy1_active_trade_info_default, strategy3_active_trade_info_default, strategy4_active_trade_info_default
+
 
     _status_set = lambda msg: status_var.set(msg) if status_var and root and root.winfo_exists() else None
     _activity_set = lambda msg: activity_status_var.set(msg) if activity_status_var and root and root.winfo_exists() else None
@@ -834,177 +1425,250 @@ def run_bot_logic():
         _status_set("Error: Client not initialized. Bot stopping.")
         _activity_set("Bot Idle - Client Error")
         bot_running = False
+        # No return here, allow cleanup at the end of function if bot_running is False
 
     loop_count = 0
     while bot_running:
         try:
             _activity_set("Starting new scan cycle...")
-            if client is None: # Should ideally not happen if start_bot checks client
-                _status_set("Client is None. Bot stopping.")
-                _activity_set("Bot Idle - Client Error")
+            if client is None:
+                _status_set("Client is None. Bot stopping."); _activity_set("Bot Idle - Client Error")
                 bot_running = False; break
             
             balance = get_balance_usdt(); sleep(0.1)
-            if not bot_running: break # Check immediately after potentially long operation
+            if not bot_running: break
 
-            if root and root.winfo_exists() and balance_var: # GUI update for balance
+            if root and root.winfo_exists() and balance_var:
                 if balance is not None: root.after(0, lambda bal=balance: balance_var.set(f"{bal:.2f} USDT"))
                 else: root.after(0, lambda: balance_var.set("Error or N/A"))
 
-            if balance is None: # Handle balance fetch error
-                msg = 'API/balance error. Retrying...'; print(msg); _status_set(msg)
-                _activity_set("Balance fetch error. Retrying...")
-                for _ in range(60): # Wait and retry
+            if balance is None:
+                msg = 'API/balance error. Retrying...'; print(msg); _status_set(msg); _activity_set("Balance fetch error...")
+                for _ in range(60):
                     if not bot_running: break
                     sleep(1)
                 if not bot_running: break
-                continue # Retry balance fetch
+                continue
 
             current_balance_msg_for_status = f"Bal: {balance:.2f} USDT."
-            _status_set(current_balance_msg_for_status + " Scanning target symbols...")
-            
-            active_positions_data = get_active_positions_data() # Structured data or None
-            if not bot_running: break # Check after potentially long call
+            _status_set(current_balance_msg_for_status + " Managing active trades & timeouts...")
 
-            open_position_symbols = []
-            if active_positions_data: # Not None and not empty
-                open_position_symbols = [p['symbol'] for p in active_positions_data]
-            
-            # Strategy 1: Check and clear active trade if position is closed
-            if ACTIVE_STRATEGY_ID == 1 and strategy1_active_trade_info['symbol'] is not None:
-                is_still_open = False
-                if active_positions_data:
-                    for pos in active_positions_data:
-                        if pos['symbol'] == strategy1_active_trade_info['symbol']:
-                            is_still_open = True
-                            # Optional: Update qty if it changed and if we were tracking it precisely
-                            # strategy1_active_trade_info['position_qty'] = pos['qty'] 
-                            break
-                if not is_still_open:
-                    print(f"Strategy 1: Detected closure of trade on {strategy1_active_trade_info['symbol']}.")
-                    # Future: Implement P&L check here for "cooldown after loss"
-                    strategy1_active_trade_info = {'symbol': None, 'entry_time': None, 'entry_price': None, 'position_qty': 0, 'side': None, 'sl_order_id': None, 'tp_order_id': None}
-                    _activity_set(f"Strategy 1: Trade for {strategy1_active_trade_info['symbol']} closed. Ready for new signal.")
+            # --- Active Trade Management & Timeouts (BEFORE checking for new trades) ---
+            now_utc_for_timeout = pd.Timestamp.now(tz='UTC')
 
+            # Strategy 1 Timeout
+            if strategy1_active_trade_info['symbol'] is not None and strategy1_active_trade_info['entry_time'] is not None:
+                s1_active_symbol = strategy1_active_trade_info['symbol']
+                s1_entry_time = strategy1_active_trade_info['entry_time']
+                try:
+                    kl_s1 = klines(s1_active_symbol) # Fetches 5m klines by default
+                    if kl_s1 is not None and not kl_s1.empty and s1_entry_time.tzinfo is not None:
+                        # Ensure entry_time is localized if kl_s1.index is localized (it should be UTC)
+                        # Get_loc might fail if entry_time is not found or not unique after 'nearest'
+                        # This assumes klines are sorted and entry_time is a valid timestamp from a previous kline
+                        try:
+                            entry_candle_index = kl_s1.index.get_loc(s1_entry_time, method='nearest')
+                            candles_passed = len(kl_s1) - 1 - entry_candle_index
+                            if candles_passed >= 3:
+                                print(f"Strategy 1: Closing {s1_active_symbol} due to 3-candle timeout.")
+                                close_open_orders(s1_active_symbol) # This cancels SL/TP orders
+                                # Actual position closure is detected in the next block by checking open_position_symbols
+                        except KeyError: # If entry_time is too old and not in the fetched klines
+                            print(f"Strategy 1: Entry time for {s1_active_symbol} not found in recent klines for timeout check. Potentially very old trade.")
+                            # Consider closing if it's very old and still tracked. For now, this means it's older than klines fetched.
+
+                except Exception as e_to_s1: print(f"Error during S1 timeout check for {s1_active_symbol}: {e_to_s1}")
+
+            # Strategy 2 Timeout
+            for trade_info in list(strategy2_active_trades): # Iterate a copy for safe removal
+                s2_active_symbol = trade_info['symbol']
+                s2_entry_time = trade_info['entry_time']
+                try:
+                    kl_s2 = klines(s2_active_symbol)
+                    if kl_s2 is not None and not kl_s2.empty and s2_entry_time.tzinfo is not None:
+                        try:
+                            entry_candle_index = kl_s2.index.get_loc(s2_entry_time, method='nearest')
+                            candles_passed = len(kl_s2) - 1 - entry_candle_index
+                            if candles_passed >= 2:
+                                print(f"Strategy 2: Closing {s2_active_symbol} due to 2-candle timeout.")
+                                close_open_orders(s2_active_symbol)
+                        except KeyError:
+                             print(f"Strategy 2: Entry time for {s2_active_symbol} not found in recent klines for timeout.")
+                except Exception as e_to_s2: print(f"Error during S2 timeout check for {s2_active_symbol}: {e_to_s2}")
+
+            # Strategy 4 Timeout (End of Day)
+            if strategy4_active_trade_info['symbol'] is not None and strategy4_active_trade_info['entry_time'] is not None:
+                s4_active_symbol = strategy4_active_trade_info['symbol']
+                s4_entry_time = strategy4_active_trade_info['entry_time'] # This should be a pd.Timestamp
+                if now_utc_for_timeout.date() > s4_entry_time.date():
+                    print(f"Strategy 4: Closing {s4_active_symbol} due to end-of-day timeout (current: {now_utc_for_timeout.date()}, entry: {s4_entry_time.date()}).")
+                    close_open_orders(s4_active_symbol)
 
             if not bot_running: break
+            active_positions_data = get_active_positions_data() # Refresh positions after potential timeout actions
+            if not bot_running: break
+            open_position_symbols = [p['symbol'] for p in active_positions_data] if active_positions_data else []
 
-            # Determine if a new trade can be opened based on strategy and current state
+            # --- Position Closure Detection and Resetting Strategy Trackers ---
+            s1_sym = strategy1_active_trade_info['symbol']
+            if s1_sym and s1_sym not in open_position_symbols:
+                print(f"Strategy 1: Detected closure of trade on {s1_sym}.")
+                strategy1_last_trade_was_loss = True
+                strategy1_cooldown_active = True
+                _activity_set(f"S1: {s1_sym} closed. Cooldown for 1 cycle.")
+                strategy1_active_trade_info = strategy1_active_trade_info_default.copy()
+
+            current_s2_trades = list(strategy2_active_trades) # Iterate over a copy
+            for trade_info in current_s2_trades:
+                s2_sym = trade_info['symbol']
+                if s2_sym not in open_position_symbols:
+                    print(f"Strategy 2: Detected closure of trade on {s2_sym}.")
+                    strategy2_active_trades.remove(trade_info) # remove from original list
+                    _activity_set(f"S2: {s2_sym} closed. Available S2 slots: {2-len(strategy2_active_trades)}.")
+
+            s3_sym = strategy3_active_trade_info['symbol']
+            if s3_sym and s3_sym not in open_position_symbols:
+                print(f"Strategy 3: Detected closure of trade on {s3_sym}.")
+                strategy3_active_trade_info = strategy3_active_trade_info_default.copy()
+                _activity_set(f"S3: {s3_sym} closed.")
+
+            s4_sym = strategy4_active_trade_info['symbol']
+            if s4_sym and s4_sym not in open_position_symbols:
+                print(f"Strategy 4: Detected closure of trade on {s4_sym}.")
+                strategy4_active_trade_info = strategy4_active_trade_info_default.copy()
+                _activity_set(f"S4: {s4_sym} closed.")
+
+            if not bot_running: break
+            _status_set(current_balance_msg_for_status + " Determining ability to open new trades...")
+
+            # --- Determine if a new trade can be opened based on current ACTIVE_STRATEGY_ID ---
             can_open_new_trade_overall = False
-            if ACTIVE_STRATEGY_ID == 1:
+            current_active_strategy_id = ACTIVE_STRATEGY_ID
+
+            activity_msg_prefix = f"S{current_active_strategy_id}: "
+            if current_active_strategy_id == 0:
+                if len(open_position_symbols) < qty_concurrent_positions: can_open_new_trade_overall = True
+                _activity_set(activity_msg_prefix + (f"Max {qty_concurrent_positions}. Open: {len(open_position_symbols)}. " + ("Seeking." if can_open_new_trade_overall else "Monitoring.")))
+            elif current_active_strategy_id == 1:
                 if strategy1_active_trade_info['symbol'] is None:
-                    can_open_new_trade_overall = True
-                else: # Strategy 1 already has an active trade
-                    _activity_set(f"Strategy 1: Trade active on {strategy1_active_trade_info['symbol']}. Monitoring it. Not seeking new trades this cycle.")
-            elif len(open_position_symbols) < qty_concurrent_positions: # For Strategy 0 (Original Scalping)
-                can_open_new_trade_overall = True
-            else: # Max positions reached for Strategy 0
-                 _activity_set(f"Strategy 0: At max positions ({len(open_position_symbols)}). Monitoring. Cycle will pause scan for new trades.")
+                    if strategy1_cooldown_active: _activity_set(activity_msg_prefix + "Cooldown active.")
+                    else: can_open_new_trade_overall = True; _activity_set(activity_msg_prefix + "Ready. Seeking.")
+                else: _activity_set(activity_msg_prefix + f"Trade active on {strategy1_active_trade_info['symbol']}. Monitoring.")
+            elif current_active_strategy_id == 2:
+                if len(strategy2_active_trades) < 2: can_open_new_trade_overall = True
+                _activity_set(activity_msg_prefix + (f"Active: {len(strategy2_active_trades)}/2. " + ("Seeking." if can_open_new_trade_overall else "Max S2 trades.")))
+            elif current_active_strategy_id == 3:
+                if strategy3_active_trade_info['symbol'] is None: can_open_new_trade_overall = True; _activity_set(activity_msg_prefix + "Ready. Seeking.")
+                else: _activity_set(activity_msg_prefix + f"Trade active on {strategy3_active_trade_info['symbol']}. Monitoring.")
+            elif current_active_strategy_id == 4:
+                if strategy4_active_trade_info['symbol'] is None: can_open_new_trade_overall = True; _activity_set(activity_msg_prefix + "Ready. Seeking.")
+                else: _activity_set(activity_msg_prefix + f"Trade active on {strategy4_active_trade_info['symbol']}. Monitoring.")
+
 
             if can_open_new_trade_overall:
                 symbols_to_check = TARGET_SYMBOLS 
-                all_open_orders_after_cancel = check_orders() # Refresh orders
-                if not bot_running: break
-                if all_open_orders_after_cancel is None: all_open_orders_after_cancel = []
-                current_symbols_with_any_open_orders = {o.get('symbol') for o in all_open_orders_after_cancel if isinstance(o, dict) and o.get('symbol')}
-
                 for sym_to_check in symbols_to_check:
                     if not bot_running: break
-                    _activity_set(f"Scanning: {sym_to_check}...")
+                    _activity_set(f"S{current_active_strategy_id}: Scanning {sym_to_check}...")
                     
-                    # General skip if symbol already has a position or open orders (relevant for Strategy 0)
-                    if ACTIVE_STRATEGY_ID == 0 and (sym_to_check in open_position_symbols or sym_to_check in current_symbols_with_any_open_orders):
-                        _activity_set(f"Strategy 0: Skipping {sym_to_check} (already has position/orders).")
-                        sleep(0.05) 
-                        continue
+                    if current_active_strategy_id == 0 and sym_to_check in open_position_symbols:
+                        sleep(0.05); continue
+                    if current_active_strategy_id == 2 and any(t['symbol'] == sym_to_check for t in strategy2_active_trades):
+                         sleep(0.05); continue
                     
-                    # --- Signal Generation ---
-                    signal_data = {} # Initialize to prevent UnboundLocalError if no strategy matches
-                    if ACTIVE_STRATEGY_ID == 0:
-                        signal_data = scalping_strategy_signal(sym_to_check)
-                    elif ACTIVE_STRATEGY_ID == 1:
-                         # This block will only be reached if strategy1_active_trade_info['symbol'] is None (due to can_open_new_trade_overall logic)
-                        signal_data = strategy_ema_supertrend(sym_to_check)
-                    else: # Unknown strategy
-                        signal_data = {'signal': 'none', 'conditions': {"error": f"Unknown strategy ID: {ACTIVE_STRATEGY_ID}"}, 'error': "Unknown strategy ID"}
-                        print(f"Unknown strategy ID: {ACTIVE_STRATEGY_ID} for {sym_to_check}")
+                    signal_data = {}
+                    if current_active_strategy_id == 0: signal_data = scalping_strategy_signal(sym_to_check)
+                    elif current_active_strategy_id == 1: signal_data = strategy_ema_supertrend(sym_to_check)
+                    elif current_active_strategy_id == 2: signal_data = strategy_bollinger_band_mean_reversion(sym_to_check)
+                    elif current_active_strategy_id == 3: signal_data = strategy_vwap_breakout_momentum(sym_to_check)
+                    elif current_active_strategy_id == 4: signal_data = strategy_macd_divergence_pivot(sym_to_check)
+                    else:
+                        signal_data = {'signal': 'none', 'error': f"Unknown strategy ID: {current_active_strategy_id}"}
+                        print(signal_data['error'])
                     
                     current_signal = signal_data.get('signal', 'none')
-
                     if root and root.winfo_exists():
                         root.after(0, update_conditions_display_content, sym_to_check, signal_data.get('conditions'), signal_data.get('error'))
                     if not bot_running: break
 
-                    # --- Order Placement ---
-                    if current_signal == 'up' or current_signal == 'down':
-                        _status_set(f"{current_signal.upper()} signal for {sym_to_check}. Ordering...");
+                    if current_signal in ['up', 'down']:
+                        _status_set(f"{current_signal.upper()} signal for {sym_to_check} (S{current_active_strategy_id}). Ordering...");
                         set_mode(sym_to_check, type); sleep(0.1)
                         set_leverage(sym_to_check, leverage); sleep(0.1)
                         
+                        current_price_for_entry = None
+                        try: current_price_for_entry = float(client.ticker_price(sym_to_check)['price'])
+                        except Exception as e_price: print(f"Could not fetch entry price for {sym_to_check} for tracking: {e_price}")
+
+                        strategy_risk = signal_data.get('account_risk_percent') # Get strategy-specific risk
+
                         open_order(sym_to_check, current_signal, 
                                    strategy_sl=signal_data.get('sl_price'), 
-                                   strategy_tp=signal_data.get('tp_price'))
+                                   strategy_tp=signal_data.get('tp_price'),
+                                   strategy_account_risk_percent=strategy_risk) # Pass it to open_order
                         
-                        if ACTIVE_STRATEGY_ID == 1: 
-                            strategy1_active_trade_info['symbol'] = sym_to_check
-                            strategy1_active_trade_info['entry_time'] = pd.Timestamp.now(tz='UTC')
-                            try: 
-                                current_price_for_entry = float(client.ticker_price(sym_to_check)['price'])
-                                strategy1_active_trade_info['entry_price'] = current_price_for_entry
-                            except Exception as e_price:
-                                print(f"Could not fetch entry price for {sym_to_check} for Strategy 1 tracking: {e_price}")
-                                strategy1_active_trade_info['entry_price'] = None 
-                            strategy1_active_trade_info['side'] = current_signal
-                            print(f"Strategy 1: Trade initiated for {sym_to_check}. Basic Info: {strategy1_active_trade_info}")
-                            _activity_set(f"Strategy 1: Trade initiated for {sym_to_check}. Monitoring.")
-                            # can_open_new_trade_overall = False # This was set to false but this is the inner loop, it should break
-                            break # For Strategy 1, stop scanning for new symbols after initiating a trade
-
-                        active_positions_data = get_active_positions_data() 
-                        if active_positions_data: open_position_symbols = [p['symbol'] for p in active_positions_data]
-                        sleep(3) 
+                        trade_entry_timestamp = pd.Timestamp.now(tz='UTC')
                         
-                        if ACTIVE_STRATEGY_ID == 0 and len(open_position_symbols) >= qty_concurrent_positions:
-                            print(f"Strategy 0: Reached max concurrent positions ({qty_concurrent_positions}). Pausing symbol scan for this cycle.")
-                            _activity_set(f"Strategy 0: Max positions reached. Pausing scan.")
-                            break 
-                    else: # signal == 'none'
-                        _activity_set(f"No signal: {sym_to_check}. Next...")
-                        sleep(0.1) 
-            else: # Not can_open_new_trade_overall
-                if ACTIVE_STRATEGY_ID == 1 and strategy1_active_trade_info['symbol'] is not None:
-                     _activity_set(f"Strategy 1: Monitoring active trade on {strategy1_active_trade_info['symbol']}.")
-                # For strategy 0, message is already set if at max positions.
-                # If not at max positions but can_open_new_trade_overall is false for other reasons (future logic), add message here.
-                sleep(1) # Small sleep if not actively scanning new symbols this cycle.
+                        if current_active_strategy_id == 1:
+                            strategy1_active_trade_info.update({'symbol': sym_to_check, 'entry_time': trade_entry_timestamp, 'entry_price': current_price_for_entry, 'side': current_signal})
+                            _activity_set(f"S1: Trade initiated for {sym_to_check}. Monitoring."); break
+                        elif current_active_strategy_id == 2:
+                            strategy2_active_trades.append({'symbol': sym_to_check, 'entry_time': trade_entry_timestamp, 'entry_price': current_price_for_entry, 'side': current_signal})
+                            _activity_set(f"S2: Trade for {sym_to_check} initiated. Active S2: {len(strategy2_active_trades)}.")
+                            if len(strategy2_active_trades) >= 2 : break
+                        elif current_active_strategy_id == 3:
+                            strategy3_active_trade_info.update({'symbol': sym_to_check, 'entry_time': trade_entry_timestamp, 'entry_price': current_price_for_entry, 'side': current_signal, 'initial_atr_for_profit_target': signal_data.get('last_atr'), 'vwap_trail_active': False })
+                            _activity_set(f"S3: Trade initiated for {sym_to_check}. Monitoring."); break
+                        elif current_active_strategy_id == 4:
+                            strategy4_active_trade_info.update({'symbol': sym_to_check, 'entry_time': trade_entry_timestamp, 'entry_price': current_price_for_entry, 'side': current_signal, 'divergence_price_point': signal_data.get('divergence_price_point')})
+                            _activity_set(f"S4: Trade initiated for {sym_to_check}. Monitoring."); break
 
-            if not bot_running: break # Check before starting long wait
+                        if current_active_strategy_id == 0:
+                            active_positions_data_after_order = get_active_positions_data()
+                            open_pos_count_after_order = len([p for p in active_positions_data_after_order if float(p.get('positionAmt',0)) != 0]) if active_positions_data_after_order else 0
+                            if open_pos_count_after_order >= qty_concurrent_positions:
+                                print(f"S0: Reached max concurrent positions ({qty_concurrent_positions}). Pausing scan."); break
+                        sleep(3)
+                    else:
+                         _activity_set(f"S{current_active_strategy_id}: No signal: {sym_to_check}. Next...")
+                         sleep(0.1)
+
+            if not bot_running: break
+
+            if strategy1_cooldown_active and strategy1_last_trade_was_loss:
+                print("Strategy 1: Cooldown was active. Resetting cooldown status for next full scan cycle.")
+                strategy1_cooldown_active = False
+                # strategy1_last_trade_was_loss = False # Optional: reset this flag too, or keep it for longer-term tracking
+
             loop_count +=1
-            wait_message = f"{current_balance_msg_for_status} Scan cycle done. Waiting..."
+            wait_message = f"{current_balance_msg_for_status} Scan cycle {loop_count} done. Waiting..."
             _status_set(wait_message)
-            _activity_set("Scan cycle complete. Waiting for next cycle...")
-            for _ in range(180): # 3-minute wait
+            # Update activity status if it was just monitoring due to can_open_new_trade_overall being false
+            if not can_open_new_trade_overall: _activity_set(f"S{current_active_strategy_id}: Conditions not met for new trades. Waiting...")
+            else: _activity_set("Scan cycle complete. Waiting for next cycle...")
+
+            for _ in range(180):
                 if not bot_running: break
                 sleep(1)
         except ClientError as ce:
             err_msg = f"API Error: {ce.error_message if hasattr(ce, 'error_message') and ce.error_message else ce}. Retrying..."
-            print(err_msg); _status_set(err_msg); _activity_set(f"API Error. Retrying...")
-            if "signature" in str(ce).lower() or "timestamp" in str(ce).lower(): reinitialize_client() # Re-init on critical auth errors
-            for _ in range(60): # Wait before retrying loop
-                if not bot_running: break
-                sleep(1)
+            print(err_msg); _status_set(err_msg); _activity_set("API Error. Retrying...")
+            if "signature" in str(ce).lower() or "timestamp" in str(ce).lower(): reinitialize_client()
+            for _ in range(60):
+                if not bot_running: break; sleep(1)
         except Exception as e:
             err_msg = f"Bot loop error: {e}. Retrying..."
-            print(err_msg); _status_set(err_msg); _activity_set(f"Loop Error. Retrying...")
-            for _ in range(60): # Wait before retrying loop
-                if not bot_running: break
-                sleep(1)
-            if not bot_running: break # Exit outer loop if stop signal received during wait
-            continue # Continue to next iteration of outer loop
+            print(err_msg); _status_set(err_msg); _activity_set("Loop Error. Retrying...")
+            # import traceback # For debugging
+            # print(traceback.format_exc()) # For debugging
+            for _ in range(60):
+                if not bot_running: break; sleep(1)
+            if not bot_running: break
+            continue
 
     _activity_set("Bot Idle")
-    if root and root.winfo_exists(): # Clear conditions on stop
-        root.after(0, update_conditions_display_content, "Bot Idle", None, "Bot stopped. No conditions to display.")
+    if root and root.winfo_exists():
+        root.after(0, update_conditions_display_content, "Bot Idle", None, "Bot stopped.")
     print("Bot logic thread stopped.")
     _status_set("Bot stopped.")
     if start_button and root and root.winfo_exists(): start_button.config(state=tk.NORMAL)
@@ -1152,6 +1816,30 @@ def stop_bot():
     if stop_button: stop_button.config(state=tk.DISABLED) # Disable stop, start will be enabled by run_bot_logic end
     print("Stop signal sent to bot thread.")
 
+def handle_strategy_checkbox_select(selected_id):
+    global strategy_checkbox_vars, selected_strategy_var, STRATEGIES
+
+    current_val_for_selected_id = strategy_checkbox_vars[selected_id].get()
+
+    if current_val_for_selected_id: # If the clicked checkbox is now True
+        selected_strategy_var.set(selected_id) # Set this as the active strategy ID
+        # Uncheck all others
+        for s_id, bool_var in strategy_checkbox_vars.items():
+            if s_id != selected_id:
+                bool_var.set(False)
+        print(f"Strategy {STRATEGIES[selected_id]} ({selected_id}) GUI selected via checkbox.")
+    else:
+        # This logic prevents unchecking the *last* checked box,
+        # effectively making one always selected, similar to radio buttons.
+        # If the user tries to uncheck the currently active strategy, re-check it.
+        if selected_strategy_var.get() == selected_id: # Check if it's the currently active one
+            strategy_checkbox_vars[selected_id].set(True)
+            print(f"Strategy {STRATEGIES[selected_id]} ({selected_id}) remains selected. Cannot uncheck all.")
+        # If it's not the active one being unchecked (which shouldn't happen if logic is correct elsewhere,
+        # but as a safeguard), this 'else' branch means an already false checkbox was clicked (no change) or
+        # a non-active one was unchecked, which is fine if another one is still active.
+        # However, the primary goal is to ensure the selected_strategy_var reflects one true checkbox.
+
 # --- Main Application Window ---
 if __name__ == "__main__":
     root = tk.Tk(); root.title("Binance Scalping Bot")
@@ -1238,17 +1926,36 @@ if __name__ == "__main__":
     strategy_frame = ttk.LabelFrame(controls_frame, text="Strategy Selection")
     strategy_frame.pack(fill="x", padx=5, pady=5)
     
-    strategy_radio_buttons = [] # Re-initialize here before populating
+    # Clear strategy_radio_buttons if it was used for old radio buttons,
+    # or ensure it doesn't conflict if it's used for other parameter types.
+    # For this refactor, we assume strategy_radio_buttons is exclusively for these strategy selectors.
+    # We will now add checkboxes to params_widgets directly.
+
+    # Remove old radio buttons from params_widgets if they were added by reference
+    # This is tricky if params_widgets holds mixed types. Assuming it's safe to rebuild part of it.
+    # A safer approach is to filter out the old radio buttons if they had a specific type/name.
+    # For now, let's clear strategy_radio_buttons and rebuild the strategy part of params_widgets.
+
+    # Filter out previous strategy radio buttons from params_widgets
+    # This assumes they were all Radiobuttons and part of strategy_radio_buttons list previously
+    # A more robust way would be to tag them or manage them in a dedicated list.
+    if strategy_radio_buttons: # If it was populated before
+        params_widgets = [widget for widget in params_widgets if widget not in strategy_radio_buttons]
+        strategy_radio_buttons.clear() # Clear the old list
+
     for strategy_id, strategy_name in STRATEGIES.items():
-        rb = ttk.Radiobutton(strategy_frame, 
+        var = tk.BooleanVar(value=(strategy_id == selected_strategy_var.get()))
+        strategy_checkbox_vars[strategy_id] = var
+        cb = ttk.Checkbutton(strategy_frame,
                              text=strategy_name, 
-                             variable=selected_strategy_var, 
-                             value=strategy_id,
-                             command=lambda sid=strategy_id: print(f"Strategy {STRATEGIES[sid]} ({sid}) GUI selected")) # Updated command
-        rb.pack(anchor='w', padx=5)
-        strategy_radio_buttons.append(rb)
+                             variable=var,
+                             command=lambda sid=strategy_id: handle_strategy_checkbox_select(sid))
+        cb.pack(anchor='w', padx=5)
+        params_widgets.append(cb) # Add the new checkbox to params_widgets
     
-    params_widgets.extend(strategy_radio_buttons) # Add strategy radios to params_widgets for state mgmt
+    # Note: The global 'strategy_radio_buttons' list is no longer used for these strategy selectors.
+    # If it was used for other parameter types, that logic needs to be preserved or adapted.
+    # For this subtask, we assume it was primarily for strategy selection widgets.
 
     api_key_info_label = ttk.Label(controls_frame, text="API Keys from keys.py"); api_key_info_label.pack(pady=2)
     timeframe_label = ttk.Label(controls_frame, text="Timeframe: 5m (fixed)"); timeframe_label.pack(pady=2)
