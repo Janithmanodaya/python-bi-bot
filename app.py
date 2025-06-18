@@ -414,7 +414,8 @@ STRATEGIES = {
     1: "EMA Cross + SuperTrend",
     2: "Bollinger Band Mean-Reversion",
     3: "VWAP Breakout Momentum",
-    4: "MACD Divergence + Pivot-Point"
+    4: "MACD Divergence + Pivot-Point",
+    5: "New RSI-Based Strategy" # New strategy added
 }
 ACTIVE_STRATEGY_ID = 0 # Default to original
 
@@ -524,6 +525,7 @@ def calculate_supertrend_manual(kl_df, atr_period=10, multiplier=1.5):
 
     # Fill initial NaNs in atr if any (e.g. if using simple TR EMA)
     first_valid_atr_index = atr.first_valid_index()
+    start_index_for_calc = 0 # Default if no valid ATR index
     if first_valid_atr_index is not None: # Ensure there is a valid ATR value
         start_index_for_calc = kl_df_temp.index.get_loc(first_valid_atr_index)
         if start_index_for_calc > 0 : # Initialize first final bands based on first valid ATR
@@ -1447,6 +1449,194 @@ def strategy_macd_divergence_pivot(symbol):
         base_return['error'] = f"Exception in S4 {symbol}: {str(e)}"
         return base_return
 
+def strategy_rsi_enhanced(symbol):
+    # print(f"DEBUG: strategy_rsi_enhanced (NEW LOGIC) entered for symbol: {symbol}") # Keep for debugging if necessary
+    global SL_PERCENT, TP_PERCENT, STRATEGIES
+
+    base_return = {
+        'signal': 'none',
+        'conditions_met_count': 0,
+        'conditions_to_start_wait_threshold': 4, # All 4 primary conditions
+        'conditions_for_full_signal_threshold': 4, # All 4 primary conditions
+        'all_conditions_status': {
+            'rsi_crossed_above_30': False, 'duration_oversold_met': False, 
+            'rsi_slope_up_met': False, 'price_above_sma50_met': False, 'bullish_divergence_found': False,
+            'rsi_crossed_below_70': False, 'duration_overbought_met': False, 
+            'rsi_slope_down_met': False, 'price_below_sma50_met': False, 'bearish_divergence_found': False,
+            # 'num_buy_conditions_met': 0, 'num_sell_conditions_met': 0 # These can be calculated at the end
+        },
+        'sl_price': None, 'tp_price': None, 'error': None,
+        'account_risk_percent': 0.01 # Strategy-specific risk for S5
+    }
+
+    rsi_period = 14
+    sma_period = 50
+    duration_lookback = 5 # For checking 5 consecutive periods in overbought/oversold
+    slope_lookback_rsi = 3 # For checking RSI change over 3 periods
+    divergence_candles = 15
+
+    # Min klines: SMA period + duration_lookback + slope_lookback_rsi (roughly, divergence adds more)
+    # SMA50 needs 50 candles. Duration needs 5 past the cross. Slope needs 3 past the cross.
+    # RSI needs 14. Divergence needs 15 past the current.
+    # So, roughly: max(sma_period, rsi_period + divergence_candles) + few for buffer = max(50, 14+15) + buffer ~ 50 + 5 = 55-60
+    # Let's aim for a bit more to be safe for all conditions: sma_period + divergence_candles + duration_lookback + slope_lookback_rsi ~ 50 + 15 + 5 + 3 = 73
+    min_klines = 75 # Increased for safety margin
+
+    kl = klines(symbol)
+    if kl is None or len(kl) < min_klines:
+        base_return['error'] = f'Insufficient kline data for S5 {symbol} (need {min_klines}, got {len(kl) if kl is not None else 0})'
+        return base_return
+
+    try:
+        rsi_series = ta.momentum.RSIIndicator(close=kl['Close'], window=rsi_period).rsi()
+        sma50_series = ta.trend.SMAIndicator(close=kl['Close'], window=sma_period).sma_indicator()
+
+        if rsi_series is None or sma50_series is None or rsi_series.empty or sma50_series.empty:
+            base_return['error'] = f'S5 Indicator calculation failed for {symbol} (RSI or SMA empty)'
+            return base_return
+        
+        # Ensure enough data points after indicator calculation for all lookbacks
+        # Need at least sma_period valid points for SMA, and rsi_period + duration_lookback + slope_lookback_rsi for RSI conditions
+        if len(rsi_series) < (duration_lookback + slope_lookback_rsi + 1) or len(sma50_series) < 1 or len(kl['Close']) < (duration_lookback + slope_lookback_rsi + 1) :
+             base_return['error'] = f'S5 Indicator series too short for S5 {symbol} after calculation.'
+             return base_return
+        
+        # Check for NaNs in the latest required indicator values
+        # Indices: -1 (current), -2 (previous), -3 (for slope), up to -(duration_lookback + 1) for duration check start
+        required_rsi_indices = list(range(-1, -(duration_lookback + slope_lookback_rsi + 2), -1)) # Max lookback for RSI related checks
+        if any(pd.isna(rsi_series.iloc[i]) for i in required_rsi_indices if abs(i) <= len(rsi_series)) or            pd.isna(sma50_series.iloc[-1]) or pd.isna(kl['Close'].iloc[-1]):
+            base_return['error'] = f'S5 NaN value in critical indicator/price data for {symbol}'
+            return base_return
+
+        current_price = kl['Close'].iloc[-1]
+        
+        # --- Buy Signal Conditions ---
+        # Cond 1: RSI Crossing
+        cond_rsi_crossed_above_30 = rsi_series.iloc[-1] >= 30 and rsi_series.iloc[-2] < 30
+        base_return['all_conditions_status']['rsi_crossed_above_30'] = cond_rsi_crossed_above_30
+
+        # Cond 2: Duration in Oversold Zone (checks t-2, t-3, t-4, t-5, t-6)
+        # Indices for duration check: from - (duration_lookback + 1) up to -2
+        # Example: duration_lookback = 5. Indices: -6, -5, -4, -3, -2
+        cond_duration_oversold_met = True
+        if len(rsi_series) >= (duration_lookback + 2): # Make sure there's enough data for the lookback
+            for i in range(2, duration_lookback + 2): # Checks 5 candles: index -2, -3, -4, -5, -6
+                if rsi_series.iloc[-i] >= 30:
+                    cond_duration_oversold_met = False
+                    break
+        else: # Not enough data for full duration check
+            cond_duration_oversold_met = False
+        base_return['all_conditions_status']['duration_oversold_met'] = cond_duration_oversold_met
+        
+        # Cond 3: RSI Slope (Momentum) (RSI[-1] - RSI[-3] >= 10)
+        cond_rsi_slope_up_met = (rsi_series.iloc[-1] - rsi_series.iloc[-3]) >= 10 if len(rsi_series) >= 3 else False
+        base_return['all_conditions_status']['rsi_slope_up_met'] = cond_rsi_slope_up_met
+
+        # Cond 4: Moving Average Confirmation
+        cond_price_above_sma50_met = current_price > sma50_series.iloc[-1]
+        base_return['all_conditions_status']['price_above_sma50_met'] = cond_price_above_sma50_met
+
+        # Cond 5: Optional Bullish Divergence
+        cond_bullish_divergence_found = False
+        if len(kl['Low']) >= divergence_candles + 1 and len(rsi_series) >= divergence_candles + 1:
+            for i in range(1, divergence_candles + 1): # Check from t-1 back to t-1-divergence_candles
+                past_low_idx = -1 - i
+                if kl['Low'].iloc[-1] < kl['Low'].iloc[past_low_idx] and rsi_series.iloc[-1] > rsi_series.iloc[past_low_idx]:
+                    cond_bullish_divergence_found = True
+                    break
+        base_return['all_conditions_status']['bullish_divergence_found'] = cond_bullish_divergence_found
+        
+        num_core_buy_conditions_met = sum([cond_rsi_crossed_above_30, cond_duration_oversold_met, cond_rsi_slope_up_met, cond_price_above_sma50_met])
+
+        # --- Sell Signal Conditions ---
+        # Cond 1: RSI Crossing
+        cond_rsi_crossed_below_70 = rsi_series.iloc[-1] <= 70 and rsi_series.iloc[-2] > 70
+        base_return['all_conditions_status']['rsi_crossed_below_70'] = cond_rsi_crossed_below_70
+
+        # Cond 2: Duration in Overbought Zone
+        cond_duration_overbought_met = True
+        if len(rsi_series) >= (duration_lookback + 2):
+            for i in range(2, duration_lookback + 2): # Checks 5 candles: index -2, -3, -4, -5, -6
+                if rsi_series.iloc[-i] <= 70:
+                    cond_duration_overbought_met = False
+                    break
+        else: # Not enough data
+            cond_duration_overbought_met = False
+        base_return['all_conditions_status']['duration_overbought_met'] = cond_duration_overbought_met
+
+        # Cond 3: RSI Slope (Momentum) (RSI[-3] - RSI[-1] >= 10)
+        cond_rsi_slope_down_met = (rsi_series.iloc[-3] - rsi_series.iloc[-1]) >= 10 if len(rsi_series) >= 3 else False
+        base_return['all_conditions_status']['rsi_slope_down_met'] = cond_rsi_slope_down_met
+        
+        # Cond 4: Moving Average Confirmation
+        cond_price_below_sma50_met = current_price < sma50_series.iloc[-1]
+        base_return['all_conditions_status']['price_below_sma50_met'] = cond_price_below_sma50_met
+
+        # Cond 5: Optional Bearish Divergence
+        cond_bearish_divergence_found = False
+        if len(kl['High']) >= divergence_candles + 1 and len(rsi_series) >= divergence_candles + 1:
+            for i in range(1, divergence_candles + 1):
+                past_high_idx = -1 - i
+                if kl['High'].iloc[-1] > kl['High'].iloc[past_high_idx] and rsi_series.iloc[-1] < rsi_series.iloc[past_high_idx]:
+                    cond_bearish_divergence_found = True
+                    break
+        base_return['all_conditions_status']['bearish_divergence_found'] = cond_bearish_divergence_found
+
+        num_core_sell_conditions_met = sum([cond_rsi_crossed_below_70, cond_duration_overbought_met, cond_rsi_slope_down_met, cond_price_below_sma50_met])
+
+        price_precision = get_price_precision(symbol)
+        
+        if num_core_buy_conditions_met == 4: # All 4 core buy conditions met
+            base_return['signal'] = 'up'
+            base_return['conditions_met_count'] = num_core_buy_conditions_met
+            sl_p = round(current_price * (1 - SL_PERCENT), price_precision)
+            tp_p = round(current_price * (1 + TP_PERCENT), price_precision)
+            if sl_p >= current_price or tp_p <= current_price: 
+                base_return['error'] = f"S5 BUY Invalid SL/TP: SL={sl_p}, TP={tp_p}, Entry={current_price}"
+                base_return['signal'] = 'none' 
+            else:
+                base_return['sl_price'] = sl_p
+                base_return['tp_price'] = tp_p
+        
+        elif num_core_sell_conditions_met == 4: # All 4 core sell conditions met
+            base_return['signal'] = 'down'
+            base_return['conditions_met_count'] = num_core_sell_conditions_met
+            sl_p = round(current_price * (1 + SL_PERCENT), price_precision)
+            tp_p = round(current_price * (1 - TP_PERCENT), price_precision)
+            if sl_p <= current_price or tp_p >= current_price: 
+                base_return['error'] = f"S5 SELL Invalid SL/TP: SL={sl_p}, TP={tp_p}, Entry={current_price}"
+                base_return['signal'] = 'none' 
+            else:
+                base_return['sl_price'] = sl_p
+                base_return['tp_price'] = tp_p
+        else: 
+            # No full signal, set conditions_met_count to the higher of the two for potential partial signal info
+            base_return['conditions_met_count'] = max(num_core_buy_conditions_met, num_core_sell_conditions_met)
+            base_return['signal'] = 'none'
+
+        if base_return['error'] and base_return['signal'] == 'none': # If an error occurred that invalidated a signal
+             print(f"Strategy {STRATEGIES.get(5, 'S5')} for {symbol}: Signal invalidated by error: {base_return['error']}")
+        
+        # print(f"DEBUG S5 ({symbol}): Signal={base_return['signal']}, BuyConds={num_core_buy_conditions_met}, SellConds={num_core_sell_conditions_met}, AllStatus={base_return['all_conditions_status']}")
+
+    except IndexError as ie:
+        # This might happen if kline or indicator series are shorter than expected despite initial checks
+        base_return['error'] = f"S5 IndexError for {symbol}: {str(ie)}. RSI len: {len(rsi_series) if 'rsi_series' in locals() else 'N/A'}, KL len: {len(kl) if 'kl' in locals() else 'N/A'}"
+        base_return['signal'] = 'none'
+        print(f"DEBUG: {base_return['error']}")
+    except Exception as e:
+        # import traceback # For deeper debugging if needed
+        # print(traceback.format_exc())
+        base_return['error'] = f"S5 Exception for {symbol}: {str(e)}"
+        base_return['signal'] = 'none'
+        print(f"DEBUG: {base_return['error']}")
+        # Ensure all_conditions_status boolean flags are reset on general exception
+        for key in base_return['all_conditions_status']:
+            if isinstance(base_return['all_conditions_status'][key], bool):
+                 base_return['all_conditions_status'][key] = False
+    
+    return base_return
+
 def set_leverage(symbol, level):
     global client
     if not client: return
@@ -2066,7 +2256,7 @@ def run_bot_logic():
                 else: can_open_new_trade_overall = False # Explicitly false if max positions are open
                 
                 # Activity message for S0 should also consider pending signals
-                pending_s0_count = len([s for s, info in pending_signals.items() if info.get('side')]) # Count valid pending signals
+                pending_s0_count = len([item for key, item in g_conditional_pending_signals.items() if item['strategy_id'] == 0])
                 _activity_set(activity_msg_prefix + 
                               (f"MaxOpen {qty_concurrent_positions}. ActualOpen: {len(open_position_symbols)}. Pending: {pending_s0_count}. " + 
                                ("Seeking/Managing." if can_open_new_trade_overall or pending_s0_count > 0 else "Monitoring.")))
@@ -2084,6 +2274,14 @@ def run_bot_logic():
             elif current_active_strategy_id == 4:
                 if strategy4_active_trade_info['symbol'] is None: can_open_new_trade_overall = True; _activity_set(activity_msg_prefix + "Ready. Seeking.")
                 else: _activity_set(activity_msg_prefix + f"Trade active on {strategy4_active_trade_info['symbol']}. Monitoring.")
+            elif current_active_strategy_id == 5: # Strategy 5 logic
+                # Assuming S5 can open trades as long as general conditions are met (e.g., not exceeding overall max positions if that's a global rule)
+                if len(open_position_symbols) < qty_concurrent_positions : # Check against global concurrent positions
+                    can_open_new_trade_overall = True
+                    _activity_set(activity_msg_prefix + "Ready. Seeking.")
+                else:
+                    _activity_set(activity_msg_prefix + f"Max open positions ({qty_concurrent_positions}) reached. Monitoring.")
+                    can_open_new_trade_overall = False
             
             # --- Manage Pending Signals (Part 2) ---
             # (This loop was inserted in the previous step and is assumed to be correct)
@@ -2197,7 +2395,46 @@ def run_bot_logic():
                         sleep(0.1); continue # Skip this symbol if price fetch fails
 
                     # Strategy-specific handling
-                    if current_active_strategy_id == 4:
+                    if current_active_strategy_id == 5: # New Strategy 5 handling
+                        print(f"DEBUG: S5: Active for symbol: {sym_to_check}")
+                        # S5 does not use g_conditional_pending_signals, it trades directly.
+                        # Check if this symbol already has an S5 trade or if S5 has a 1-trade-at-a-time rule (not specified, assuming can trade multiple symbols)
+
+                        _activity_set(f"S5: Scanning {sym_to_check}...")
+                        signal_data_s5 = strategy_rsi_enhanced(sym_to_check)
+                        print(f"DEBUG: S5: Data for {sym_to_check}: {signal_data_s5}")
+
+                        if root and root.winfo_exists():
+                            root.after(0, update_conditions_display_content, sym_to_check, signal_data_s5.get('all_conditions_status'), signal_data_s5.get('error'))
+                        
+                        if signal_data_s5.get('error'):
+                            print(f"S5 Error ({sym_to_check}): {signal_data_s5['error']}")
+                            sleep(0.1); continue
+                        
+                        current_signal_s5 = signal_data_s5.get('signal', 'none')
+                        if current_signal_s5 in ['up', 'down']:
+                            # Optional: Show a popup for S5 signals if desired (as in the overwritten code)
+                            # popup_title = f"Trade Signal: {STRATEGIES.get(5, 'S5')}"
+                            # popup_message = f"Symbol: {sym_to_check}\nSignal: {current_signal_s5.upper()}\nStrategy: {STRATEGIES.get(5, 'S5')}"
+                            # if root and root.winfo_exists(): root.after(0, lambda title=popup_title, msg=popup_message: messagebox.showinfo(title, msg))
+                            
+                            print(f"S5: {current_signal_s5.upper()} signal for {sym_to_check}. Ordering...")
+                            _status_set(f"S5: Ordering {sym_to_check} ({current_signal_s5.upper()})...")
+                            set_mode(sym_to_check, margin_type_setting); sleep(0.1) # Use margin_type_setting
+                            set_leverage(sym_to_check, leverage); sleep(0.1)
+                            open_order(sym_to_check, current_signal_s5, 
+                                       strategy_sl=signal_data_s5.get('sl_price'), 
+                                       strategy_tp=signal_data_s5.get('tp_price'), 
+                                       strategy_account_risk_percent=signal_data_s5.get('account_risk_percent'))
+                            _activity_set(f"S5: Trade initiated for {sym_to_check}.")
+                            # S5 might allow multiple trades across symbols, so no 'break' here unless a specific S5 trade management global var is checked.
+                            # If S5 was meant to be one-trade-at-a-time like S1/S3/S4, a global tracker for S5's active trade would be needed.
+                            sleep(1) # Small delay after placing order
+                        else:
+                            _activity_set(f"S5: No signal for {sym_to_check}. Next..."); sleep(0.1)
+
+
+                    elif current_active_strategy_id == 4:
                         if strategy4_active_trade_info['symbol'] is not None:
                             _activity_set(f"S4: Already in an active trade with {strategy4_active_trade_info['symbol']}. Skipping scan for {sym_to_check}")
                             sleep(0.05)
@@ -2260,8 +2497,8 @@ def run_bot_logic():
                         else:
                             _activity_set(f"S4: No signal for {sym_to_check}. Next...")
                             sleep(0.1) # After processing S4 for a symbol if no break
-
-                    elif current_active_strategy_id in [0, 1, 2, 3]:
+                    
+                    elif current_active_strategy_id in [0, 1, 2, 3]: # Original strategies that use pending system
                         if (sym_to_check, current_active_strategy_id) in g_conditional_pending_signals:
                             continue # Already pending for this strategy (S0-S3)
                         
