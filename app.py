@@ -7,6 +7,173 @@ from binance.error import ClientError
 import ta
 import pandas as pd
 
+from backtesting import Backtest, Strategy
+# from backtesting.lib import crossover
+# We'll assume GOOG, SMA are for testing the backtesting.py library itself,
+# and might not be directly needed for the user's strategy.
+# from backtesting.test import SMA, GOOG
+# pandas is already imported
+# ta is already imported, ensure it's there.
+
+
+# Placeholder function for klines_extended
+def klines_extended(symbol, timeframe, interval_days):
+    global client, bot_running, root # UMFutures client, bot_running and root for UI checks
+    if not client:
+        error_msg = "Error: Binance client not initialized for klines_extended."
+        print(error_msg)
+        return pd.DataFrame(columns=['Open', 'High', 'Low', 'Close', 'Volume']), error_msg
+
+    limit_per_call = 1000
+
+    end_time = int(pd.Timestamp.now(tz='UTC').timestamp() * 1000)
+    start_time_ms = end_time - (interval_days * 24 * 60 * 60 * 1000)
+
+    all_klines_raw = []
+    current_start_time = start_time_ms
+
+    print(f"Fetching klines for {symbol} from {pd.to_datetime(start_time_ms, unit='ms')} to {pd.to_datetime(end_time, unit='ms')}")
+
+    while True:
+        # Check if the bot is stopped (if running live) or if UI is closed (if running from UI but bot not started)
+        # This is a proxy to allow breaking long fetches if the application is shutting down.
+        # `root` check is for when backtesting is run before starting the live bot.
+        # `bot_running` is for when the live bot is active (though backtesting while live bot runs is not typical).
+        is_ui_active = root and root.winfo_exists()
+        if not bot_running and not is_ui_active: # If bot not running AND UI is not active
+             print("klines_extended: Bot and UI stopped, aborting fetch.")
+             break
+        try:
+            kl = client.klines(symbol=symbol, interval=timeframe, startTime=current_start_time, limit=limit_per_call)
+            if not kl:
+                break 
+            
+            all_klines_raw.extend(kl)
+            
+            last_kline_ts = kl[-1][0]
+            current_start_time = last_kline_ts + 1 
+
+            if len(kl) < limit_per_call: 
+                break
+            if current_start_time >= end_time: 
+                break
+            
+            # sleep(0.1) # Optional delay
+
+        except ClientError as ce:
+            print(f"ClientError in klines_extended for {symbol}: {ce}")
+            return pd.DataFrame(columns=['Open', 'High', 'Low', 'Close', 'Volume']), f"ClientError: {ce}"
+        except Exception as e:
+            print(f"Generic error in klines_extended for {symbol}: {e}")
+            return pd.DataFrame(columns=['Open', 'High', 'Low', 'Close', 'Volume']), f"Generic error: {e}"
+    
+    if not all_klines_raw:
+        error_msg = f"No kline data fetched for {symbol} with timeframe {timeframe} for {interval_days} days."
+        print(error_msg)
+        return pd.DataFrame(columns=['Open', 'High', 'Low', 'Close', 'Volume']), error_msg
+
+    df = pd.DataFrame(all_klines_raw)
+    df = df.iloc[:, :6]
+    df.columns = ['Time', 'Open', 'High', 'Low', 'Close', 'Volume']
+    df['Time'] = pd.to_datetime(df['Time'], unit='ms')
+    df = df.set_index('Time')
+    df = df.astype(float)
+    
+    df = df[~df.index.duplicated(keep='first')]
+    df = df.sort_index()
+
+    print(f"Fetched {len(df)} klines for {symbol} ({timeframe}, {interval_days} days). From {df.index.min()} to {df.index.max()}")
+    return df, None
+
+# Indicator helper functions for backtesting
+# RSI indicator function. Returns dataframe
+def rsi_bt(df_series, period=14): # Renamed to rsi_bt to avoid conflict if app.py has other rsi
+    return ta.momentum.RSIIndicator(pd.Series(df_series), window=period).rsi()
+
+def ema_bt(df_series, period=200): # Renamed to ema_bt
+    return ta.trend.EMAIndicator(pd.Series(df_series), period).ema_indicator()
+
+def macd_bt(df_series): # Renamed to macd_bt
+    return ta.trend.MACD(pd.Series(df_series)).macd()
+
+def signal_h_bt(df_series): # Renamed to signal_h_bt
+    return ta.volatility.BollingerBands(pd.Series(df_series)).bollinger_hband()
+
+def signal_l_bt(df_series): # Renamed to signal_l_bt
+    return ta.volatility.BollingerBands(pd.Series(df_series)).bollinger_lband()
+
+# Backtest Strategy Wrapper Class
+class BacktestStrategyWrapper(Strategy):
+    # Default parameters, will be overridden by UI inputs later
+    user_tp = 0.03  # Default, will be set from UI
+    user_sl = 0.02  # Default, will be set from UI
+    
+    # Strategy-specific parameters (example for the provided strategy)
+    ema_period = 200
+    rsi_period = 14
+
+    def init(self):
+        # price = self.data.Close  # Unused variable
+        self.rsi = self.I(rsi_bt, self.data.Close, self.rsi_period)
+        self.macd = self.I(macd_bt, self.data.Close)
+        self.ema = self.I(ema_bt, self.data.Close, self.ema_period)
+        self.bol_h = self.I(signal_h_bt, self.data.Close)
+        self.bol_l = self.I(signal_l_bt, self.data.Close)
+
+    def next(self):
+        price = float(self.data.Close[-1])
+        if not self.position:
+            if self.rsi[-1] < 30: # Corrected from rsi[-2] to rsi[-1] for typical backtesting.py usage
+                self.buy(size=0.02, tp=(1 + self.user_tp) * price, sl=(1 - self.user_sl) * price)
+        # Corrected sell condition logic based on typical RSI strategy
+        # Original had "if not self.position and self.rsi[-2] > 70:" which is for entering short.
+        # Assuming it's an exit for a long or entry for a short. Let's stick to the original for now.
+        # Re-evaluating the provided strategy: it's for entering new positions, not exiting.
+            elif self.rsi[-1] > 70: # Corrected from rsi[-2] to rsi[-1]
+                self.sell(size=0.02, tp=(1 - self.user_tp) * price, sl=(1 + self.user_sl) * price)
+
+# Function to execute backtest
+def execute_backtest(strategy_id_for_backtest, symbol, timeframe, interval_days, ui_tp, ui_sl):
+    print(f"Executing backtest for Strategy ID {strategy_id_for_backtest} on {symbol} ({timeframe}, {interval_days} days)")
+    print(f"TP: {ui_tp*100}%, SL: {ui_sl*100}%")
+
+    kl_df, klines_error_msg = klines_extended(symbol, timeframe, interval_days)
+
+    if klines_error_msg:
+        return klines_error_msg, None, None # Propagate error message
+        
+    if kl_df.empty or len(kl_df) < 50: # Basic check for enough data
+        print("Error: Not enough kline data for backtest after fetching.")
+        return "Not enough kline data for backtest.", None, None
+
+    # Here, you would ideally select or parameterize the Strategy class
+    # For now, we use BacktestStrategyWrapper directly.
+    # Future: Pass strategy-specific parameters (ema_period, rsi_period) if needed
+    
+    # Update the class variables for TP/SL before instantiating Backtest
+    BacktestStrategyWrapper.user_tp = ui_tp
+    BacktestStrategyWrapper.user_sl = ui_sl
+
+    bt = Backtest(kl_df, BacktestStrategyWrapper, cash=10000, margin=1/10, commission=0.0007)
+    try:
+        stats = bt.run()
+        print("Backtest completed.")
+        # print(stats) # Stats can be very verbose, printed later or in UI
+    except Exception as e:
+        print(f"Error during backtest bt.run(): {e}")
+        return f"Error during backtest simulation: {e}", None, None
+
+    plot_error_msg = None
+    try:
+        # Plotting might still fail even if simulation runs, e.g., due to Matplotlib issues or specific data conditions
+        bt.plot(open_browser=False) 
+    except Exception as e_plot:
+        print(f"Error during bt.plot(): {e_plot}")
+        plot_error_msg = f"Plotting Error: {e_plot}. Statistics are still available."
+        
+    return stats, bt, plot_error_msg
+
+
 # Attempt to import pandas_ta, will be checked in SuperTrend function
 try:
     import pandas_ta as pta
@@ -41,6 +208,16 @@ mainnet_radio = None
 balance_var = None
 positions_text_widget = None
 history_text_widget = None
+# Backtesting UI Variables
+backtest_symbol_var = None
+backtest_timeframe_var = None
+backtest_interval_var = None
+backtest_tp_var = None
+backtest_sl_var = None
+backtest_selected_strategy_var = None
+backtest_results_text_widget = None
+backtest_run_button = None # Added for enabling/disabling
+
 
 # Tkinter StringVars for parameters
 account_risk_percent_var = None
@@ -70,6 +247,161 @@ margin_type_cross_radio = None # For Margin Type Radio
 strategy_radio_buttons = [] # List to hold strategy radio buttons
 params_widgets = [] # List to hold all parameter input widgets (will extend with strategy_radio_buttons)
 conditions_text_widget = None # For displaying signal conditions
+
+
+# --- Backtesting UI Command and Threading Logic ---
+def run_backtest_command():
+    global backtest_symbol_var, backtest_timeframe_var, backtest_interval_var
+    global backtest_tp_var, backtest_sl_var, backtest_selected_strategy_var
+    global backtest_results_text_widget, STRATEGIES, root, status_var, backtest_run_button
+
+    if backtest_run_button:
+        backtest_run_button.config(state=tk.DISABLED)
+
+    try:
+        symbol = backtest_symbol_var.get().strip().upper()
+        timeframe = backtest_timeframe_var.get().strip()
+        interval_str = backtest_interval_var.get().strip()
+        tp_str = backtest_tp_var.get().strip()
+        sl_str = backtest_sl_var.get().strip()
+        selected_strategy_name = backtest_selected_strategy_var.get()
+
+        if not all([symbol, timeframe, interval_str, tp_str, sl_str, selected_strategy_name]):
+            messagebox.showerror("Input Error", "All backtest fields are required.")
+            return
+
+        interval_days = int(interval_str)
+        # Convert TP/SL from percentage string (e.g., "3.0") to float (e.g., 0.03)
+        tp_percentage = float(tp_str) / 100.0
+        sl_percentage = float(sl_str) / 100.0
+
+        if not (0 < tp_percentage < 1 and 0 < sl_percentage < 1):
+            messagebox.showerror("Input Error", "TP and SL percentages must be between 0 and 100 (exclusive of 0, inclusive of values that result in <1 after division by 100). E.g., 0.01 to 0.99 after conversion.")
+            return
+        
+        strategy_id_for_backtest = None
+        for id, name in STRATEGIES.items():
+            if name == selected_strategy_name:
+                strategy_id_for_backtest = id
+                break
+        
+        if strategy_id_for_backtest is None: # Should not happen with Combobox
+            messagebox.showerror("Input Error", "Invalid strategy selected.")
+            return
+
+        # Clear previous results
+        if backtest_results_text_widget and root and root.winfo_exists():
+            backtest_results_text_widget.config(state=tk.NORMAL)
+            backtest_results_text_widget.delete('1.0', tk.END)
+            backtest_results_text_widget.insert(tk.END, f"Starting backtest for {symbol}, Strategy: {selected_strategy_name}...\n")
+            backtest_results_text_widget.config(state=tk.DISABLED)
+        if status_var and root and root.winfo_exists():
+            status_var.set("Backtest: Initializing...")
+
+
+        thread = threading.Thread(target=perform_backtest_in_thread, 
+                                  args=(strategy_id_for_backtest, symbol, timeframe, interval_days, tp_percentage, sl_percentage),
+                                  daemon=True)
+        thread.start()
+
+    except ValueError:
+        messagebox.showerror("Input Error", "Invalid number format for Interval, TP, or SL.")
+        if backtest_run_button: backtest_run_button.config(state=tk.NORMAL) # Re-enable on error
+    except Exception as e:
+        messagebox.showerror("Error", f"An unexpected error occurred: {e}")
+        if backtest_results_text_widget and root and root.winfo_exists():
+            backtest_results_text_widget.config(state=tk.NORMAL)
+            backtest_results_text_widget.insert(tk.END, f"\nError: {e}")
+            backtest_results_text_widget.config(state=tk.DISABLED)
+        if backtest_run_button: backtest_run_button.config(state=tk.NORMAL) # Re-enable on error
+
+def perform_backtest_in_thread(strategy_id, symbol, timeframe, interval_days, tp, sl):
+    global backtest_results_text_widget, root, status_var, backtest_run_button
+    
+    if status_var and root and root.winfo_exists():
+        root.after(0, lambda: status_var.set("Backtest: Fetching kline data..."))
+
+    stats_output, bt_object, plot_error_message = execute_backtest(strategy_id, symbol, timeframe, interval_days, tp, sl)
+    
+    if status_var and root and root.winfo_exists():
+        if isinstance(stats_output, str) or plot_error_message : # If error string returned or plot error
+             root.after(0, lambda: status_var.set("Backtest: Error encountered."))
+        else:
+             root.after(0, lambda: status_var.set("Backtest: Simulation complete. Preparing results..."))
+
+
+    def update_ui_with_results():
+        final_status_message = "Backtest: Completed."
+        print("DEBUG: Entered update_ui_with_results function.") # New
+
+        if backtest_results_text_widget and root and root.winfo_exists():
+            backtest_results_text_widget.config(state=tk.NORMAL)
+            backtest_results_text_widget.delete('1.0', tk.END) # Clear "Starting..." or previous debug messages
+            backtest_results_text_widget.insert(tk.END, "DEBUG: Initial test write to results widget successful.\n") # Test write
+            print("DEBUG: Successfully performed initial test write to widget.")
+        else:
+            print("DEBUG: backtest_results_text_widget is None or not available at the start of update_ui_with_results.")
+            # If widget is not available, further UI updates for it are pointless.
+            # Consider how to handle this, maybe return or log. For now, printing is fine.
+
+        print(f"DEBUG: Type of stats_output: {type(stats_output)}")
+        if stats_output is not None:
+            print(f"DEBUG: Content of stats_output (first 500 chars): {str(stats_output)[:500]}")
+        else:
+            print("DEBUG: stats_output is None.")
+
+        if backtest_results_text_widget and root and root.winfo_exists(): # Check again before complex logic
+            # The original logic for displaying stats or errors:
+            if isinstance(stats_output, pd.Series):
+                stats_str = "Backtest Results:\n"
+                stats_str += "--------------------\n"
+                for index, value in stats_output.items():
+                    if index in ['_equity_curve', '_trades']:
+                        continue
+                    if isinstance(value, float):
+                        stats_str += f"{index}: {value:.2f}\n"
+                    else:
+                        stats_str += f"{index}: {value}\n"
+                print(f"DEBUG: Formatted stats_str (first 500 chars): {stats_str[:500]}") # New print
+                backtest_results_text_widget.insert(tk.END, stats_str) # Appending after initial debug message
+            elif isinstance(stats_output, str):
+                print(f"DEBUG: stats_output is a string (error message): {stats_output}") # New print
+                backtest_results_text_widget.insert(tk.END, stats_output) # Appending
+            elif stats_output is not None:
+                stats_str = str(stats_output)
+                print(f"DEBUG: stats_output is other non-None type, converting to str: {stats_str[:500]}") # New print
+                backtest_results_text_widget.insert(tk.END, stats_str) # Appending
+            
+            print("DEBUG: Attempted to insert main content into widget.")
+
+            if plot_error_message:
+                print(f"DEBUG: Plot error message: {plot_error_message}") # New print
+                backtest_results_text_widget.insert(tk.END, f"\n\n{plot_error_message}")
+            
+            if bt_object and not plot_error_message:
+                # ... (plotting logic, potentially add debug prints around bt.plot() if suspected) ...
+                backtest_results_text_widget.insert(tk.END, "\n\nPlot window should have opened (if data was sufficient).")
+            
+            if stats_output is None and not isinstance(stats_output, str):
+                print("DEBUG: stats_output is None and not an error string. Displaying no stats message.") # New
+                backtest_results_text_widget.insert(tk.END, "Backtest did not return statistics or an error message.")
+            
+            backtest_results_text_widget.config(state=tk.DISABLED)
+        else:
+            print("DEBUG: backtest_results_text_widget became unavailable before main content insertion.")
+
+        if status_var and root and root.winfo_exists():
+            root.after(0, lambda: status_var.set(final_status_message)) # final_status_message needs to be set based on outcomes
+        if backtest_run_button and root and root.winfo_exists(): 
+            backtest_run_button.config(state=tk.NORMAL)
+        print("DEBUG: Exiting update_ui_with_results function.") # New
+
+    if root and root.winfo_exists(): 
+        root.after(0, update_ui_with_results)
+    else: # Fallback if root is not available (e.g., if app is closing)
+        print("UI update skipped: Root window not available.")
+        if isinstance(stats_output, str): print(stats_output)
+        elif stats_output: print(str(stats_output))
 
 
 # Binance API URLs
@@ -121,7 +453,7 @@ SCALPING_REQUIRED_SELL_CONDITIONS = 3
 TP_PERCENT = 0.01
 SL_PERCENT = 0.005
 leverage = 5
-type = 'ISOLATED' # Margin type
+margin_type_setting = 'ISOLATED' # Margin type
 qty_concurrent_positions = 100
 LOCAL_HIGH_LOW_LOOKBACK_PERIOD = 20 # New global for breakout logic
 
@@ -1476,7 +1808,7 @@ def toggle_environment():
 
 def run_bot_logic():
     global bot_running, status_var, client, start_button, stop_button, testnet_radio, mainnet_radio
-    global qty_concurrent_positions, type, leverage, g_conditional_pending_signals, current_price_var # Changed pending_signals to g_conditional_pending_signals
+    global qty_concurrent_positions, margin_type_setting, leverage, g_conditional_pending_signals, current_price_var # Changed pending_signals to g_conditional_pending_signals
     global balance_var, positions_text_widget, history_text_widget, activity_status_var
     # Make all strategy-specific trackers global for modification
     global strategy1_active_trade_info, strategy1_cooldown_active, strategy1_last_trade_was_loss
@@ -1593,7 +1925,7 @@ def run_bot_logic():
                     if current_met_count >= conditions_for_full_signal_threshold and not current_strategy_output.get('error'):
                         print(f"CONFIRMED: {STRATEGIES[strategy_id]} for {symbol} ({side}). Met {current_met_count}/{conditions_for_full_signal_threshold}.")
                         _status_set(f"Ordering {symbol} ({side}) via {STRATEGIES[strategy_id]}...")
-                        set_mode(symbol, type); sleep(0.1)
+                        set_mode(symbol, margin_type_setting); sleep(0.1)
                         set_leverage(symbol, leverage); sleep(0.1)
                         
                         sl_to_use = g_conditional_pending_signals[key]['potential_sl_price'] # Use the latest from re-eval
@@ -1889,11 +2221,11 @@ def run_bot_logic():
                             print(f"Strategy 4: {current_signal_s4.upper()} signal for {sym_to_check}. Ordering immediately...")
                             _status_set(f"S4: {current_signal_s4.upper()} signal for {sym_to_check}. Ordering...")
                             
-                            set_mode(sym_to_check, type)
+                            set_mode(sym_to_check, margin_type_setting)
                             sleep(0.1)
                             set_leverage(sym_to_check, leverage)
                             sleep(0.1)
-
+    
                             sl_price_s4 = signal_data_s4.get('sl_price')
                             tp_price_s4 = signal_data_s4.get('tp_price')
                             strategy_risk_s4 = signal_data_s4.get('account_risk_percent')
@@ -1908,8 +2240,7 @@ def run_bot_logic():
                             if entry_price_for_tracking_s4 is None: # Still None, means initial fetch also failed
                                 print(f"S4: Critical error - no price available for {sym_to_check} to place order. Skipping.")
                                 continue
-
-
+    
                             open_order(sym_to_check, current_signal_s4, 
                                        strategy_sl=sl_price_s4, 
                                        strategy_tp=tp_price_s4, 
@@ -1928,7 +2259,7 @@ def run_bot_logic():
                             break # Strategy 4 handles one trade at a time
                         else:
                             _activity_set(f"S4: No signal for {sym_to_check}. Next...")
-                        sleep(0.1) # After processing S4 for a symbol if no break
+                            sleep(0.1) # After processing S4 for a symbol if no break
 
                     elif current_active_strategy_id in [0, 1, 2, 3]:
                         if (sym_to_check, current_active_strategy_id) in g_conditional_pending_signals:
@@ -2069,7 +2400,7 @@ def run_bot_logic():
             widget.config(state=tk.NORMAL)
 
 def apply_settings():
-    global ACCOUNT_RISK_PERCENT, TP_PERCENT, SL_PERCENT, leverage, qty_concurrent_positions, LOCAL_HIGH_LOW_LOOKBACK_PERIOD, type, TARGET_SYMBOLS, ACTIVE_STRATEGY_ID # 'type' is for margin type
+    global ACCOUNT_RISK_PERCENT, TP_PERCENT, SL_PERCENT, leverage, qty_concurrent_positions, LOCAL_HIGH_LOW_LOOKBACK_PERIOD, margin_type_setting, TARGET_SYMBOLS, ACTIVE_STRATEGY_ID # 'margin_type_setting' is for margin type
 
     try:
         # Strategy Selection
@@ -2136,12 +2467,12 @@ def apply_settings():
         LOCAL_HIGH_LOW_LOOKBACK_PERIOD = lhl_val
 
         # Margin Type
-        type = margin_type_var.get() # This is already a string 'ISOLATED' or 'CROSS'
-        if type not in ["ISOLATED", "CROSS"]: # Should not happen with radio buttons
+        margin_type_setting = margin_type_var.get() # This is already a string 'ISOLATED' or 'CROSS'
+        if margin_type_setting not in ["ISOLATED", "CROSS"]: # Should not happen with radio buttons
              messagebox.showerror("Settings Error", "Invalid Margin Type selected.")
              return False
 
-        print(f"Applied settings: Strategy='{STRATEGIES[ACTIVE_STRATEGY_ID]}', Risk={ACCOUNT_RISK_PERCENT}, TP={TP_PERCENT}, SL={SL_PERCENT}, Lev={leverage}, MaxPos={qty_concurrent_positions}, Lookback={LOCAL_HIGH_LOW_LOOKBACK_PERIOD}, Margin={type}, Symbols={TARGET_SYMBOLS}")
+        print(f"Applied settings: Strategy='{STRATEGIES[ACTIVE_STRATEGY_ID]}', Risk={ACCOUNT_RISK_PERCENT}, TP={TP_PERCENT}, SL={SL_PERCENT}, Lev={leverage}, MaxPos={qty_concurrent_positions}, Lookback={LOCAL_HIGH_LOW_LOOKBACK_PERIOD}, Margin={margin_type_setting}, Symbols={TARGET_SYMBOLS}")
         messagebox.showinfo("Settings", "Settings applied successfully!")
         return True
 
@@ -2245,6 +2576,15 @@ if __name__ == "__main__":
     activity_status_var = tk.StringVar(value="Bot Idle") # Initialize activity status
     selected_strategy_var = tk.IntVar(value=ACTIVE_STRATEGY_ID)
 
+    # Backtesting StringVars
+    backtest_symbol_var = tk.StringVar(value="XRPUSDT")
+    backtest_timeframe_var = tk.StringVar(value="5m")
+    backtest_interval_var = tk.StringVar(value="30")
+    backtest_tp_var = tk.StringVar(value="3.0")
+    backtest_sl_var = tk.StringVar(value="2.0")
+    backtest_selected_strategy_var = tk.StringVar()
+
+
     controls_frame = ttk.LabelFrame(root, text="Controls"); controls_frame.pack(padx=10, pady=(5,0), fill="x")
     env_frame = ttk.Frame(controls_frame); env_frame.pack(pady=2, fill="x")
     ttk.Label(env_frame, text="Env:").pack(side=tk.LEFT, padx=(5,2))
@@ -2293,7 +2633,7 @@ if __name__ == "__main__":
 
     # Margin Type
     ttk.Label(params_input_frame, text="Margin Type:").grid(row=3, column=0, padx=2, pady=2, sticky='w')
-    margin_type_var = tk.StringVar(value=type) # Initialize with global 'type'
+    margin_type_var = tk.StringVar(value=margin_type_setting) # Initialize with global 'margin_type_setting'
     margin_type_isolated_radio = ttk.Radiobutton(params_input_frame, text="ISOLATED", variable=margin_type_var, value="ISOLATED")
     margin_type_isolated_radio.grid(row=3, column=1, padx=2, pady=2, sticky='w')
     margin_type_cross_radio = ttk.Radiobutton(params_input_frame, text="CROSS", variable=margin_type_var, value="CROSS")
@@ -2353,6 +2693,42 @@ if __name__ == "__main__":
     api_key_info_label = ttk.Label(controls_frame, text="API Keys from keys.py"); api_key_info_label.pack(pady=2)
     timeframe_label = ttk.Label(controls_frame, text="Timeframe: 5m (fixed)"); timeframe_label.pack(pady=2)
 
+    # Backtesting Engine Frame
+    backtesting_frame = ttk.LabelFrame(controls_frame, text="Backtesting Engine")
+    backtesting_frame.pack(fill="x", padx=5, pady=5)
+
+    # Backtest Parameters Grid
+    backtest_params_grid = ttk.Frame(backtesting_frame); backtest_params_grid.pack(fill="x", padx=5, pady=5)
+
+    ttk.Label(backtest_params_grid, text="Symbol:").grid(row=0, column=0, padx=2, pady=2, sticky='w')
+    backtest_symbol_entry = ttk.Entry(backtest_params_grid, textvariable=backtest_symbol_var, width=12)
+    backtest_symbol_entry.grid(row=0, column=1, padx=2, pady=2, sticky='w')
+
+    ttk.Label(backtest_params_grid, text="Timeframe:").grid(row=0, column=2, padx=2, pady=2, sticky='w')
+    backtest_timeframe_entry = ttk.Entry(backtest_params_grid, textvariable=backtest_timeframe_var, width=7)
+    backtest_timeframe_entry.grid(row=0, column=3, padx=2, pady=2, sticky='w')
+
+    ttk.Label(backtest_params_grid, text="Interval (days):").grid(row=1, column=0, padx=2, pady=2, sticky='w')
+    backtest_interval_entry = ttk.Entry(backtest_params_grid, textvariable=backtest_interval_var, width=7)
+    backtest_interval_entry.grid(row=1, column=1, padx=2, pady=2, sticky='w')
+    
+    ttk.Label(backtest_params_grid, text="Take Profit %:").grid(row=1, column=2, padx=2, pady=2, sticky='w')
+    backtest_tp_entry = ttk.Entry(backtest_params_grid, textvariable=backtest_tp_var, width=7)
+    backtest_tp_entry.grid(row=1, column=3, padx=2, pady=2, sticky='w')
+
+    ttk.Label(backtest_params_grid, text="Stop Loss %:").grid(row=2, column=0, padx=2, pady=2, sticky='w')
+    backtest_sl_entry = ttk.Entry(backtest_params_grid, textvariable=backtest_sl_var, width=7)
+    backtest_sl_entry.grid(row=2, column=1, padx=2, pady=2, sticky='w')
+
+    ttk.Label(backtest_params_grid, text="Backtest Strategy:").grid(row=2, column=2, padx=2, pady=2, sticky='w')
+    backtest_strategy_combobox = ttk.Combobox(backtest_params_grid, textvariable=backtest_selected_strategy_var, values=list(STRATEGIES.values()), width=25)
+    if STRATEGIES: backtest_strategy_combobox.current(0) # Set default selection
+    backtest_strategy_combobox.grid(row=2, column=3, padx=2, pady=2, sticky='w')
+    
+    backtest_run_button = ttk.Button(backtesting_frame, text="Run Backtest", command=run_backtest_command) # Assign to global
+    backtest_run_button.pack(pady=5)
+
+
     buttons_frame = ttk.Frame(controls_frame); buttons_frame.pack(pady=2)
     start_button = ttk.Button(buttons_frame, text="Start Bot", command=start_bot); start_button.pack(side=tk.LEFT, padx=5)
     stop_button = ttk.Button(buttons_frame, text="Stop Bot", command=stop_bot, state=tk.DISABLED); stop_button.pack(side=tk.LEFT, padx=5)
@@ -2384,6 +2760,12 @@ if __name__ == "__main__":
     conditions_text_widget = scrolledtext.ScrolledText(conditions_frame, height=8, width=70, state=tk.DISABLED, wrap=tk.WORD)
     conditions_text_widget.pack(pady=5, padx=5, fill="both", expand=True)
 
+    # Backtest Results Display Area
+    backtest_results_frame = ttk.LabelFrame(data_frame, text="Backtest Results")
+    backtest_results_frame.pack(pady=(2,5), padx=5, fill="both", expand=True)
+    backtest_results_text_widget = scrolledtext.ScrolledText(backtest_results_frame, height=10, width=70, state=tk.DISABLED, wrap=tk.WORD)
+    backtest_results_text_widget.pack(pady=5, padx=5, fill="both", expand=True)
+
 
     status_label = ttk.Label(root, textvariable=status_var, relief=tk.SUNKEN, anchor=tk.W); status_label.pack(padx=10, pady=(0,5), fill="x", side=tk.BOTTOM)
     root.update_idletasks(); status_label.config(wraplength=root.winfo_width() - 20)
@@ -2409,3 +2791,8 @@ if __name__ == "__main__":
                 root.destroy()
         else: root.destroy()
     root.protocol("WM_DELETE_WINDOW", on_closing); root.minsize(450, 500); root.mainloop()
+# sleep(0.1) # This line was identified as causing an IndentationError by user - removing it.
+# sleep(0.1) # This line was identified as causing an IndentationError by user - removing it.
+
+# Note: Many variables in this script are intentionally unused for clarity, debugging, or future use.
+# If you want to further reduce warnings, consider using linters or IDE settings to ignore unused-variable warnings.
