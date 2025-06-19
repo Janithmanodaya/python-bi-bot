@@ -1973,6 +1973,164 @@ def close_open_orders(symbol):
     except ClientError as error: print(f"Error closing open orders for {symbol}: {error}")
     except Exception as e: print(f"Unexpected error closing open orders for {symbol}: {e}")
 
+# --- Account Summary Helper Functions ---
+def get_last_7_days_profit(client_instance):
+    global TARGET_SYMBOLS
+    if not client_instance:
+        print("Error: Client not provided for get_last_7_days_profit.")
+        return 0.0
+
+    seven_days_ago_ms = int((pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=7)).timestamp() * 1000)
+    total_profit = 0.0
+
+    print(f"Fetching trades for last 7 days for symbols: {TARGET_SYMBOLS}")
+    for symbol in TARGET_SYMBOLS:
+        try:
+            trades = client_instance.account_trades(symbol=symbol, startTime=seven_days_ago_ms, recvWindow=6000)
+            symbol_profit = 0.0
+            for trade in trades:
+                price = float(trade['price'])
+                qty = float(trade['qty'])
+                commission = float(trade['commission'])
+                # commission_asset = trade['commissionAsset'] # Assuming commission is in quote asset (USDT)
+
+                # PNL calculation: (price * qty * (1 if side=='SELL' else -1)) - commission
+                if trade['side'].upper() == 'SELL':
+                    symbol_profit += (price * qty)
+                else: # BUY
+                    symbol_profit -= (price * qty)
+                symbol_profit -= commission # Subtract commission regardless of side
+            
+            print(f"Symbol: {symbol}, 7-Day Profit (after commissions): {symbol_profit}")
+            total_profit += symbol_profit
+        except ClientError as ce:
+            print(f"ClientError fetching 7-day trades for {symbol}: {ce}")
+        except Exception as e:
+            print(f"Error processing 7-day trades for {symbol}: {e}")
+    
+    print(f"Total 7-Day Profit for all target symbols: {total_profit}")
+    return total_profit
+
+def get_overall_profit_loss(client_instance):
+    global TARGET_SYMBOLS
+    if not client_instance:
+        print("Error: Client not provided for get_overall_profit_loss.")
+        return 0.0
+
+    total_pnl = 0.0
+    print(f"Fetching all trades for symbols: {TARGET_SYMBOLS} (limit 1000 per symbol)")
+
+    for symbol in TARGET_SYMBOLS:
+        try:
+            # Fetch trades in batches if necessary, for now using limit=1000
+            # To get ALL trades, one might need to loop with fromId parameter
+            trades = client_instance.account_trades(symbol=symbol, limit=1000, recvWindow=6000) # Max limit is 1000
+            symbol_pnl = 0.0
+            for trade in trades:
+                price = float(trade['price'])
+                qty = float(trade['qty'])
+                commission = float(trade['commission'])
+                # commission_asset = trade['commissionAsset']
+
+                if trade['side'].upper() == 'SELL':
+                    symbol_pnl += (price * qty)
+                else: # BUY
+                    symbol_pnl -= (price * qty)
+                symbol_pnl -= commission
+            
+            print(f"Symbol: {symbol}, Overall PNL (after commissions, based on last 1000 trades): {symbol_pnl}")
+            total_pnl += symbol_pnl
+        except ClientError as ce:
+            print(f"ClientError fetching overall trades for {symbol}: {ce}")
+        except Exception as e:
+            print(f"Error processing overall trades for {symbol}: {e}")
+            
+    print(f"Total Overall PNL for all target symbols (based on last 1000 trades per symbol): {total_pnl}")
+    return total_pnl
+
+def get_total_unrealized_pnl(client_instance):
+    if not client_instance:
+        print("Error: Client not provided for get_total_unrealized_pnl.")
+        return 0.0
+
+    positions_data, _ = get_active_positions_data() # Uses global client by default, but good practice to pass if refactoring
+    
+    total_un_pnl = 0.0
+    if positions_data:
+        for position in positions_data:
+            try:
+                total_un_pnl += float(position.get('pnl', 0.0))
+            except ValueError:
+                print(f"Warning: Could not parse PNL for position {position.get('symbol')}")
+                continue
+        print(f"Total Unrealized PNL: {total_un_pnl}")
+        return total_un_pnl
+    else:
+        # This case includes errors from get_active_positions_data or no open positions
+        print("No active positions or error fetching them for unrealized PNL calculation.")
+        return 0.0
+
+def update_account_summary_data(): # Renamed from populate_initial_account_summary
+    global client, root # Ensure access to global client and root
+    global account_summary_balance_var, last_7_days_profit_var, overall_profit_loss_var, total_unrealized_pnl_var
+
+    print("Updating account summary data...") # Changed print statement
+
+    if not client:
+        print("Client not initialized. Cannot update account summary data.") # Changed print statement
+        if root and root.winfo_exists(): # Check if UI elements exist
+            account_summary_balance_var.set("Client N/A")
+            last_7_days_profit_var.set("Client N/A")
+            overall_profit_loss_var.set("Client N/A")
+            total_unrealized_pnl_var.set("Client N/A")
+        return
+
+    # Fetch data using existing helper functions
+    # Balance
+    balance = get_balance_usdt() # Uses global client
+    if root and root.winfo_exists():
+        root.after(0, lambda bal=balance: account_summary_balance_var.set(f"{bal:.2f} USDT" if bal is not None else "N/A"))
+
+    # Last 7 Days Profit
+    seven_day_profit = get_last_7_days_profit(client)
+    if root and root.winfo_exists():
+        root.after(0, lambda p=seven_day_profit: last_7_days_profit_var.set(f"{p:.2f} USDT" if p is not None else "N/A"))
+
+    # Overall Profit/Loss
+    overall_pnl = get_overall_profit_loss(client)
+    if root and root.winfo_exists():
+        root.after(0, lambda pnl=overall_pnl: overall_profit_loss_var.set(f"{pnl:.2f} USDT" if pnl is not None else "N/A"))
+
+    # Total Unrealized PNL
+    unrealized_pnl = get_total_unrealized_pnl(client)
+    if root and root.winfo_exists():
+        root.after(0, lambda upnl=unrealized_pnl: total_unrealized_pnl_var.set(f"{upnl:.2f} USDT" if upnl is not None else "N/A"))
+    
+    print("Account summary data update attempt complete.") # Changed print statement
+
+def scheduled_account_summary_update():
+    global root, client # bot_running no longer directly controls this function's execution flow
+
+    # Check if the root window still exists before proceeding
+    if not (root and root.winfo_exists()):
+        print("Root window closed, stopping continuous account summary updates.")
+        return
+
+    # Attempt to update data regardless of bot state; update_account_summary_data handles client check
+    # Also, client is checked here to avoid unnecessary print/call if known to be None globally already.
+    if client:
+        print("Continuously updating account summary data (every 5s)...")
+        update_account_summary_data()
+    else:
+        # If client is None, update_account_summary_data will set fields to "Client N/A"
+        # So, we can call it to ensure UI reflects the "Client N/A" state correctly.
+        print("Client not available. Account summary will show 'Client N/A'.")
+        update_account_summary_data() 
+
+    # Always reschedule if root window exists, to keep the update loop alive
+    # as long as the application is running.
+    root.after(5000, scheduled_account_summary_update) # 5000ms = 5 seconds
+
 # --- GUI Control Functions & Bot Logic --- ( Largely unchanged, but run_bot_logic will use new get_pos )
 
 def reinitialize_client():
@@ -2087,6 +2245,8 @@ def run_bot_logic():
     global bot_running, status_var, client, start_button, stop_button, testnet_radio, mainnet_radio
     global qty_concurrent_positions, margin_type_setting, leverage, g_conditional_pending_signals, current_price_var # Changed pending_signals to g_conditional_pending_signals
     global balance_var, positions_text_widget, history_text_widget, activity_status_var
+    # Account Summary StringVars for UI update
+    global account_summary_balance_var, last_7_days_profit_var, overall_profit_loss_var, total_unrealized_pnl_var
     # Make all strategy-specific trackers global for modification
     global strategy1_active_trade_info, strategy1_cooldown_active, strategy1_last_trade_was_loss
     global strategy2_active_trades
@@ -2118,10 +2278,17 @@ def run_bot_logic():
             if not bot_running: break
 
             if root and root.winfo_exists() and balance_var:
-                if balance is not None: root.after(0, lambda bal=balance: balance_var.set(f"{bal:.2f} USDT"))
-                else: root.after(0, lambda: balance_var.set("Error or N/A"))
+                if balance is not None: 
+                    root.after(0, lambda bal=balance: balance_var.set(f"{bal:.2f} USDT"))
+                    # The line updating account_summary_balance_var has been removed here
+                else: 
+                    root.after(0, lambda: balance_var.set("Error or N/A"))
+                    # The line updating account_summary_balance_var has been removed here
+                    # (It was implicitly covered by the `if balance is not None` before,
+                    #  so if balance is None, account_summary_balance_var would also be set to N/A by scheduled update)
 
-            if balance is None:
+
+            if balance is None: # This check should be before trying to use client for other fetches
                 msg = 'API/balance error. Retrying...'; print(msg); _status_set(msg); _activity_set("Balance fetch error...")
                 for _ in range(60): 
                     if not bot_running: break
@@ -2129,23 +2296,24 @@ def run_bot_logic():
                 if not bot_running: break
                 continue
 
-            current_balance_msg_for_status = f"Bal: {balance:.2f} USDT." # Keep this line
+            current_balance_msg_for_status = f"Bal: {balance:.2f} USDT." if balance is not None else "Bal: Error"
 
-            # --- BEGIN MODIFICATION: Update Positions and History UI in main loop ---
-            if bot_running: # Check if bot is still running before API calls and UI updates
-                current_positions_for_ui, open_orders_for_ui = get_active_positions_data() # MODIFIED
-                formatted_current_positions_for_ui = format_positions_for_display(current_positions_for_ui, open_orders_for_ui) # MODIFIED
+            # --- Update Positions and History UI in main loop ---
+            # Note: get_total_unrealized_pnl already calls get_active_positions_data.
+            # We can reuse its result or call it again if needed for open_orders_for_ui specifically.
+            # For now, let's assume get_active_positions_data is called again for simplicity here,
+            # or modify get_total_unrealized_pnl to return both if optimization is critical.
+            if bot_running: 
+                current_positions_for_ui, open_orders_for_ui = get_active_positions_data() 
+                formatted_current_positions_for_ui = format_positions_for_display(current_positions_for_ui, open_orders_for_ui) 
                 if root and root.winfo_exists() and positions_text_widget:
                     root.after(0, update_text_widget_content, positions_text_widget, formatted_current_positions_for_ui)
                 
-                # Fetch and update trade history
-                # Using TARGET_SYMBOLS (global) and a limit like 10-15, as per suggestion. Let's use 12.
                 current_history_for_ui = get_trade_history(symbol_list=TARGET_SYMBOLS, limit_per_symbol=12)
                 if root and root.winfo_exists() and history_text_widget:
                     root.after(0, update_text_widget_content, history_text_widget, current_history_for_ui)
                 
-                sleep(0.1) # Brief pause after UI updates / API calls
-            # --- END MODIFICATION ---
+                sleep(0.1) 
             
             # --- Manage Active Conditional Pending Signals (Part 2) ---
             if g_conditional_pending_signals: 
@@ -2876,7 +3044,8 @@ def start_bot():
         if widget and root and root.winfo_exists() and widget.winfo_exists():
             widget.config(state=tk.DISABLED)
 
-    bot_thread = threading.Thread(target=run_bot_logic, daemon=True); bot_thread.start()
+    bot_thread = threading.Thread(target=run_bot_logic, daemon=True)
+    bot_thread.start()
 
 def stop_bot():
     global bot_running, bot_thread, status_var, start_button, stop_button, testnet_radio, mainnet_radio, activity_status_var, conditions_text_widget, current_price_var
@@ -2934,6 +3103,12 @@ if __name__ == "__main__":
     status_var = tk.StringVar(value="Welcome! Select environment."); current_env_var = tk.StringVar(value=current_env); balance_var = tk.StringVar(value="N/A")
     activity_status_var = tk.StringVar(value="Bot Idle") # Initialize activity status
     selected_strategy_var = tk.IntVar(value=ACTIVE_STRATEGY_ID)
+
+    # Account Summary StringVars
+    account_summary_balance_var = tk.StringVar(value="N/A") # Dedicated for account summary section
+    last_7_days_profit_var = tk.StringVar(value="N/A")
+    overall_profit_loss_var = tk.StringVar(value="N/A")
+    total_unrealized_pnl_var = tk.StringVar(value="N/A")
 
     # Backtesting StringVars
     backtest_symbol_var = tk.StringVar(value="XRPUSDT")
@@ -3053,12 +3228,35 @@ if __name__ == "__main__":
     timeframe_label = ttk.Label(controls_frame, text="Timeframe: 5m (fixed)"); timeframe_label.pack(pady=2)
 
     # Backtesting Engine Frame
-    backtesting_frame = ttk.LabelFrame(controls_frame, text="Backtesting Engine")
-    backtesting_frame.pack(fill="x", padx=5, pady=5)
+    # backtesting_frame = ttk.LabelFrame(controls_frame, text="Backtesting Engine") # MOVED
+    # backtesting_frame.pack(fill="x", padx=5, pady=5) # MOVED
 
     # Backtest Parameters Grid
-    backtest_params_grid = ttk.Frame(backtesting_frame); backtest_params_grid.pack(fill="x", padx=5, pady=5)
+    # backtest_params_grid = ttk.Frame(backtesting_frame); backtest_params_grid.pack(fill="x", padx=5, pady=5) # MOVED
+    # Definitions of child widgets for backtest_params_grid are moved down, after its re-instantiation.
+    
+    # backtest_run_button = ttk.Button(backtesting_frame, text="Run Backtest", command=run_backtest_command) # MOVED with its parent frame logic
+    # backtest_run_button.pack(pady=5) # MOVED
 
+
+    buttons_frame = ttk.Frame(controls_frame); buttons_frame.pack(pady=2)
+    start_button = ttk.Button(buttons_frame, text="Start Bot", command=start_bot); start_button.pack(side=tk.LEFT, padx=5)
+    stop_button = ttk.Button(buttons_frame, text="Stop Bot", command=stop_bot, state=tk.DISABLED); stop_button.pack(side=tk.LEFT, padx=5)
+    data_frame = ttk.LabelFrame(root, text="Live Data & History"); data_frame.pack(padx=10, pady=5, fill="both", expand=True)
+
+    # New side-by-side frame for Backtesting and Account Summary
+    side_by_side_frame = ttk.Frame(data_frame)
+    side_by_side_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+    # Backtesting Engine Frame (moved into side_by_side_frame)
+    backtesting_frame = ttk.LabelFrame(side_by_side_frame, text="Backtesting Engine")
+    backtesting_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 5), expand=False) 
+
+    # Backtest Parameters Grid (inside the moved backtesting_frame)
+    backtest_params_grid = ttk.Frame(backtesting_frame)
+    backtest_params_grid.pack(fill="x", padx=5, pady=5)
+
+    # Child UI elements of backtest_params_grid are now defined here:
     ttk.Label(backtest_params_grid, text="Symbol:").grid(row=0, column=0, padx=2, pady=2, sticky='w')
     backtest_symbol_entry = ttk.Entry(backtest_params_grid, textvariable=backtest_symbol_var, width=12)
     backtest_symbol_entry.grid(row=0, column=1, padx=2, pady=2, sticky='w')
@@ -3084,14 +3282,29 @@ if __name__ == "__main__":
     if STRATEGIES: backtest_strategy_combobox.current(0) # Set default selection
     backtest_strategy_combobox.grid(row=2, column=3, padx=2, pady=2, sticky='w')
     
-    backtest_run_button = ttk.Button(backtesting_frame, text="Run Backtest", command=run_backtest_command) # Assign to global
-    backtest_run_button.pack(pady=5)
+    # backtest_run_button is defined after its parent backtesting_frame is fully configured.
+    # It's not a child of backtest_params_grid, so its definition remains separate but after backtesting_frame.
+    # The actual definition of backtest_run_button is handled where backtesting_frame's other direct children are defined.
+    # For this specific move, we ensure backtest_params_grid children are correct.
+    # The backtest_run_button's definition will be placed after backtesting_frame and its main children like backtest_params_grid and backtest_results_frame.
 
+    # Account Summary Frame (New)
+    account_summary_frame = ttk.LabelFrame(side_by_side_frame, text="Account Summary")
+    account_summary_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+    # ttk.Label(account_summary_frame, text="Account summary data will appear here.").pack(padx=10, pady=10) # Remove placeholder
 
-    buttons_frame = ttk.Frame(controls_frame); buttons_frame.pack(pady=2)
-    start_button = ttk.Button(buttons_frame, text="Start Bot", command=start_bot); start_button.pack(side=tk.LEFT, padx=5)
-    stop_button = ttk.Button(buttons_frame, text="Stop Bot", command=stop_bot, state=tk.DISABLED); stop_button.pack(side=tk.LEFT, padx=5)
-    data_frame = ttk.LabelFrame(root, text="Live Data & History"); data_frame.pack(padx=10, pady=5, fill="both", expand=True)
+    # Add new labels to account_summary_frame
+    ttk.Label(account_summary_frame, text="Account Balance:").grid(row=0, column=0, sticky="w", padx=5, pady=2)
+    ttk.Label(account_summary_frame, textvariable=account_summary_balance_var).grid(row=0, column=1, sticky="w", padx=5, pady=2)
+
+    ttk.Label(account_summary_frame, text="Last 7 Days Profit:").grid(row=1, column=0, sticky="w", padx=5, pady=2)
+    ttk.Label(account_summary_frame, textvariable=last_7_days_profit_var).grid(row=1, column=1, sticky="w", padx=5, pady=2)
+
+    ttk.Label(account_summary_frame, text="Overall Profit/Loss:").grid(row=2, column=0, sticky="w", padx=5, pady=2)
+    ttk.Label(account_summary_frame, textvariable=overall_profit_loss_var).grid(row=2, column=1, sticky="w", padx=5, pady=2)
+
+    ttk.Label(account_summary_frame, text="Total Unrealized PNL:").grid(row=3, column=0, sticky="w", padx=5, pady=2)
+    ttk.Label(account_summary_frame, textvariable=total_unrealized_pnl_var).grid(row=3, column=1, sticky="w", padx=5, pady=2)
     
     activity_display_frame = ttk.Frame(data_frame)
     activity_display_frame.pack(pady=(2,2), padx=5, fill="x")
@@ -3119,11 +3332,15 @@ if __name__ == "__main__":
     conditions_text_widget = scrolledtext.ScrolledText(conditions_frame, height=8, width=70, state=tk.DISABLED, wrap=tk.WORD)
     conditions_text_widget.pack(pady=5, padx=5, fill="both", expand=True)
 
-    # Backtest Results Display Area
-    backtest_results_frame = ttk.LabelFrame(data_frame, text="Backtest Results")
-    backtest_results_frame.pack(pady=(2,5), padx=5, fill="both", expand=True)
+    # Backtest Results Display Area (Now inside backtesting_frame)
+    backtest_results_frame = ttk.LabelFrame(backtesting_frame, text="Backtest Results") # Parent changed to backtesting_frame
+    backtest_results_frame.pack(pady=(2,5), padx=5, fill="both", expand=True) # This should be after backtesting_frame is defined
     backtest_results_text_widget = scrolledtext.ScrolledText(backtest_results_frame, height=10, width=70, state=tk.DISABLED, wrap=tk.WORD)
     backtest_results_text_widget.pack(pady=5, padx=5, fill="both", expand=True)
+
+    # backtest_run_button's definition needs to be here, after backtesting_frame is defined and configured.
+    backtest_run_button = ttk.Button(backtesting_frame, text="Run Backtest", command=run_backtest_command) 
+    backtest_run_button.pack(pady=5)
 
 
     status_label = ttk.Label(root, textvariable=status_var, relief=tk.SUNKEN, anchor=tk.W); status_label.pack(padx=10, pady=(0,5), fill="x", side=tk.BOTTOM)
@@ -3140,6 +3357,14 @@ if __name__ == "__main__":
         activity_status_var.set("Bot Idle - Ready")
     
     update_conditions_display_content("System", None, initial_conditions_msg) # Initial display
+
+    # Initial data load for Account Summary
+    update_account_summary_data() 
+
+    # Start the continuous 5-second update cycle for Account Summary
+    if root and root.winfo_exists(): # Check if root exists before scheduling
+        print("Starting continuous 5-second updates for account summary from __main__.")
+        root.after(5000, scheduled_account_summary_update) # Start the first scheduled call after 5 seconds
 
     def on_closing():
         global bot_running, bot_thread, root
