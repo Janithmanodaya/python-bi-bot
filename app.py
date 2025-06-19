@@ -2667,6 +2667,14 @@ def run_bot_logic():
                 symbols_to_check = TARGET_SYMBOLS 
                 for sym_to_check in symbols_to_check:
                     if not bot_running: break
+
+                    # --- MODIFICATION: Check if position already open for this symbol ---
+                    if sym_to_check in open_position_symbols:
+                        print(f"Skipping {sym_to_check} as a position is already open for this symbol.")
+                        _activity_set(f"Skipping {sym_to_check}, already open.") 
+                        sleep(0.1) 
+                        continue # Skip to the next symbol
+                    # --- END MODIFICATION ---
                     
                     current_active_strategy_id = ACTIVE_STRATEGY_ID 
                     
