@@ -1770,6 +1770,19 @@ def open_order(symbol, side, strategy_sl=None, strategy_tp=None, strategy_accoun
             sleep(0.2)
             resp3 = client.new_order(symbol=symbol, side='SELL', type='TAKE_PROFIT_MARKET', quantity=calculated_qty_asset, timeInForce='GTC', stopPrice=tp_actual, reduceOnly=True, newOrderRespType='FULL')
             print(f"TP for BUY {symbol}: {resp3}")
+
+            # --- BEGIN MODIFICATION: Update UI after BUY order ---
+            sleep(0.5) # Allow time for Binance backend to process
+            fresh_positions = get_active_positions_data()
+            formatted_positions = format_positions_for_display(fresh_positions)
+            if root and root.winfo_exists() and positions_text_widget:
+                root.after(0, update_text_widget_content, positions_text_widget, formatted_positions)
+
+            fresh_history = get_trade_history(symbol_list=TARGET_SYMBOLS, limit_per_symbol=10)
+            if root and root.winfo_exists() and history_text_widget:
+                root.after(0, update_text_widget_content, history_text_widget, fresh_history)
+            # --- END MODIFICATION ---
+
         elif side == 'sell':
             resp1 = client.new_order(symbol=symbol, side='SELL', type='LIMIT', quantity=calculated_qty_asset, timeInForce='GTC', price=price, newOrderRespType='FULL')
             print(f"SELL {symbol}: {resp1}")
@@ -1779,6 +1792,19 @@ def open_order(symbol, side, strategy_sl=None, strategy_tp=None, strategy_accoun
             sleep(0.2)
             resp3 = client.new_order(symbol=symbol, side='BUY', type='TAKE_PROFIT_MARKET', quantity=calculated_qty_asset, timeInForce='GTC', stopPrice=tp_actual, reduceOnly=True, newOrderRespType='FULL')
             print(f"TP for SELL {symbol}: {resp3}")
+
+            # --- BEGIN MODIFICATION: Update UI after SELL order ---
+            sleep(0.5) # Allow time for Binance backend to process
+            fresh_positions = get_active_positions_data()
+            formatted_positions = format_positions_for_display(fresh_positions)
+            if root and root.winfo_exists() and positions_text_widget:
+                root.after(0, update_text_widget_content, positions_text_widget, formatted_positions)
+
+            fresh_history = get_trade_history(symbol_list=TARGET_SYMBOLS, limit_per_symbol=10)
+            if root and root.winfo_exists() and history_text_widget:
+                root.after(0, update_text_widget_content, history_text_widget, fresh_history)
+            # --- END MODIFICATION ---
+
     except ClientError as error:
         err_msg_prefix = f"Order Err ({symbol}, {side})"
         if error.error_code == -1111: # Standard Binance code for precision issues
@@ -2050,6 +2076,22 @@ def run_bot_logic():
                 continue
 
             current_balance_msg_for_status = f"Bal: {balance:.2f} USDT." # Keep this line
+
+            # --- BEGIN MODIFICATION: Update Positions and History UI in main loop ---
+            if bot_running: # Check if bot is still running before API calls and UI updates
+                current_positions_for_ui = get_active_positions_data()
+                formatted_current_positions_for_ui = format_positions_for_display(current_positions_for_ui)
+                if root and root.winfo_exists() and positions_text_widget:
+                    root.after(0, update_text_widget_content, positions_text_widget, formatted_current_positions_for_ui)
+                
+                # Fetch and update trade history
+                # Using TARGET_SYMBOLS (global) and a limit like 10-15, as per suggestion. Let's use 12.
+                current_history_for_ui = get_trade_history(symbol_list=TARGET_SYMBOLS, limit_per_symbol=12)
+                if root and root.winfo_exists() and history_text_widget:
+                    root.after(0, update_text_widget_content, history_text_widget, current_history_for_ui)
+                
+                sleep(0.1) # Brief pause after UI updates / API calls
+            # --- END MODIFICATION ---
             
             # --- Manage Active Conditional Pending Signals (Part 2) ---
             if g_conditional_pending_signals: 
