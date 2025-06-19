@@ -1773,8 +1773,8 @@ def open_order(symbol, side, strategy_sl=None, strategy_tp=None, strategy_accoun
 
             # --- BEGIN MODIFICATION: Update UI after BUY order ---
             sleep(0.5) # Allow time for Binance backend to process
-            fresh_positions = get_active_positions_data()
-            formatted_positions = format_positions_for_display(fresh_positions)
+            fresh_positions, fresh_open_orders = get_active_positions_data() # MODIFIED
+            formatted_positions = format_positions_for_display(fresh_positions, fresh_open_orders) # MODIFIED
             if root and root.winfo_exists() and positions_text_widget:
                 root.after(0, update_text_widget_content, positions_text_widget, formatted_positions)
 
@@ -1795,8 +1795,8 @@ def open_order(symbol, side, strategy_sl=None, strategy_tp=None, strategy_accoun
 
             # --- BEGIN MODIFICATION: Update UI after SELL order ---
             sleep(0.5) # Allow time for Binance backend to process
-            fresh_positions = get_active_positions_data()
-            formatted_positions = format_positions_for_display(fresh_positions)
+            fresh_positions, fresh_open_orders = get_active_positions_data() # MODIFIED
+            formatted_positions = format_positions_for_display(fresh_positions, fresh_open_orders) # MODIFIED
             if root and root.winfo_exists() and positions_text_widget:
                 root.after(0, update_text_widget_content, positions_text_widget, formatted_positions)
 
@@ -1827,18 +1827,23 @@ def get_active_positions_data(): # Renamed from get_pos for clarity
     global client, status_var, root
     if not client:
         if root and root.winfo_exists() and status_var: root.after(0, lambda: status_var.set("Client not init. Cannot get positions."))
-        return None
+        return None, None # Return None for both positions and orders
 
     positions_data = []
+    open_orders_by_symbol = {}
+    active_symbols = set()
+
     try:
-        raw_positions = client.get_position_risk()
+        raw_positions = client.get_position_risk(recvWindow=6000) # Added recvWindow
         if raw_positions:
             for p_data in raw_positions:
                 try:
                     pos_amt_float = float(p_data.get('positionAmt', '0'))
                     if pos_amt_float != 0:
+                        symbol = p_data['symbol']
+                        active_symbols.add(symbol)
                         positions_data.append({
-                            'symbol': p_data['symbol'],
+                            'symbol': symbol,
                             'qty': pos_amt_float,
                             'entry_price': float(p_data.get('entryPrice', '0')),
                             'mark_price': float(p_data.get('markPrice', '0')),
@@ -1848,29 +1853,78 @@ def get_active_positions_data(): # Renamed from get_pos for clarity
                 except ValueError as ve:
                     print(f"ValueError parsing position data for {p_data.get('symbol')}: {ve}")
                     continue
-        return positions_data
-    except ClientError as e:
-        msg = f"API Error (Positions): {e.error_message[:40] if hasattr(e, 'error_message') and e.error_message else str(e)[:40]}"
-        print(msg)
-        if root and root.winfo_exists() and status_var: root.after(0, lambda s=msg: status_var.set(s))
-        return None
-    except Exception as e_gen:
-        msg = f"Error (Positions): {str(e_gen)[:40]}"
-        print(msg)
-        if root and root.winfo_exists() and status_var: root.after(0, lambda s=msg: status_var.set(s))
-        return None
+        
+        # Fetch open orders for active symbols
+        for symbol in active_symbols:
+            try:
+                # print(f"DEBUG: Fetching open orders for active symbol: {symbol}") # Debug print
+                orders = client.get_orders(symbol=symbol, recvWindow=6000)
+                open_orders_by_symbol[symbol] = [o for o in orders if o.get('status') in ['NEW', 'PARTIALLY_FILLED']]
+                # print(f"DEBUG: Found {len(open_orders_by_symbol[symbol])} open orders for {symbol}") # Debug print
+            except ClientError as ce:
+                print(f"ClientError fetching orders for {symbol}: {ce.error_message if hasattr(ce, 'error_message') else ce}")
+                open_orders_by_symbol[symbol] = [] # Store empty list on error
+            except Exception as e_orders:
+                print(f"Generic error fetching orders for {symbol}: {e_orders}")
+                open_orders_by_symbol[symbol] = []
 
-def format_positions_for_display(positions_data_list):
-    if positions_data_list is None:
+
+        return positions_data, open_orders_by_symbol
+
+    except ClientError as e:
+        msg = f"API Error (Positions/Orders): {e.error_message[:40] if hasattr(e, 'error_message') and e.error_message else str(e)[:40]}"
+        print(msg)
+        if root and root.winfo_exists() and status_var: root.after(0, lambda s=msg: status_var.set(s))
+        return None, None # Return None for both
+    except Exception as e_gen:
+        msg = f"Error (Positions/Orders): {str(e_gen)[:40]}"
+        print(msg)
+        if root and root.winfo_exists() and status_var: root.after(0, lambda s=msg: status_var.set(s))
+        return None, None # Return None for both
+
+def format_positions_for_display(positions_data_list, open_orders_by_symbol=None):
+    if open_orders_by_symbol is None: # Graceful handling if None is passed
+        open_orders_by_symbol = {}
+        
+    # Remove or comment out the placeholder print statement
+    # if open_orders_by_symbol: 
+    #     print(f"DEBUG: format_positions_for_display received {len(open_orders_by_symbol)} symbols with open orders information.")
+
+    if positions_data_list is None: # This check is for the positions_data_list itself
         return ["Error fetching positions or client not ready."]
     if not positions_data_list:
         return ["No open positions."]
 
     formatted_strings = []
     for p in positions_data_list:
+        symbol = p['symbol']
+        tp_price_str = "N/A"
+        sl_price_str = "N/A"
+
+        if open_orders_by_symbol and symbol in open_orders_by_symbol:
+            orders_for_symbol = open_orders_by_symbol[symbol]
+            for order in orders_for_symbol:
+                # Binance API typically uses boolean for reduceOnly.
+                # Making the check robust for potential stringified booleans as well, though less likely.
+                is_reduce_only = False
+                reduce_only_val = order.get('reduceOnly')
+                if isinstance(reduce_only_val, bool):
+                    is_reduce_only = reduce_only_val
+                elif isinstance(reduce_only_val, str): # Handle 'true'/'false' if they ever appear
+                    is_reduce_only = reduce_only_val.lower() == 'true'
+
+                if is_reduce_only:
+                    order_type = order.get('type')
+                    stop_price = order.get('stopPrice', "N/A") # Default to N/A if stopPrice key is missing
+                    if order_type == 'TAKE_PROFIT_MARKET':
+                        tp_price_str = str(stop_price) # Ensure it's a string
+                    elif order_type == 'STOP_MARKET':
+                        sl_price_str = str(stop_price) # Ensure it's a string
+        
         formatted_strings.append(
             f"Sym: {p['symbol']}, Qty: {p['qty']}, Entry: {p['entry_price']:.4f}, " +
-            f"MarkP: {p['mark_price']:.4f}, PnL: {p['pnl']:.2f} USDT, Lev: {p['leverage']}" # leverage is already string "Xx"
+            f"SL: {sl_price_str}, TP: {tp_price_str}, MarkP: {p['mark_price']:.4f}, " +
+            f"PnL: {p['pnl']:.2f} USDT, Lev: {p['leverage']}"
         )
     return formatted_strings
 
@@ -2079,8 +2133,8 @@ def run_bot_logic():
 
             # --- BEGIN MODIFICATION: Update Positions and History UI in main loop ---
             if bot_running: # Check if bot is still running before API calls and UI updates
-                current_positions_for_ui = get_active_positions_data()
-                formatted_current_positions_for_ui = format_positions_for_display(current_positions_for_ui)
+                current_positions_for_ui, open_orders_for_ui = get_active_positions_data() # MODIFIED
+                formatted_current_positions_for_ui = format_positions_for_display(current_positions_for_ui, open_orders_for_ui) # MODIFIED
                 if root and root.winfo_exists() and positions_text_widget:
                     root.after(0, update_text_widget_content, positions_text_widget, formatted_current_positions_for_ui)
                 
@@ -2274,9 +2328,11 @@ def run_bot_logic():
                     close_open_orders(s4_active_symbol)
             
             if not bot_running: break
-            active_positions_data = get_active_positions_data() # Refresh positions after potential timeout actions
+            # Refresh positions AND open orders after potential timeout actions
+            active_positions_data, active_open_orders_data = get_active_positions_data() # MODIFIED
             if not bot_running: break
             open_position_symbols = [p['symbol'] for p in active_positions_data] if active_positions_data else []
+            # active_open_orders_data is now available if needed for further logic here
 
             # --- Position Closure Detection and Resetting Strategy Trackers ---
             s1_sym = strategy1_active_trade_info['symbol']
