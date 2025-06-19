@@ -2953,24 +2953,24 @@ def apply_settings():
 
         # Account Risk Percent
         arp_val = float(account_risk_percent_var.get())
-        if not (0 < arp_val < 1): # Should be a fraction like 0.02
-            messagebox.showerror("Settings Error", "Account Risk % must be between 0 and 1 (e.g., 0.02 for 2%).")
+        if not (0 < arp_val <= 100):
+            messagebox.showerror("Settings Error", "Account Risk % must be a value between 0 and 100 (e.g., enter 2 for 2%).")
             return False
-        ACCOUNT_RISK_PERCENT = arp_val
+        ACCOUNT_RISK_PERCENT = arp_val / 100
 
         # Take Profit Percent
         tp_val = float(tp_percent_var.get())
-        if not (0 < tp_val < 1): # Should be a fraction like 0.01
-            messagebox.showerror("Settings Error", "Take Profit % must be between 0 and 1 (e.g., 0.01 for 1%).")
+        if not (0 < tp_val <= 1000):
+            messagebox.showerror("Settings Error", "Take Profit % must be a positive value (e.g., enter 1 for 1%, 150 for 150%). Recommended range 0-1000.")
             return False
-        TP_PERCENT = tp_val
+        TP_PERCENT = tp_val / 100
 
         # Stop Loss Percent
         sl_val = float(sl_percent_var.get())
-        if not (0 < sl_val < 1): # Should be a fraction like 0.005
-            messagebox.showerror("Settings Error", "Stop Loss % must be between 0 and 1 (e.g., 0.005 for 0.5%).")
+        if not (0 < sl_val <= 100):
+            messagebox.showerror("Settings Error", "Stop Loss % must be a value between 0 and 100 (e.g., enter 0.5 for 0.5%).")
             return False
-        SL_PERCENT = sl_val
+        SL_PERCENT = sl_val / 100
 
         # Leverage
         lev_val = int(leverage_var.get())
@@ -3131,19 +3131,19 @@ if __name__ == "__main__":
 
     # ACCOUNT_RISK_PERCENT
     ttk.Label(params_input_frame, text="Account Risk %:").grid(row=0, column=0, padx=2, pady=2, sticky='w')
-    account_risk_percent_var = tk.StringVar(value=str(ACCOUNT_RISK_PERCENT))
+    account_risk_percent_var = tk.StringVar(value=str(ACCOUNT_RISK_PERCENT * 100))
     account_risk_percent_entry = ttk.Entry(params_input_frame, textvariable=account_risk_percent_var, width=10)
     account_risk_percent_entry.grid(row=0, column=1, padx=2, pady=2, sticky='w')
 
     # TP_PERCENT
     ttk.Label(params_input_frame, text="Take Profit %:").grid(row=0, column=2, padx=2, pady=2, sticky='w') # Next column
-    tp_percent_var = tk.StringVar(value=str(TP_PERCENT))
+    tp_percent_var = tk.StringVar(value=str(TP_PERCENT * 100))
     tp_percent_entry = ttk.Entry(params_input_frame, textvariable=tp_percent_var, width=10)
     tp_percent_entry.grid(row=0, column=3, padx=2, pady=2, sticky='w')
 
     # SL_PERCENT
     ttk.Label(params_input_frame, text="Stop Loss %:").grid(row=1, column=0, padx=2, pady=2, sticky='w')
-    sl_percent_var = tk.StringVar(value=str(SL_PERCENT))
+    sl_percent_var = tk.StringVar(value=str(SL_PERCENT * 100))
     sl_percent_entry = ttk.Entry(params_input_frame, textvariable=sl_percent_var, width=10)
     sl_percent_entry.grid(row=1, column=1, padx=2, pady=2, sticky='w')
 
