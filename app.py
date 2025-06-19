@@ -448,9 +448,9 @@ strategy4_active_trade_info_default = {'symbol': None, 'entry_time': None, 'entr
 g_conditional_pending_signals = {}
 
 TARGET_SYMBOLS = ["BTCUSDT", "ETHUSDT", "USDTUSDT", "XRPUSDT", "BNBUSDT", "SOLUSDT", "USDCUSDT", "DOGEUSDT", "TRXUSDT", "ADAUSDT"]
-ACCOUNT_RISK_PERCENT = 0.02
-SCALPING_REQUIRED_BUY_CONDITIONS = 3
-SCALPING_REQUIRED_SELL_CONDITIONS = 3
+ACCOUNT_RISK_PERCENT = 0.005
+SCALPING_REQUIRED_BUY_CONDITIONS = 1
+SCALPING_REQUIRED_SELL_CONDITIONS = 1
 TP_PERCENT = 0.01
 SL_PERCENT = 0.005
 leverage = 5
@@ -626,27 +626,27 @@ def get_balance_usdt():
     global client
     if not client: return None
     try:
-        response = client.balance(recvWindow=6000)
-        for elem in response:
-            if elem['asset'] == 'USDT': return float(elem['balance'])
+        # Use client.account() for more detailed futures account information
+        account_info = client.account(recvWindow=6000) 
+        if account_info and 'assets' in account_info:
+            for asset_detail in account_info['assets']:
+                if asset_detail['asset'] == 'USDT':
+                    # Return the 'availableBalance' for USDT
+                    print(f"DEBUG: USDT Asset Detail from client.account(): {asset_detail}") # Add this debug line
+                    return float(asset_detail['availableBalance']) 
+        print("DEBUG: USDT asset not found or 'assets' key missing in client.account() response.") # Add this debug line
     except ClientError as error:
-        if error.error_code == -2015:
+        if error.error_code == -2015: # Keep existing specific error handling
             msg = (
-                "ERROR: Invalid API Key or Permissions for Futures Trading (-2015).\n"
-                "Please check the following on your Binance account:\n"
-                "1. API Key is correctly copied.\n"
-                "2. 'Enable Futures' permission is CHECKED for this API key.\n"
-                "3. IP access restrictions are correctly configured for this API key if enabled.\n"
-                "   Your current IP might not be whitelisted."
+                "ERROR: Invalid API Key or Permissions for Futures Trading (-2015) in get_balance_usdt (using client.account()).\n"
+                "Please check API key validity, 'Enable Futures' permission, and IP restrictions."
             )
-            print(f"Error get_balance_usdt: {msg}")
-            # Optionally, update GUI status if this function is called from a place that can update UI
-            # if status_var and root and root.winfo_exists(): root.after(0, lambda: status_var.set("API Key/Permission Error (-2015)"))
+            print(msg)
         else:
-            print(f"Error get_balance_usdt: {error.error_code} - {error.error_message}")
+            print(f"ClientError in get_balance_usdt (using client.account()): {error.error_code} - {error.error_message}")
     except Exception as e:
-        print(f"Unexpected error get_balance_usdt: {e}")
-    return None
+        print(f"Unexpected error in get_balance_usdt (using client.account()): {e}")
+    return None # Return None if balance couldn't be fetched
 
 def get_tickers_usdt():
     global client
@@ -791,7 +791,7 @@ def strategy_ema_supertrend(symbol):
         'signal': 'none',
         'conditions_met_count': 0,
         'conditions_to_start_wait_threshold': 2,
-        'conditions_for_full_signal_threshold': 3,
+        'conditions_for_full_signal_threshold': 2, # Changed from 3 to 2
         'all_conditions_status': {
             'ema_cross_up': False, 'st_green': False, 'rsi_long_ok': False,
             'ema_cross_down': False, 'st_red': False, 'rsi_short_ok': False,
@@ -875,7 +875,7 @@ def strategy_ema_supertrend(symbol):
 
         price_precision = get_price_precision(symbol)
 
-        if met_buy_conditions == base_return['conditions_for_full_signal_threshold']:
+        if met_buy_conditions >= 2: # Changed from == base_return['conditions_for_full_signal_threshold']
             final_signal_str = 'up'
             base_return['conditions_met_count'] = met_buy_conditions
             swing_low = min(kl['Low'].iloc[-2], kl['Low'].iloc[-3])
@@ -890,7 +890,7 @@ def strategy_ema_supertrend(symbol):
                     base_return['error'] = f"TP price {tp_price_calc} is at or below entry {current_price} for LONG"
                     final_signal_str = 'none' 
         
-        elif met_sell_conditions == base_return['conditions_for_full_signal_threshold']:
+        elif met_sell_conditions >= 2: # Changed from == base_return['conditions_for_full_signal_threshold']
             final_signal_str = 'down'
             base_return['conditions_met_count'] = met_sell_conditions
             swing_high = max(kl['High'].iloc[-2], kl['High'].iloc[-3])
@@ -939,7 +939,7 @@ def strategy_bollinger_band_mean_reversion(symbol):
         'signal': 'none',
         'conditions_met_count': 0,
         'conditions_to_start_wait_threshold': 2,
-        'conditions_for_full_signal_threshold': 3,
+        'conditions_for_full_signal_threshold': 2, # Changed from 3 to 2
         'all_conditions_status': {
             'price_below_lower_bb': False, 'rsi_oversold': False, 'volume_confirms_long': False,
             'price_above_upper_bb': False, 'rsi_overbought': False, 'volume_confirms_short': False,
@@ -1019,7 +1019,7 @@ def strategy_bollinger_band_mean_reversion(symbol):
         price_precision = get_price_precision(symbol)
         buffer_percentage = 0.001
 
-        if met_buy_conditions == base_return['conditions_for_full_signal_threshold']:
+        if met_buy_conditions >= 2: # Changed from == base_return['conditions_for_full_signal_threshold']
             final_signal_str = 'up'
             base_return['conditions_met_count'] = met_buy_conditions
             sl_price_calc = round(last_lower_bb - (current_price * buffer_percentage), price_precision)
@@ -1031,7 +1031,7 @@ def strategy_bollinger_band_mean_reversion(symbol):
                 base_return['error'] = f"TP price {tp_price_calc} is at or below entry {current_price} for LONG"
                 final_signal_str = 'none'
         
-        elif met_sell_conditions == base_return['conditions_for_full_signal_threshold']:
+        elif met_sell_conditions >= 2: # Changed from == base_return['conditions_for_full_signal_threshold']
             final_signal_str = 'down'
             base_return['conditions_met_count'] = met_sell_conditions
             sl_price_calc = round(last_upper_bb + (current_price * buffer_percentage), price_precision)
@@ -1090,7 +1090,7 @@ def strategy_vwap_breakout_momentum(symbol):
         'signal': 'none',
         'conditions_met_count': 0,
         'conditions_to_start_wait_threshold': 2,
-        'conditions_for_full_signal_threshold': 3,
+        'conditions_for_full_signal_threshold': 2, # Changed from 3 to 2
         'all_conditions_status': {
             'price_above_vwap_2bar_long': False, 'macd_positive_rising': False, 'atr_volatility_confirms_long': False,
             'price_below_vwap_2bar_short': False, 'macd_negative_falling': False, 'atr_volatility_confirms_short': False,
@@ -1195,7 +1195,7 @@ def strategy_vwap_breakout_momentum(symbol):
         sl_price_calc, tp_price_calc = None, None # Initialize calc variables
         price_precision = get_price_precision(symbol)
 
-        if met_buy_conditions == base_return['conditions_for_full_signal_threshold']:
+        if met_buy_conditions >= 2: # Changed from == base_return['conditions_for_full_signal_threshold']
             final_signal_str = 'up'
             base_return['conditions_met_count'] = met_buy_conditions
             sl_price_calc = round(last_vwap, price_precision)
@@ -1207,7 +1207,7 @@ def strategy_vwap_breakout_momentum(symbol):
                 base_return['error'] = f"S3 TP price {tp_price_calc} is at or below entry {current_price} for LONG"
                 final_signal_str = 'none'
 
-        elif met_sell_conditions == base_return['conditions_for_full_signal_threshold']:
+        elif met_sell_conditions >= 2: # Changed from == base_return['conditions_for_full_signal_threshold']
             final_signal_str = 'down'
             base_return['conditions_met_count'] = met_sell_conditions
             sl_price_calc = round(last_vwap, price_precision)
@@ -1401,7 +1401,7 @@ def strategy_macd_divergence_pivot(symbol):
             conditions['price_at_support_long'] = price_at_support
             conditions['stoch_oversold_turning_up'] = stoch_oversold_turning_up
 
-            if price_at_support and stoch_oversold_turning_up:
+            if price_at_support: # Removed stoch_oversold_turning_up
                 final_signal = 'up'
 
         elif bearish_divergence_found:
@@ -1413,7 +1413,7 @@ def strategy_macd_divergence_pivot(symbol):
             conditions['price_at_resistance_short'] = price_at_resistance
             conditions['stoch_overbought_turning_down'] = stoch_overbought_turning_down
 
-            if price_at_resistance and stoch_overbought_turning_down:
+            if price_at_resistance: # Removed stoch_overbought_turning_down
                 final_signal = 'down'
         
         # SL/TP Calculation
@@ -1456,31 +1456,24 @@ def strategy_rsi_enhanced(symbol):
     base_return = {
         'signal': 'none',
         'conditions_met_count': 0,
-        'conditions_to_start_wait_threshold': 4, # All 4 primary conditions
-        'conditions_for_full_signal_threshold': 4, # All 4 primary conditions
+        'conditions_to_start_wait_threshold': 2, 
+        'conditions_for_full_signal_threshold': 2, 
         'all_conditions_status': {
             'rsi_crossed_above_30': False, 'duration_oversold_met': False, 
             'rsi_slope_up_met': False, 'price_above_sma50_met': False, 'bullish_divergence_found': False,
             'rsi_crossed_below_70': False, 'duration_overbought_met': False, 
             'rsi_slope_down_met': False, 'price_below_sma50_met': False, 'bearish_divergence_found': False,
-            # 'num_buy_conditions_met': 0, 'num_sell_conditions_met': 0 # These can be calculated at the end
         },
         'sl_price': None, 'tp_price': None, 'error': None,
-        'account_risk_percent': 0.01 # Strategy-specific risk for S5
+        'account_risk_percent': 0.01 
     }
 
     rsi_period = 14
     sma_period = 50
-    duration_lookback = 5 # For checking 5 consecutive periods in overbought/oversold
-    slope_lookback_rsi = 3 # For checking RSI change over 3 periods
+    duration_lookback = 5 
+    slope_lookback_rsi = 3 
     divergence_candles = 15
-
-    # Min klines: SMA period + duration_lookback + slope_lookback_rsi (roughly, divergence adds more)
-    # SMA50 needs 50 candles. Duration needs 5 past the cross. Slope needs 3 past the cross.
-    # RSI needs 14. Divergence needs 15 past the current.
-    # So, roughly: max(sma_period, rsi_period + divergence_candles) + few for buffer = max(50, 14+15) + buffer ~ 50 + 5 = 55-60
-    # Let's aim for a bit more to be safe for all conditions: sma_period + divergence_candles + duration_lookback + slope_lookback_rsi ~ 50 + 15 + 5 + 3 = 73
-    min_klines = 75 # Increased for safety margin
+    min_klines = 75 
 
     kl = klines(symbol)
     if kl is None or len(kl) < min_klines:
@@ -1495,15 +1488,11 @@ def strategy_rsi_enhanced(symbol):
             base_return['error'] = f'S5 Indicator calculation failed for {symbol} (RSI or SMA empty)'
             return base_return
         
-        # Ensure enough data points after indicator calculation for all lookbacks
-        # Need at least sma_period valid points for SMA, and rsi_period + duration_lookback + slope_lookback_rsi for RSI conditions
         if len(rsi_series) < (duration_lookback + slope_lookback_rsi + 1) or len(sma50_series) < 1 or len(kl['Close']) < (duration_lookback + slope_lookback_rsi + 1) :
              base_return['error'] = f'S5 Indicator series too short for S5 {symbol} after calculation.'
              return base_return
         
-        # Check for NaNs in the latest required indicator values
-        # Indices: -1 (current), -2 (previous), -3 (for slope), up to -(duration_lookback + 1) for duration check start
-        required_rsi_indices = list(range(-1, -(duration_lookback + slope_lookback_rsi + 2), -1)) # Max lookback for RSI related checks
+        required_rsi_indices = list(range(-1, -(duration_lookback + slope_lookback_rsi + 2), -1)) 
         if any(pd.isna(rsi_series.iloc[i]) for i in required_rsi_indices if abs(i) <= len(rsi_series)) or            pd.isna(sma50_series.iloc[-1]) or pd.isna(kl['Close'].iloc[-1]):
             base_return['error'] = f'S5 NaN value in critical indicator/price data for {symbol}'
             return base_return
@@ -1511,35 +1500,28 @@ def strategy_rsi_enhanced(symbol):
         current_price = kl['Close'].iloc[-1]
         
         # --- Buy Signal Conditions ---
-        # Cond 1: RSI Crossing
         cond_rsi_crossed_above_30 = rsi_series.iloc[-1] >= 30 and rsi_series.iloc[-2] < 30
         base_return['all_conditions_status']['rsi_crossed_above_30'] = cond_rsi_crossed_above_30
 
-        # Cond 2: Duration in Oversold Zone (checks t-2, t-3, t-4, t-5, t-6)
-        # Indices for duration check: from - (duration_lookback + 1) up to -2
-        # Example: duration_lookback = 5. Indices: -6, -5, -4, -3, -2
         cond_duration_oversold_met = True
-        if len(rsi_series) >= (duration_lookback + 2): # Make sure there's enough data for the lookback
-            for i in range(2, duration_lookback + 2): # Checks 5 candles: index -2, -3, -4, -5, -6
+        if len(rsi_series) >= (duration_lookback + 2): 
+            for i in range(2, duration_lookback + 2): 
                 if rsi_series.iloc[-i] >= 30:
                     cond_duration_oversold_met = False
                     break
-        else: # Not enough data for full duration check
+        else: 
             cond_duration_oversold_met = False
         base_return['all_conditions_status']['duration_oversold_met'] = cond_duration_oversold_met
         
-        # Cond 3: RSI Slope (Momentum) (RSI[-1] - RSI[-3] >= 10)
         cond_rsi_slope_up_met = (rsi_series.iloc[-1] - rsi_series.iloc[-3]) >= 10 if len(rsi_series) >= 3 else False
         base_return['all_conditions_status']['rsi_slope_up_met'] = cond_rsi_slope_up_met
 
-        # Cond 4: Moving Average Confirmation
         cond_price_above_sma50_met = current_price > sma50_series.iloc[-1]
         base_return['all_conditions_status']['price_above_sma50_met'] = cond_price_above_sma50_met
 
-        # Cond 5: Optional Bullish Divergence
         cond_bullish_divergence_found = False
         if len(kl['Low']) >= divergence_candles + 1 and len(rsi_series) >= divergence_candles + 1:
-            for i in range(1, divergence_candles + 1): # Check from t-1 back to t-1-divergence_candles
+            for i in range(1, divergence_candles + 1): 
                 past_low_idx = -1 - i
                 if kl['Low'].iloc[-1] < kl['Low'].iloc[past_low_idx] and rsi_series.iloc[-1] > rsi_series.iloc[past_low_idx]:
                     cond_bullish_divergence_found = True
@@ -1549,30 +1531,25 @@ def strategy_rsi_enhanced(symbol):
         num_core_buy_conditions_met = sum([cond_rsi_crossed_above_30, cond_duration_oversold_met, cond_rsi_slope_up_met, cond_price_above_sma50_met])
 
         # --- Sell Signal Conditions ---
-        # Cond 1: RSI Crossing
         cond_rsi_crossed_below_70 = rsi_series.iloc[-1] <= 70 and rsi_series.iloc[-2] > 70
         base_return['all_conditions_status']['rsi_crossed_below_70'] = cond_rsi_crossed_below_70
 
-        # Cond 2: Duration in Overbought Zone
         cond_duration_overbought_met = True
         if len(rsi_series) >= (duration_lookback + 2):
-            for i in range(2, duration_lookback + 2): # Checks 5 candles: index -2, -3, -4, -5, -6
+            for i in range(2, duration_lookback + 2): 
                 if rsi_series.iloc[-i] <= 70:
                     cond_duration_overbought_met = False
                     break
-        else: # Not enough data
+        else: 
             cond_duration_overbought_met = False
         base_return['all_conditions_status']['duration_overbought_met'] = cond_duration_overbought_met
 
-        # Cond 3: RSI Slope (Momentum) (RSI[-3] - RSI[-1] >= 10)
         cond_rsi_slope_down_met = (rsi_series.iloc[-3] - rsi_series.iloc[-1]) >= 10 if len(rsi_series) >= 3 else False
         base_return['all_conditions_status']['rsi_slope_down_met'] = cond_rsi_slope_down_met
         
-        # Cond 4: Moving Average Confirmation
         cond_price_below_sma50_met = current_price < sma50_series.iloc[-1]
         base_return['all_conditions_status']['price_below_sma50_met'] = cond_price_below_sma50_met
 
-        # Cond 5: Optional Bearish Divergence
         cond_bearish_divergence_found = False
         if len(kl['High']) >= divergence_candles + 1 and len(rsi_series) >= divergence_candles + 1:
             for i in range(1, divergence_candles + 1):
@@ -1586,7 +1563,7 @@ def strategy_rsi_enhanced(symbol):
 
         price_precision = get_price_precision(symbol)
         
-        if num_core_buy_conditions_met == 4: # All 4 core buy conditions met
+        if num_core_buy_conditions_met >= 2: 
             base_return['signal'] = 'up'
             base_return['conditions_met_count'] = num_core_buy_conditions_met
             sl_p = round(current_price * (1 - SL_PERCENT), price_precision)
@@ -1598,7 +1575,7 @@ def strategy_rsi_enhanced(symbol):
                 base_return['sl_price'] = sl_p
                 base_return['tp_price'] = tp_p
         
-        elif num_core_sell_conditions_met == 4: # All 4 core sell conditions met
+        elif num_core_sell_conditions_met >= 2: 
             base_return['signal'] = 'down'
             base_return['conditions_met_count'] = num_core_sell_conditions_met
             sl_p = round(current_price * (1 + SL_PERCENT), price_precision)
@@ -1610,30 +1587,23 @@ def strategy_rsi_enhanced(symbol):
                 base_return['sl_price'] = sl_p
                 base_return['tp_price'] = tp_p
         else: 
-            # No full signal, set conditions_met_count to the higher of the two for potential partial signal info
             base_return['conditions_met_count'] = max(num_core_buy_conditions_met, num_core_sell_conditions_met)
             base_return['signal'] = 'none'
 
-        if base_return['error'] and base_return['signal'] == 'none': # If an error occurred that invalidated a signal
+        if base_return['error'] and base_return['signal'] == 'none': 
              print(f"Strategy {STRATEGIES.get(5, 'S5')} for {symbol}: Signal invalidated by error: {base_return['error']}")
         
-        # print(f"DEBUG S5 ({symbol}): Signal={base_return['signal']}, BuyConds={num_core_buy_conditions_met}, SellConds={num_core_sell_conditions_met}, AllStatus={base_return['all_conditions_status']}")
-
     except IndexError as ie:
-        # This might happen if kline or indicator series are shorter than expected despite initial checks
         base_return['error'] = f"S5 IndexError for {symbol}: {str(ie)}. RSI len: {len(rsi_series) if 'rsi_series' in locals() else 'N/A'}, KL len: {len(kl) if 'kl' in locals() else 'N/A'}"
         base_return['signal'] = 'none'
         print(f"DEBUG: {base_return['error']}")
     except Exception as e:
-        # import traceback # For deeper debugging if needed
-        # print(traceback.format_exc())
         base_return['error'] = f"S5 Exception for {symbol}: {str(e)}"
         base_return['signal'] = 'none'
         print(f"DEBUG: {base_return['error']}")
-        # Ensure all_conditions_status boolean flags are reset on general exception
-        for key in base_return['all_conditions_status']:
-            if isinstance(base_return['all_conditions_status'][key], bool):
-                 base_return['all_conditions_status'][key] = False
+        for key_cond in base_return['all_conditions_status']:
+            if isinstance(base_return['all_conditions_status'][key_cond], bool):
+                 base_return['all_conditions_status'][key_cond] = False
     
     return base_return
 
@@ -1647,6 +1617,7 @@ def set_leverage(symbol, level):
     except Exception as e: print(f"Unexpected error setting leverage for {symbol}: {e}")
 
 def set_mode(symbol, margin_type):
+    print(f"DEBUG: set_mode received symbol='{symbol}', margin_type='{margin_type}' (type: {type(margin_type)})")
     global client
     if not client: return
     try:
@@ -1678,10 +1649,26 @@ def get_qty_precision(symbol):
 def open_order(symbol, side, strategy_sl=None, strategy_tp=None, strategy_account_risk_percent=None):
     global client, ACCOUNT_RISK_PERCENT, SL_PERCENT, TP_PERCENT # SL_PERCENT, TP_PERCENT used if strategy_sl/tp are None
     if not client: return
+
+    original_side_param = side # Store original for logging
+    if side == 'up':
+        side = 'buy'
+        print(f"INFO: Mapped side parameter from 'up' to 'buy' for symbol {symbol}")
+    elif side == 'down':
+        side = 'sell'
+        print(f"INFO: Mapped side parameter from 'down' to 'sell' for symbol {symbol}")
+    elif side not in ['buy', 'sell']: # If it's already 'buy' or 'sell', do nothing, otherwise error
+        print(f"ERROR: Invalid side parameter '{original_side_param}' received in open_order for symbol {symbol}. Expected 'up', 'down', 'buy', or 'sell'. Aborting order.")
+        return
+
     try:
         price = float(client.ticker_price(symbol)['price'])
         qty_precision = get_qty_precision(symbol)
         price_precision = get_price_precision(symbol)
+        print(f"DEBUG: open_order: Initial price={price}, qty_precision={qty_precision}, price_precision={price_precision}")
+        if not isinstance(price_precision, int) or price_precision < 0:
+            print(f"Warning: Invalid price_precision '{price_precision}' for {symbol}. Defaulting to 4.")
+            price_precision = 4
 
         account_balance = get_balance_usdt()
         if account_balance is None or account_balance <= 0: return
@@ -1719,12 +1706,21 @@ def open_order(symbol, side, strategy_sl=None, strategy_tp=None, strategy_accoun
             return
 
         position_size_usdt = capital_to_risk_usdt / sl_for_sizing
+        # Define a cap for notional position size based on a fraction of available balance
+        CAP_FRACTION_OF_BALANCE = 0.50 
+        max_permissible_notional_value = account_balance * CAP_FRACTION_OF_BALANCE
+
+        original_calculated_pos_size_usdt = position_size_usdt # For logging
+
+        if position_size_usdt > max_permissible_notional_value:
+            position_size_usdt = max_permissible_notional_value
+            print(f"INFO: Position size capped for {symbol}. Original calc: {original_calculated_pos_size_usdt:.2f} USDT, Capped to: {position_size_usdt:.2f} USDT (max {CAP_FRACTION_OF_BALANCE*100}% of available balance).")
         calculated_qty_asset = round(position_size_usdt / price, qty_precision)
-        if calculated_qty_asset <= 0:
-            print(f"Warning: Calculated quantity is {calculated_qty_asset} for {symbol}. Aborting order.")
+        if calculated_qty_asset <= 0: # Re-check qty after potential capping
+            print(f"Warning: Calculated quantity is {calculated_qty_asset} for {symbol} after potential capping. Aborting order.")
             return
 
-        print(f"Order Details ({symbol}): Bal={account_balance:.2f}, RiskCap={capital_to_risk_usdt:.2f} (using {current_account_risk*100:.2f}% risk), SL_Dist_for_Sizing={sl_for_sizing*100:.2f}%, PosSizeUSD={position_size_usdt:.2f}, Qty={calculated_qty_asset}")
+        print(f"Order Details ({symbol}): AvailableBal={account_balance:.2f}, RiskCap={capital_to_risk_usdt:.2f} (using {current_account_risk*100:.2f}% risk), SL_Dist_for_Sizing={sl_for_sizing*100:.2f}%, PosSizeUSD={position_size_usdt:.2f}, Qty={calculated_qty_asset}")
 
         sl_actual, tp_actual = None, None
 
@@ -1733,12 +1729,23 @@ def open_order(symbol, side, strategy_sl=None, strategy_tp=None, strategy_accoun
             tp_actual = strategy_tp
             print(f"Using strategy-defined SL: {sl_actual}, TP: {tp_actual} for {symbol} {side}")
         else:
+            print(f"DEBUG: Calculating percentage-based SL/TP for {symbol} {side}: price={price}, SL_PERCENT={SL_PERCENT}, TP_PERCENT={TP_PERCENT}, price_precision={price_precision}")
             if side == 'buy':
                 sl_actual = round(price - price * SL_PERCENT, price_precision)
                 tp_actual = round(price + price * TP_PERCENT, price_precision)
+                print(f"DEBUG BUY: sl_actual={sl_actual}, tp_actual={tp_actual}")
+                if sl_actual is None:
+                    print(f"ERROR: sl_actual became None after round() for {symbol} {side}. Inputs: price={price}, SL_PERCENT={SL_PERCENT}, precision={price_precision}")
+                if tp_actual is None:
+                    print(f"ERROR: tp_actual became None after round() for {symbol} {side}. Inputs: price={price}, TP_PERCENT={TP_PERCENT}, precision={price_precision}")
             elif side == 'sell':
                 sl_actual = round(price + price * SL_PERCENT, price_precision)
                 tp_actual = round(price - price * TP_PERCENT, price_precision)
+                print(f"DEBUG SELL: sl_actual={sl_actual}, tp_actual={tp_actual}")
+                if sl_actual is None:
+                    print(f"ERROR: sl_actual became None after round() for {symbol} {side}. Inputs: price={price}, SL_PERCENT={SL_PERCENT}, precision={price_precision}")
+                if tp_actual is None:
+                    print(f"ERROR: tp_actual became None after round() for {symbol} {side}. Inputs: price={price}, TP_PERCENT={TP_PERCENT}, precision={price_precision}")
             print(f"Using percentage-based SL: {sl_actual} (from {SL_PERCENT*100}%), TP: {tp_actual} (from {TP_PERCENT*100}%) for {symbol} {side}")
 
         if sl_actual is None or tp_actual is None :
@@ -2134,7 +2141,8 @@ def run_bot_logic():
                         elif strategy_id == 3: strategy3_active_trade_info.update({'symbol': symbol, 'entry_time': trade_entry_ts, 'entry_price': entry_price_for_tracking, 'side': side, 'initial_atr_for_profit_target': current_strategy_output.get('last_atr'), 'vwap_trail_active': False })
                         
                         if key in g_conditional_pending_signals: del g_conditional_pending_signals[key]
-                        sleep(1); continue
+                        sleep(1)
+                        break    # Trade initiated, break from processing more pending signals this cycle
 
                     if time_elapsed_seconds >= 300:
                         print(f"TIMEOUT: {STRATEGIES[strategy_id]} for {symbol} ({side}). Did not confirm. Met {current_met_count}/{conditions_for_full_signal_threshold}.")
@@ -2170,15 +2178,31 @@ def run_bot_logic():
                         # Get_loc might fail if entry_time is not found or not unique after 'nearest'
                         # This assumes klines are sorted and entry_time is a valid timestamp from a previous kline
                         try:
-                            entry_candle_index = kl_s1.index.get_loc(s1_entry_time, method='nearest')
-                            candles_passed = len(kl_s1) - 1 - entry_candle_index
-                            if candles_passed >= 3:
-                                print(f"Strategy 1: Closing {s1_active_symbol} due to 3-candle timeout.")
-                                close_open_orders(s1_active_symbol) # This cancels SL/TP orders
-                                # Actual position closure is detected in the next block by checking open_position_symbols
-                        except KeyError: # If entry_time is too old and not in the fetched klines
-                            print(f"Strategy 1: Entry time for {s1_active_symbol} not found in recent klines for timeout check. Potentially very old trade.")
-                            # Consider closing if it's very old and still tracked. For now, this means it's older than klines fetched.
+                            # Ensure s1_entry_time is timezone-aware (UTC) if kl_s1.index is.
+                            # kl_s1.index should be UTC from klines()
+                            if s1_entry_time.tzinfo is None and kl_s1.index.tzinfo is not None:
+                                s1_entry_time = s1_entry_time.tz_localize(kl_s1.index.tzinfo) # Localize to kline's tz
+                            elif s1_entry_time.tzinfo is not None and kl_s1.index.tzinfo is None:
+                                # This case is less likely if klines() always returns tz-aware
+                                print(f"Warning: s1_entry_time is tz-aware but kline index is not for {s1_active_symbol}. Comparing directly.")
+                            elif s1_entry_time.tzinfo is not None and kl_s1.index.tzinfo is not None and s1_entry_time.tzinfo != kl_s1.index.tzinfo:
+                                s1_entry_time = s1_entry_time.tz_convert(kl_s1.index.tzinfo) # Convert to kline's tz
+
+                            closest_ts = kl_s1.index.asof(s1_entry_time)
+
+                            if pd.isna(closest_ts):
+                                print(f"Strategy 1: Entry time {s1_entry_time} for {s1_active_symbol} not found within kline range for timeout check (asof returned NaT).")
+                                entry_candle_index = -1 # Sentinel to indicate not found
+                            else:
+                                entry_candle_index = kl_s1.index.get_loc(closest_ts)
+
+                            if entry_candle_index != -1: # Proceed only if found
+                                candles_passed = len(kl_s1) - 1 - entry_candle_index
+                                if candles_passed >= 3: # Original timeout logic
+                                    print(f"Strategy 1: Closing {s1_active_symbol} due to 3-candle timeout (candles passed: {candles_passed}).")
+                                    close_open_orders(s1_active_symbol)
+                        except Exception as e_s1_timeout_loc: # Broader exception catch for safety
+                            print(f"Strategy 1: Error during entry time lookup for {s1_active_symbol}: {e_s1_timeout_loc}")
                         
                 except Exception as e_to_s1: print(f"Error during S1 timeout check for {s1_active_symbol}: {e_to_s1}")
             
