@@ -2513,7 +2513,7 @@ def run_bot_logic():
 
     loop_count = 0
     while bot_running:
-        try:
+        try: # Outer try for the main loop
             _activity_set("Starting new scan cycle...")
             if client is None:
                 _status_set("Client is None. Bot stopping."); _activity_set("Bot Idle - Client Error")
@@ -3146,22 +3146,38 @@ def run_bot_logic():
 
             for _ in range(180): 
                 if not bot_running: break
+                # Removed the specific try-except for ClientError and Exception from here,
+                # as they will be caught by the main loop's new try-except block.
                 
-        except ClientError as ce:
-            err_msg = f"API Error: {ce.error_message if hasattr(ce, 'error_message') and ce.error_message else ce}. Retrying..."
-            print(err_msg); _status_set(err_msg); _activity_set("API Error. Retrying...")
-            if "signature" in str(ce).lower() or "timestamp" in str(ce).lower(): reinitialize_client()
+        except ClientError as ce: # This will now be part of the outer try-except
+            err_msg = f"API Error: {ce.error_message if hasattr(ce, 'error_message') and ce.error_message else ce}. Recovering and continuing..."
+            print(err_msg); _status_set(err_msg); _activity_set("API Error. Recovering and continuing...")
+            if "signature" in str(ce).lower() or "timestamp" in str(ce).lower():
+                print("Reinitializing client due to signature/timestamp error in API call.")
+                reinitialize_client()
+            # The existing cool-down loop for retrying
             for _ in range(60): 
-                if not bot_running: break; sleep(1)
-        except Exception as e:
-            err_msg = f"Bot loop error: {e}. Retrying..."
-            print(err_msg); _status_set(err_msg); _activity_set("Loop Error. Retrying...")
-            # import traceback # For debugging
-            # print(traceback.format_exc()) # For debugging
-            for _ in range(60):
-                if not bot_running: break; sleep(1)
+                if not bot_running: break
+                sleep(1)
             if not bot_running: break
-            continue
+            continue # Ensure the loop continues after this specific error handling
+
+        except Exception as e: # This is the new main loop exception handler
+            err_msg = f"Bot loop error: {e}. Recovering and continuing..."
+            print(err_msg)
+            if root and root.winfo_exists(): # Check if UI elements exist before updating
+                _status_set(err_msg)
+                _activity_set("Error caught. Recovering...")
+            
+            # import traceback # For debugging, uncomment if needed
+            # print(traceback.format_exc()) # For debugging
+
+            # The existing cool-down loop for retrying provides a pause before the next cycle
+            for _ in range(60):
+                if not bot_running: break
+                sleep(1)
+            if not bot_running: break # Exit if bot was stopped during sleep
+            continue # Explicitly continue to the next iteration of the while loop
 
     _activity_set("Bot Idle")
     if root and root.winfo_exists() and current_price_var:
