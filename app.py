@@ -15,73 +15,48 @@ from backtesting import Backtest, Strategy
 # pandas is already imported
 # ta is already imported, ensure it's there.
 
-DEFAULT_ATR_MULTIPLIER = 2.0 # Moved here
-def calculate_dynamic_sl_tp(symbol: str, entry_price: float, side: str, atr_period: int = 14, rr: float = 1.5, atr_multiplier: float = DEFAULT_ATR_MULTIPLIER): # Changed buffer to atr_multiplier
-    # Ensure klines, get_price_precision are available in the scope or passed as arguments if necessary.
-    # Assuming they are globally accessible or defined in the same file as per the existing code structure.
-    # Also assumes 'ta' and 'pd' (pandas) are imported.
+def calculate_dynamic_sl_tp(symbol: str, entry_price: float, side: str, rr: float = 1.5): # atr_period and atr_multiplier removed (DEFAULT_ATR_MULTIPLIER was also removed)
+    global SWING_LOOKBACK_PERIOD # Ensure access to the global
 
     return_value = {'sl_price': None, 'tp_price': None, 'error': None}
     
-    kl_df = klines(symbol) # Fetches 5m klines by default from existing function
+    kl_df = klines(symbol) 
 
     if kl_df is None or kl_df.empty:
         return_value['error'] = f"No kline data returned for {symbol}."
         return return_value
 
-    # Ensure enough data for ATR calculation (atr_period + a few for stability)
-    if len(kl_df) < atr_period + 5: # Arbitrary buffer of 5, adjust if needed
-        return_value['error'] = f"Insufficient kline data for ATR calculation on {symbol} (need at least {atr_period + 5}, got {len(kl_df)})."
+    # Call get_swing_high_low
+    # get_swing_high_low handles its own check for sufficient data based on SWING_LOOKBACK_PERIOD
+    swing_points = get_swing_high_low(kl_df, SWING_LOOKBACK_PERIOD)
+
+    if swing_points.get('error'):
+        return_value['error'] = f"Failed to get swing points: {swing_points['error']}"
         return return_value
+    
+    swing_high_value = swing_points.get('swing_high')
+    swing_low_value = swing_points.get('swing_low')
 
-    try:
-        # Ensure columns are correct, klines() function seems to provide them
-        atr_indicator = ta.volatility.AverageTrueRange(
-            high=kl_df['High'],
-            low=kl_df['Low'],
-            close=kl_df['Close'],
-            window=atr_period,
-            fillna=False # Ensure NaNs are not filled prematurely by ta library itself
-        )
-        atr_series = atr_indicator.average_true_range()
-
-        if atr_series is None or atr_series.empty:
-            return_value['error'] = f"ATR calculation resulted in an empty series for {symbol}."
-            return return_value
-        
-        # Get the last valid ATR value
-        atr_value = atr_series.dropna().iloc[-1] if not atr_series.dropna().empty else None
-
-        if atr_value is None or pd.isna(atr_value) or atr_value == 0: # ATR could be zero in very flat markets
-            return_value['error'] = f"Invalid ATR value ({atr_value}) for {symbol}. Cannot calculate SL/TP."
-            return return_value
-
-    except Exception as e:
-        return_value['error'] = f"Error calculating ATR for {symbol}: {str(e)}"
+    if swing_high_value is None or swing_low_value is None:
+        return_value['error'] = "Swing high/low value is None without explicit error from get_swing_high_low."
         return return_value
 
     price_precision = get_price_precision(symbol)
     if not isinstance(price_precision, int) or price_precision < 0:
-        # Fallback precision if get_price_precision fails or returns invalid
         print(f"Warning: Invalid price_precision '{price_precision}' for {symbol} from get_price_precision. Defaulting to 2.")
         price_precision = 2 
-
 
     sl_calculated = None
     tp_calculated = None
 
     if side == 'up':
-        sl_calculated = entry_price - (atr_value * atr_multiplier) # Changed calculation
-        # Ensure SL is actually below entry for a long trade
+        sl_calculated = swing_low_value
         if sl_calculated >= entry_price:
             return_value['error'] = f"Calculated SL ({sl_calculated}) for 'up' side is not below entry price ({entry_price})."
-            # Optionally, could adjust SL here, e.g. entry_price - atr_value (without buffer), or just return error.
-            # For now, returning error as per strict interpretation.
             return return_value
         tp_calculated = entry_price + (entry_price - sl_calculated) * rr
     elif side == 'down':
-        sl_calculated = entry_price + (atr_value * atr_multiplier) # Changed calculation
-        # Ensure SL is actually above entry for a short trade
+        sl_calculated = swing_high_value
         if sl_calculated <= entry_price:
             return_value['error'] = f"Calculated SL ({sl_calculated}) for 'down' side is not above entry price ({entry_price})."
             return return_value
@@ -94,28 +69,63 @@ def calculate_dynamic_sl_tp(symbol: str, entry_price: float, side: str, atr_peri
     try:
         return_value['sl_price'] = round(sl_calculated, price_precision)
         return_value['tp_price'] = round(tp_calculated, price_precision)
-    except TypeError as te: # Handles if sl_calculated or tp_calculated are None (shouldn't happen if logic above is correct)
-         return_value['error'] = f"Error rounding SL/TP for {symbol}: {str(te)}. SL Calc: {sl_calculated}, TP Calc: {tp_calculated}, Precision: {price_precision}"
-         return_value['sl_price'] = None # Ensure they are None on error
+    except TypeError: 
+         return_value['error'] = f"Error rounding SL/TP for {symbol}. SL Calc: {sl_calculated}, TP Calc: {tp_calculated}, Precision: {price_precision}"
+         return_value['sl_price'] = None 
          return_value['tp_price'] = None
          return return_value
-
 
     # Final validation for TP vs Entry
     if side == 'up' and return_value['tp_price'] is not None and return_value['tp_price'] <= entry_price:
         return_value['error'] = f"Calculated TP ({return_value['tp_price']}) for 'up' side is not above entry price ({entry_price})."
-        # Setting TP to None, but SL might still be valid or could also be invalidated.
-        # Depending on requirements, might invalidate both or try to recalculate TP with a minimum distance.
-        # For now, just flagging the error and nullifying TP.
         return_value['tp_price'] = None 
-        # Decide if SL should also be None or if the signal should be entirely invalidated.
-        # The current plan implies strategies will handle this if SL/TP is None or error is present.
-
+        # Optional: return return_value to invalidate the trade entirely
     elif side == 'down' and return_value['tp_price'] is not None and return_value['tp_price'] >= entry_price:
         return_value['error'] = f"Calculated TP ({return_value['tp_price']}) for 'down' side is not below entry price ({entry_price})."
         return_value['tp_price'] = None
+        # Optional: return return_value
 
     return return_value
+
+
+def get_swing_high_low(kl_df, lookback_period):
+    """
+    Analyzes kline data to find the highest high and lowest low within a lookback period,
+    excluding the most recent (current) candle.
+    Assumes kl_df contains latest COMPLETED candles.
+    """
+    if not isinstance(kl_df, pd.DataFrame) or not all(col in kl_df.columns for col in ['High', 'Low']):
+        return {'swing_high': None, 'swing_low': None, 'error': "Invalid DataFrame or missing 'High'/'Low' columns."}
+
+    if not isinstance(lookback_period, int) or lookback_period <= 0:
+        return {'swing_high': None, 'swing_low': None, 'error': "Lookback period must be a positive integer."}
+
+    # We are looking at candles *before* the most recent one.
+    # If kl_df has 100 rows, and lookback is 20:
+    # We need at least lookback_period + 1 rows to look back *before* the last row.
+    if len(kl_df) < lookback_period + 1:
+        return {'swing_high': None, 'swing_low': None, 'error': 'Insufficient data for lookback'}
+
+    try:
+        # Lookback window is kl_df.iloc[-lookback_period-1:-1]
+        # This selects rows from (len(kl_df) - lookback_period - 1) up to (len(kl_df) - 2)
+        # For example, if len(kl_df) = 100, lookback_period = 20:
+        # iloc[-21:-1] which covers indices 79 to 98. The last candle is index 99.
+        relevant_data = kl_df.iloc[-lookback_period-1:-1]
+        
+        if relevant_data.empty: # Should be caught by len check, but as a safeguard
+             return {'swing_high': None, 'swing_low': None, 'error': 'Relevant data slice for lookback is empty'}
+
+        swing_high = relevant_data['High'].max()
+        swing_low = relevant_data['Low'].min()
+
+        if pd.isna(swing_high) or pd.isna(swing_low):
+            return {'swing_high': None, 'swing_low': None, 'error': 'NaN found in swing high/low calculation'}
+
+        return {'swing_high': swing_high, 'swing_low': swing_low}
+
+    except Exception as e:
+        return {'swing_high': None, 'swing_low': None, 'error': f'Error during swing calculation: {str(e)}'}
 
 
 # Placeholder function for klines_extended
@@ -251,7 +261,7 @@ class BacktestStrategyWrapper(Strategy):
     # Strategy-specific parameters (example for the provided strategy)
     ema_period = 200
     rsi_period = 14
-    ATR_PERIOD = 14 # New class variable for ATR period
+    # ATR_PERIOD = 14 # Removed as self.atr is no longer used for SL/TP
     ST_ATR_PERIOD_S0 = 10 # Strategy 0 Supertrend ATR Period
     ST_MULTIPLIER_S0 = 1.5  # Strategy 0 Supertrend Multiplier
     
@@ -264,7 +274,7 @@ class BacktestStrategyWrapper(Strategy):
     
     current_strategy_id = 5 # Defaulting to 5 for "New RSI-Based Strategy"
     RR = 1.5  # Risk/Reward ratio
-    SL_ATR_MULTI = DEFAULT_ATR_MULTIPLIER # Multiplier for ATR to determine SL distance
+    # SL_ATR_MULTI = 2.0 # Removed as it's no longer used for SL calculation
     PRICE_PRECISION_BT = 4 # Default rounding precision for backtesting
 
     def init(self):
@@ -273,7 +283,7 @@ class BacktestStrategyWrapper(Strategy):
             # price = self.data.Close # This line can be removed or commented out
             self.rsi_period_val = getattr(self, 'rsi_period', 14) # Use rsi_period from class if available
             self.rsi = self.I(rsi_bt, self.data.Close, self.rsi_period_val, name='RSI_S5')
-            self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, self.ATR_PERIOD, name='ATR_dynSLTP_S5')
+            # self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, self.ATR_PERIOD, name='ATR_dynSLTP_S5') # Removed
             # Removed other indicator initializations (macd, ema, bol_h, bol_l)
         elif self.current_strategy_id == 1:
             print(f"DEBUG BacktestStrategyWrapper.init: Initializing indicators for Strategy ID 1 (EMA Cross + SuperTrend)")
@@ -285,7 +295,7 @@ class BacktestStrategyWrapper(Strategy):
             self.st_s1 = self.I(supertrend_numerical_bt, self.data.High, self.data.Low, self.data.Close, self.ST_ATR_PERIOD_S1, self.ST_MULTIPLIER_S1, name='ST_S1', overlay=True)
             
             # ATR for dynamic SL/TP (using the existing self.ATR_PERIOD class var for consistency)
-            self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, self.ATR_PERIOD, name='ATR_dynSLTP_S1')
+            # self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, self.ATR_PERIOD, name='ATR_dynSLTP_S1') # Removed
         elif self.current_strategy_id == 0:
             print(f"DEBUG BacktestStrategyWrapper.init: Initializing indicators for Strategy ID 0 (Original Scalping)")
             self.ema9_s0 = self.I(ema_bt, self.data.Close, 9, name='EMA9_S0')
@@ -299,13 +309,14 @@ class BacktestStrategyWrapper(Strategy):
             self.st_s0 = self.I(supertrend_numerical_bt, self.data.High, self.data.Low, self.data.Close, self.ST_ATR_PERIOD_S0, self.ST_MULTIPLIER_S0, name='Supertrend_S0', overlay=True) 
 
             # ATR for dynamic SL/TP (using the existing self.ATR_PERIOD class var)
-            self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, self.ATR_PERIOD, name='ATR_dynSLTP_S0')
+            # self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, self.ATR_PERIOD, name='ATR_dynSLTP_S0') # Removed
         else:
-            print(f"DEBUG BacktestStrategyWrapper.init: Strategy ID {self.current_strategy_id} - Full indicator setup not yet implemented. Defaulting to RSI and ATR.")
+            print(f"DEBUG BacktestStrategyWrapper.init: Strategy ID {self.current_strategy_id} - Full indicator setup not yet implemented. Defaulting to RSI.")
             self.rsi_period_val = getattr(self, 'rsi_period', 14)
             self.rsi = self.I(rsi_bt, self.data.Close, self.rsi_period_val, name=f'RSI_default_{self.current_strategy_id}')
-            self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, self.ATR_PERIOD, name=f'ATR_default_{self.current_strategy_id}')
-            print(f"DEBUG BacktestStrategyWrapper.init: Defaulted ATR indicator for strategy ID {self.current_strategy_id}.")
+            # self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, self.ATR_PERIOD, name=f'ATR_default_{self.current_strategy_id}') # Removed
+            # print(f"DEBUG BacktestStrategyWrapper.init: Defaulted ATR indicator for strategy ID {self.current_strategy_id}.") # Modified print
+            print(f"DEBUG BacktestStrategyWrapper.init: Default indicator setup for strategy ID {self.current_strategy_id} (RSI only).")
 
 
     def next(self):
@@ -362,46 +373,53 @@ class BacktestStrategyWrapper(Strategy):
                 trade_side = 'sell'
 
             if trade_side:
-                current_atr_s0 = self.atr[-1] 
+                entry_price = price # Use current price as entry
 
-                if pd.isna(current_atr_s0) or current_atr_s0 == 0:
-                    print(f"DEBUG S0: Invalid ATR ({current_atr_s0}) for dynamic SL/TP. Symbol {trade_symbol}. Skipping trade.")
+                # Swing High/Low SL/TP Logic for S0
+                if len(self.data.Close) <= SWING_LOOKBACK_PERIOD + 1:
+                    print(f"DEBUG S0: Not enough data for SWING_LOOKBACK_PERIOD ({SWING_LOOKBACK_PERIOD}). Data len: {len(self.data.Close)}. Symbol {trade_symbol}. Skipping trade.")
                     return
 
-                sl_price = None
-                tp_price = None
-                entry_price = price 
+                prev_swing_low = self.data.Low[-SWING_LOOKBACK_PERIOD-1:-1].min()
+                prev_swing_high = self.data.High[-SWING_LOOKBACK_PERIOD-1:-1].max()
+
+                if pd.isna(prev_swing_low) or pd.isna(prev_swing_high):
+                    print(f"DEBUG S0: NaN swing point. Low: {prev_swing_low}, High: {prev_swing_high}. Symbol {trade_symbol}. Skipping trade.")
+                    return
+
+                sl_price_calculated = None
+                tp_price_calculated = None
 
                 if trade_side == 'buy':
-                    sl_distance = current_atr_s0 * self.SL_ATR_MULTI
-                    calculated_sl = entry_price - sl_distance
-                    if calculated_sl >= entry_price:
-                        print(f"DEBUG S0: Invalid SL for BUY. SL: {calculated_sl}, Entry: {entry_price}. Symbol {trade_symbol}. Skipping trade.")
+                    sl_price_calculated = prev_swing_low
+                    if sl_price_calculated >= entry_price:
+                        print(f"DEBUG S0: Invalid SL for BUY. SL (Swing Low {prev_swing_low:.{self.PRICE_PRECISION_BT}f}) >= Entry ({entry_price:.{self.PRICE_PRECISION_BT}f}). Symbol {trade_symbol}. Skipping trade.")
                         return
-                    risk_per_unit = entry_price - calculated_sl
-                    calculated_tp = entry_price + (risk_per_unit * self.RR)
-                    sl_price = round(calculated_sl, self.PRICE_PRECISION_BT)
-                    tp_price = round(calculated_tp, self.PRICE_PRECISION_BT)
-                    if tp_price <= entry_price:
-                        print(f"DEBUG S0: Invalid TP for BUY. TP: {tp_price}, Entry: {entry_price}. Symbol {trade_symbol}. Skipping trade.")
+                    risk_per_unit = entry_price - sl_price_calculated
+                    tp_price_calculated = entry_price + (risk_per_unit * self.RR)
+                    if tp_price_calculated <= entry_price:
+                        print(f"DEBUG S0: Invalid TP for BUY. TP ({tp_price_calculated:.{self.PRICE_PRECISION_BT}f}) <= Entry ({entry_price:.{self.PRICE_PRECISION_BT}f}). Symbol {trade_symbol}. Skipping trade.")
                         return
-                    print(f"DEBUG S0: BUY Signal - Entry: {entry_price}, ATR: {current_atr_s0:.{self.PRICE_PRECISION_BT}f}, SL: {sl_price}, TP: {tp_price}. Conditions met: {num_buy_conditions_true}")
+                    
+                    sl_price = round(sl_price_calculated, self.PRICE_PRECISION_BT)
+                    tp_price = round(tp_price_calculated, self.PRICE_PRECISION_BT)
+                    print(f"DEBUG S0: BUY Signal - Entry: {entry_price:.{self.PRICE_PRECISION_BT}f}, SwingLow: {prev_swing_low:.{self.PRICE_PRECISION_BT}f}, SL: {sl_price}, TP: {tp_price}. Conditions met: {num_buy_conditions_true}")
                     self.buy(sl=sl_price, tp=tp_price, size=0.02)
 
                 elif trade_side == 'sell':
-                    sl_distance = current_atr_s0 * self.SL_ATR_MULTI
-                    calculated_sl = entry_price + sl_distance
-                    if calculated_sl <= entry_price:
-                        print(f"DEBUG S0: Invalid SL for SELL. SL: {calculated_sl}, Entry: {entry_price}. Symbol {trade_symbol}. Skipping trade.")
+                    sl_price_calculated = prev_swing_high
+                    if sl_price_calculated <= entry_price:
+                        print(f"DEBUG S0: Invalid SL for SELL. SL (Swing High {prev_swing_high:.{self.PRICE_PRECISION_BT}f}) <= Entry ({entry_price:.{self.PRICE_PRECISION_BT}f}). Symbol {trade_symbol}. Skipping trade.")
                         return
-                    risk_per_unit = calculated_sl - entry_price
-                    calculated_tp = entry_price - (risk_per_unit * self.RR)
-                    sl_price = round(calculated_sl, self.PRICE_PRECISION_BT)
-                    tp_price = round(calculated_tp, self.PRICE_PRECISION_BT)
-                    if tp_price >= entry_price:
-                        print(f"DEBUG S0: Invalid TP for SELL. TP: {tp_price}, Entry: {entry_price}. Symbol {trade_symbol}. Skipping trade.")
+                    risk_per_unit = sl_price_calculated - entry_price
+                    tp_price_calculated = entry_price - (risk_per_unit * self.RR)
+                    if tp_price_calculated >= entry_price:
+                        print(f"DEBUG S0: Invalid TP for SELL. TP ({tp_price_calculated:.{self.PRICE_PRECISION_BT}f}) >= Entry ({entry_price:.{self.PRICE_PRECISION_BT}f}). Symbol {trade_symbol}. Skipping trade.")
                         return
-                    print(f"DEBUG S0: SELL Signal - Entry: {entry_price}, ATR: {current_atr_s0:.{self.PRICE_PRECISION_BT}f}, SL: {sl_price}, TP: {tp_price}. Conditions met: {num_sell_conditions_true}")
+
+                    sl_price = round(sl_price_calculated, self.PRICE_PRECISION_BT)
+                    tp_price = round(tp_price_calculated, self.PRICE_PRECISION_BT)
+                    print(f"DEBUG S0: SELL Signal - Entry: {entry_price:.{self.PRICE_PRECISION_BT}f}, SwingHigh: {prev_swing_high:.{self.PRICE_PRECISION_BT}f}, SL: {sl_price}, TP: {tp_price}. Conditions met: {num_sell_conditions_true}")
                     self.sell(sl=sl_price, tp=tp_price, size=0.02)
 
         elif self.current_strategy_id == 1:
@@ -449,57 +467,70 @@ class BacktestStrategyWrapper(Strategy):
                 trade_side = 'sell'
 
             if trade_side:
-                current_atr_s1 = self.atr[-1] 
+                entry_price = price # Use current price as entry
 
-                if pd.isna(current_atr_s1) or current_atr_s1 == 0:
-                    print(f"DEBUG S1: Invalid ATR ({current_atr_s1}) for dynamic SL/TP. Symbol {trade_symbol}. Skipping trade.")
+                # Swing High/Low SL/TP Logic for S1
+                if len(self.data.Close) <= SWING_LOOKBACK_PERIOD + 1:
+                    print(f"DEBUG S1: Not enough data for SWING_LOOKBACK_PERIOD ({SWING_LOOKBACK_PERIOD}). Data len: {len(self.data.Close)}. Symbol {trade_symbol}. Skipping trade.")
                     return
 
-                sl_price_calc = None # Renamed to avoid confusion with sl_price from outer scope
-                tp_price_calc = None # Renamed to avoid confusion with tp_price from outer scope
-                entry_price = price 
+                prev_swing_low = self.data.Low[-SWING_LOOKBACK_PERIOD-1:-1].min()
+                prev_swing_high = self.data.High[-SWING_LOOKBACK_PERIOD-1:-1].max()
+
+                if pd.isna(prev_swing_low) or pd.isna(prev_swing_high):
+                    print(f"DEBUG S1: NaN swing point. Low: {prev_swing_low}, High: {prev_swing_high}. Symbol {trade_symbol}. Skipping trade.")
+                    return
+                
+                sl_price_calculated = None
+                tp_price_calculated = None
 
                 if trade_side == 'buy':
-                    sl_distance = current_atr_s1 * self.SL_ATR_MULTI
-                    calculated_sl = entry_price - sl_distance
-                    if calculated_sl >= entry_price:
-                        print(f"DEBUG S1: Invalid SL for BUY. SL: {calculated_sl}, Entry: {entry_price}. Symbol {trade_symbol}. Skipping trade.")
+                    sl_price_calculated = prev_swing_low
+                    if sl_price_calculated >= entry_price:
+                        print(f"DEBUG S1: Invalid SL for BUY. SL (Swing Low {prev_swing_low:.{self.PRICE_PRECISION_BT}f}) >= Entry ({entry_price:.{self.PRICE_PRECISION_BT}f}). Symbol {trade_symbol}. Skipping trade.")
                         return
-                    risk_per_unit = entry_price - calculated_sl
-                    calculated_tp = entry_price + (risk_per_unit * self.RR)
-                    sl_price_calc = round(calculated_sl, self.PRICE_PRECISION_BT)
-                    tp_price_calc = round(calculated_tp, self.PRICE_PRECISION_BT)
-                    if tp_price_calc <= entry_price:
-                        print(f"DEBUG S1: Invalid TP for BUY. TP: {tp_price_calc}, Entry: {entry_price}. Symbol {trade_symbol}. Skipping trade.")
+                    risk_per_unit = entry_price - sl_price_calculated
+                    tp_price_calculated = entry_price + (risk_per_unit * self.RR)
+                    if tp_price_calculated <= entry_price:
+                        print(f"DEBUG S1: Invalid TP for BUY. TP ({tp_price_calculated:.{self.PRICE_PRECISION_BT}f}) <= Entry ({entry_price:.{self.PRICE_PRECISION_BT}f}). Symbol {trade_symbol}. Skipping trade.")
                         return
                     
-                    print(f"DEBUG S1: BUY Signal - Entry: {entry_price}, ATR: {current_atr_s1:.{self.PRICE_PRECISION_BT}f}, SL: {sl_price_calc}, TP: {tp_price_calc}. Conditions met: {num_buy_conditions_met_s1}/3")
-                    self.buy(sl=sl_price_calc, tp=tp_price_calc, size=0.02) 
+                    sl_price = round(sl_price_calculated, self.PRICE_PRECISION_BT)
+                    tp_price = round(tp_price_calculated, self.PRICE_PRECISION_BT)
+                    print(f"DEBUG S1: BUY Signal - Entry: {entry_price:.{self.PRICE_PRECISION_BT}f}, SwingLow: {prev_swing_low:.{self.PRICE_PRECISION_BT}f}, SL: {sl_price}, TP: {tp_price}. Conditions met: {num_buy_conditions_met_s1}/3")
+                    self.buy(sl=sl_price, tp=tp_price, size=0.02) 
 
                 elif trade_side == 'sell':
-                    sl_distance = current_atr_s1 * self.SL_ATR_MULTI
-                    calculated_sl = entry_price + sl_distance
-                    if calculated_sl <= entry_price:
-                        print(f"DEBUG S1: Invalid SL for SELL. SL: {calculated_sl}, Entry: {entry_price}. Symbol {trade_symbol}. Skipping trade.")
+                    sl_price_calculated = prev_swing_high
+                    if sl_price_calculated <= entry_price:
+                        print(f"DEBUG S1: Invalid SL for SELL. SL (Swing High {prev_swing_high:.{self.PRICE_PRECISION_BT}f}) <= Entry ({entry_price:.{self.PRICE_PRECISION_BT}f}). Symbol {trade_symbol}. Skipping trade.")
                         return
-                    risk_per_unit = calculated_sl - entry_price
-                    calculated_tp = entry_price - (risk_per_unit * self.RR)
-                    sl_price_calc = round(calculated_sl, self.PRICE_PRECISION_BT)
-                    tp_price_calc = round(calculated_tp, self.PRICE_PRECISION_BT)
-                    if tp_price_calc >= entry_price:
-                        print(f"DEBUG S1: Invalid TP for SELL. TP: {tp_price_calc}, Entry: {entry_price}. Symbol {trade_symbol}. Skipping trade.")
+                    risk_per_unit = sl_price_calculated - entry_price
+                    tp_price_calculated = entry_price - (risk_per_unit * self.RR)
+                    if tp_price_calculated >= entry_price:
+                        print(f"DEBUG S1: Invalid TP for SELL. TP ({tp_price_calculated:.{self.PRICE_PRECISION_BT}f}) >= Entry ({entry_price:.{self.PRICE_PRECISION_BT}f}). Symbol {trade_symbol}. Skipping trade.")
                         return
 
-                    print(f"DEBUG S1: SELL Signal - Entry: {entry_price}, ATR: {current_atr_s1:.{self.PRICE_PRECISION_BT}f}, SL: {sl_price_calc}, TP: {tp_price_calc}. Conditions met: {num_sell_conditions_met_s1}/3")
-                    self.sell(sl=sl_price_calc, tp=tp_price_calc, size=0.02)
+                    sl_price = round(sl_price_calculated, self.PRICE_PRECISION_BT)
+                    tp_price = round(tp_price_calculated, self.PRICE_PRECISION_BT)
+                    print(f"DEBUG S1: SELL Signal - Entry: {entry_price:.{self.PRICE_PRECISION_BT}f}, SwingHigh: {prev_swing_high:.{self.PRICE_PRECISION_BT}f}, SL: {sl_price}, TP: {tp_price}. Conditions met: {num_sell_conditions_met_s1}/3")
+                    self.sell(sl=sl_price, tp=tp_price, size=0.02)
 
-        elif self.current_strategy_id == 5: # Logic for Strategy 5 (existing simplified RSI with ATR SL/TP)
-            current_atr = self.atr[-1] # Ensure current_atr is defined for this block
+        elif self.current_strategy_id == 5: # Logic for Strategy 5 (New Swing SL/TP)
             if not self.position:
-                if pd.isna(current_atr) or current_atr == 0:
-                    print(f"DEBUG BacktestStrategyWrapper.next: Symbol {trade_symbol} - Invalid ATR ({current_atr}) for dynamic SL/TP (S5). Skipping trade.")
+                entry_price = price # Current price for entry
+
+                if len(self.data.Close) <= SWING_LOOKBACK_PERIOD + 1:
+                    print(f"DEBUG S5: Not enough data for SWING_LOOKBACK_PERIOD ({SWING_LOOKBACK_PERIOD}). Data len: {len(self.data.Close)}. Symbol {trade_symbol}. Skipping trade.")
                     return
 
+                prev_swing_low = self.data.Low[-SWING_LOOKBACK_PERIOD-1:-1].min()
+                prev_swing_high = self.data.High[-SWING_LOOKBACK_PERIOD-1:-1].max()
+
+                if pd.isna(prev_swing_low) or pd.isna(prev_swing_high):
+                    print(f"DEBUG S5: NaN swing point. Low: {prev_swing_low}, High: {prev_swing_high}. Symbol {trade_symbol}. Skipping trade.")
+                    return
+                
                 sl_price_calculated = None
                 tp_price_calculated = None
                 
@@ -507,44 +538,47 @@ class BacktestStrategyWrapper(Strategy):
                 take_short = self.rsi[-1] > 70
 
                 if take_long:
-                    sl_distance = current_atr * self.SL_ATR_MULTI
-                    calculated_sl = price - sl_distance
-                    if calculated_sl >= price:
-                        print(f"DEBUG BacktestStrategyWrapper.next: Symbol {trade_symbol} - Calculated SL ({calculated_sl}) for BUY is not below entry price ({price}). Skipping trade.")
+                    sl_price_calculated = prev_swing_low
+                    if sl_price_calculated >= entry_price:
+                        print(f"DEBUG S5: Invalid SL for BUY. SL (Swing Low {prev_swing_low:.{self.PRICE_PRECISION_BT}f}) >= Entry ({entry_price:.{self.PRICE_PRECISION_BT}f}). Symbol {trade_symbol}. Skipping trade.")
                         return
-                    risk_per_unit = price - calculated_sl
-                    calculated_tp = price + (risk_per_unit * self.RR)
-                    
-                    sl_price_calculated = round(calculated_sl, self.PRICE_PRECISION_BT)
-                    tp_price_calculated = round(calculated_tp, self.PRICE_PRECISION_BT)
-
-                    if tp_price_calculated <= price:
-                        print(f"DEBUG BacktestStrategyWrapper.next: Symbol {trade_symbol} - Calculated TP ({tp_price_calculated}) for BUY is not above entry price ({price}). Skipping trade.")
+                    risk_per_unit = entry_price - sl_price_calculated
+                    tp_price_calculated = entry_price + (risk_per_unit * self.RR)
+                    if tp_price_calculated <= entry_price:
+                        print(f"DEBUG S5: Invalid TP for BUY. TP ({tp_price_calculated:.{self.PRICE_PRECISION_BT}f}) <= Entry ({entry_price:.{self.PRICE_PRECISION_BT}f}). Symbol {trade_symbol}. Skipping trade.")
                         return
                     
-                    print(f"DEBUG BacktestStrategyWrapper.next: BUY Signal for {trade_symbol} - Entry: {price}, ATR: {current_atr:.{self.PRICE_PRECISION_BT}f}, SL: {sl_price_calculated}, TP: {tp_price_calculated}")
-                    self.buy(size=0.02, sl=sl_price_calculated, tp=tp_price_calculated)
+                    sl_price = round(sl_price_calculated, self.PRICE_PRECISION_BT)
+                    tp_price = round(tp_price_calculated, self.PRICE_PRECISION_BT)
+                    print(f"DEBUG S5: BUY Signal for {trade_symbol} - Entry: {entry_price:.{self.PRICE_PRECISION_BT}f}, SwingLow: {prev_swing_low:.{self.PRICE_PRECISION_BT}f}, SL: {sl_price}, TP: {tp_price}")
+                    self.buy(size=0.02, sl=sl_price, tp=tp_price)
 
                 elif take_short:
-                    sl_distance = current_atr * self.SL_ATR_MULTI
-                    calculated_sl = price + sl_distance
-                    if calculated_sl <= price:
-                        print(f"DEBUG BacktestStrategyWrapper.next: Symbol {trade_symbol} - Calculated SL ({calculated_sl}) for SELL is not above entry price ({price}). Skipping trade.")
+                    sl_price_calculated = prev_swing_high
+                    if sl_price_calculated <= entry_price:
+                        print(f"DEBUG S5: Invalid SL for SELL. SL (Swing High {prev_swing_high:.{self.PRICE_PRECISION_BT}f}) <= Entry ({entry_price:.{self.PRICE_PRECISION_BT}f}). Symbol {trade_symbol}. Skipping trade.")
                         return
-                    risk_per_unit = calculated_sl - price
-                    calculated_tp = price - (risk_per_unit * self.RR)
-
-                    sl_price_calculated = round(calculated_sl, self.PRICE_PRECISION_BT)
-                    tp_price_calculated = round(calculated_tp, self.PRICE_PRECISION_BT)
-
-                    if tp_price_calculated >= price:
-                        print(f"DEBUG BacktestStrategyWrapper.next: Symbol {trade_symbol} - Calculated TP ({tp_price_calculated}) for SELL is not below entry price ({price}). Skipping trade.")
+                    risk_per_unit = sl_price_calculated - entry_price
+                    tp_price_calculated = entry_price - (risk_per_unit * self.RR)
+                    if tp_price_calculated >= entry_price:
+                        print(f"DEBUG S5: Invalid TP for SELL. TP ({tp_price_calculated:.{self.PRICE_PRECISION_BT}f}) >= Entry ({entry_price:.{self.PRICE_PRECISION_BT}f}). Symbol {trade_symbol}. Skipping trade.")
                         return
 
-                    print(f"DEBUG BacktestStrategyWrapper.next: SELL Signal for {trade_symbol} - Entry: {price}, ATR: {current_atr:.{self.PRICE_PRECISION_BT}f}, SL: {sl_price_calculated}, TP: {tp_price_calculated}")
-                    self.sell(size=0.02, sl=sl_price_calculated, tp=tp_price_calculated)
+                    sl_price = round(sl_price_calculated, self.PRICE_PRECISION_BT)
+                    tp_price = round(tp_price_calculated, self.PRICE_PRECISION_BT)
+                    print(f"DEBUG S5: SELL Signal for {trade_symbol} - Entry: {entry_price:.{self.PRICE_PRECISION_BT}f}, SwingHigh: {prev_swing_high:.{self.PRICE_PRECISION_BT}f}, SL: {sl_price}, TP: {tp_price}")
+                    self.sell(size=0.02, sl=sl_price, tp=tp_price)
             
-            if self.current_strategy_id != 5: # If it was the else block
+            # The following line seems to be a leftover from a previous structure, 
+            # it might not be needed if S5 is the only logic in this elif block.
+            # For safety, I'll keep it if it's outside the `if not self.position:` block,
+            # or remove it if it's incorrectly placed.
+            # Based on current indentation, it looks like it's outside the `if not self.position:`
+            # and intended to be a fallback for other strategy IDs if they reach this point.
+            # However, the prompt implies specific handling for 0, 1, and 5.
+            # For now, I will assume it should be part of an else for the main if/elif for strategy IDs.
+            # The original code had it, so I will keep its position relative to S5's block.
+            if self.current_strategy_id != 5: 
                  print(f"DEBUG BacktestStrategyWrapper.next: Strategy ID {self.current_strategy_id} - Executed default RSI logic with ATR SL/TP.")
 
         # Fallback message if no logic path was taken (should not happen with current_strategy_id == 5 or True structure)
@@ -904,6 +938,7 @@ leverage = 5
 margin_type_setting = 'ISOLATED' # Margin type
 qty_concurrent_positions = 100
 LOCAL_HIGH_LOW_LOOKBACK_PERIOD = 20 # New global for breakout logic
+SWING_LOOKBACK_PERIOD = 20 # Lookback for swing high/low points
 # DEFAULT_ATR_MULTIPLIER = 2.0 # No longer here
 
 # --- GUI Helper Function ---
