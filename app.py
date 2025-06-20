@@ -184,6 +184,14 @@ def klines_extended(symbol, timeframe, interval_days):
     df = df.sort_index()
 
     print(f"Fetched {len(df)} klines for {symbol} ({timeframe}, {interval_days} days). From {df.index.min()} to {df.index.max()}")
+    # --- BEGIN DEBUG PRINTS ---
+    print("DEBUG klines_extended: DataFrame head:\n", df.head())
+    print("DEBUG klines_extended: DataFrame dtypes:\n", df.dtypes)
+    print("DEBUG klines_extended: DataFrame index:\n", df.index)
+    print(f"DEBUG klines_extended: DataFrame shape: {df.shape}")
+    print(f"DEBUG klines_extended: Any NaNs in DataFrame: {df.isnull().values.any()}")
+    print(f"DEBUG klines_extended: Sum of NaNs per column:\n{df.isnull().sum()}")
+    # --- END DEBUG PRINTS ---
     return df, None
 
 # Indicator helper functions for backtesting
@@ -203,6 +211,36 @@ def signal_h_bt(df_series): # Renamed to signal_h_bt
 def signal_l_bt(df_series): # Renamed to signal_l_bt
     return ta.volatility.BollingerBands(pd.Series(df_series)).bollinger_lband()
 
+def atr_bt(high_series, low_series, close_series, window):
+    # Ensure inputs are pandas Series
+    high = pd.Series(high_series)
+    low = pd.Series(low_series)
+    close = pd.Series(close_series)
+    atr_indicator = ta.volatility.AverageTrueRange(
+        high=high,
+        low=low,
+        close=close,
+        window=window,
+        fillna=False # Important for backtesting.py to handle NaNs initially
+    )
+    atr_values = atr_indicator.average_true_range()
+    return atr_values # Return the pandas Series
+
+def supertrend_numerical_bt(high_series, low_series, close_series, atr_period, multiplier):
+    # Create a DataFrame from the input arrays (which self.I provides)
+    df = pd.DataFrame({
+        'High': pd.Series(high_series),
+        'Low': pd.Series(low_series),
+        'Close': pd.Series(close_series)
+    })
+    
+    # calculate_supertrend_pta expects a DataFrame and returns a Series of 'green'/'red'
+    st_signal_str = calculate_supertrend_pta(df, atr_period=atr_period, multiplier=multiplier)
+    
+    # Convert 'green'/'red' to 1/-1
+    numerical_signal = st_signal_str.map({'green': 1, 'red': -1}).fillna(0) # Fill NaNs with 0 (neutral)
+    return numerical_signal.values # self.I expects a numpy array or list
+
 # Backtest Strategy Wrapper Class
 class BacktestStrategyWrapper(Strategy):
     # Default parameters, will be overridden by UI inputs later
@@ -212,26 +250,305 @@ class BacktestStrategyWrapper(Strategy):
     # Strategy-specific parameters (example for the provided strategy)
     ema_period = 200
     rsi_period = 14
+    ATR_PERIOD = 14 # New class variable for ATR period
+    ST_ATR_PERIOD_S0 = 10 # Strategy 0 Supertrend ATR Period
+    ST_MULTIPLIER_S0 = 1.5  # Strategy 0 Supertrend Multiplier
+    
+    # Strategy S1 ("EMA Cross + SuperTrend") Parameters
+    EMA_SHORT_S1 = 9
+    EMA_LONG_S1 = 21
+    RSI_PERIOD_S1 = 14
+    ST_ATR_PERIOD_S1 = 10 
+    ST_MULTIPLIER_S1 = 3.0
+    
+    current_strategy_id = 5 # Defaulting to 5 for "New RSI-Based Strategy"
+    RR = 1.5  # Risk/Reward ratio
+    SL_ATR_MULTI = 1.0 # Multiplier for ATR to determine SL distance
+    PRICE_PRECISION_BT = 4 # Default rounding precision for backtesting
 
     def init(self):
-        # price = self.data.Close  # Unused variable
-        self.rsi = self.I(rsi_bt, self.data.Close, self.rsi_period)
-        self.macd = self.I(macd_bt, self.data.Close)
-        self.ema = self.I(ema_bt, self.data.Close, self.ema_period)
-        self.bol_h = self.I(signal_h_bt, self.data.Close)
-        self.bol_l = self.I(signal_l_bt, self.data.Close)
+        print(f"DEBUG BacktestStrategyWrapper.init: Initializing for strategy ID {self.current_strategy_id}")
+        if self.current_strategy_id == 5:
+            # price = self.data.Close # This line can be removed or commented out
+            self.rsi_period_val = getattr(self, 'rsi_period', 14) # Use rsi_period from class if available
+            self.rsi = self.I(rsi_bt, self.data.Close, self.rsi_period_val, name='RSI_S5')
+            self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, self.ATR_PERIOD, name='ATR_dynSLTP_S5')
+            # Removed other indicator initializations (macd, ema, bol_h, bol_l)
+        elif self.current_strategy_id == 1:
+            print(f"DEBUG BacktestStrategyWrapper.init: Initializing indicators for Strategy ID 1 (EMA Cross + SuperTrend)")
+            self.ema_short_s1 = self.I(ema_bt, self.data.Close, self.EMA_SHORT_S1, name='EMA_S_S1')
+            self.ema_long_s1 = self.I(ema_bt, self.data.Close, self.EMA_LONG_S1, name='EMA_L_S1')
+            self.rsi_s1 = self.I(rsi_bt, self.data.Close, self.RSI_PERIOD_S1, name='RSI_S1')
+            
+            # Supertrend for Strategy S1 (reusing supertrend_numerical_bt)
+            self.st_s1 = self.I(supertrend_numerical_bt, self.data.High, self.data.Low, self.data.Close, self.ST_ATR_PERIOD_S1, self.ST_MULTIPLIER_S1, name='ST_S1', overlay=True)
+            
+            # ATR for dynamic SL/TP (using the existing self.ATR_PERIOD class var for consistency)
+            self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, self.ATR_PERIOD, name='ATR_dynSLTP_S1')
+        elif self.current_strategy_id == 0:
+            print(f"DEBUG BacktestStrategyWrapper.init: Initializing indicators for Strategy ID 0 (Original Scalping)")
+            self.ema9_s0 = self.I(ema_bt, self.data.Close, 9, name='EMA9_S0')
+            self.ema21_s0 = self.I(ema_bt, self.data.Close, 21, name='EMA21_S0')
+            self.rsi_s0 = self.I(rsi_bt, self.data.Close, 14, name='RSI_S0') # Using rsi_bt
+            
+            # Volume MA for Strategy 0
+            self.volume_ma10_s0 = self.I(lambda series, window: pd.Series(series).rolling(window).mean(), self.data.Volume, 10, name='VolumeMA10_S0', overlay=False) 
+
+            # Supertrend for Strategy 0
+            self.st_s0 = self.I(supertrend_numerical_bt, self.data.High, self.data.Low, self.data.Close, self.ST_ATR_PERIOD_S0, self.ST_MULTIPLIER_S0, name='Supertrend_S0', overlay=True) 
+
+            # ATR for dynamic SL/TP (using the existing self.ATR_PERIOD class var)
+            self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, self.ATR_PERIOD, name='ATR_dynSLTP_S0')
+        else:
+            print(f"DEBUG BacktestStrategyWrapper.init: Strategy ID {self.current_strategy_id} - Full indicator setup not yet implemented. Defaulting to RSI and ATR.")
+            self.rsi_period_val = getattr(self, 'rsi_period', 14)
+            self.rsi = self.I(rsi_bt, self.data.Close, self.rsi_period_val, name=f'RSI_default_{self.current_strategy_id}')
+            self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, self.ATR_PERIOD, name=f'ATR_default_{self.current_strategy_id}')
+            print(f"DEBUG BacktestStrategyWrapper.init: Defaulted ATR indicator for strategy ID {self.current_strategy_id}.")
+
 
     def next(self):
-        price = float(self.data.Close[-1])
-        if not self.position:
-            if self.rsi[-1] < 30: # Corrected from rsi[-2] to rsi[-1] for typical backtesting.py usage
-                self.buy(size=0.02, tp=(1 + self.user_tp) * price, sl=(1 - self.user_sl) * price)
-        # Corrected sell condition logic based on typical RSI strategy
-        # Original had "if not self.position and self.rsi[-2] > 70:" which is for entering short.
-        # Assuming it's an exit for a long or entry for a short. Let's stick to the original for now.
-        # Re-evaluating the provided strategy: it's for entering new positions, not exiting.
-            elif self.rsi[-1] > 70: # Corrected from rsi[-2] to rsi[-1]
-                self.sell(size=0.02, tp=(1 - self.user_tp) * price, sl=(1 + self.user_sl) * price)
+        print(f"DEBUG BacktestStrategyWrapper.next: Executing for strategy ID {self.current_strategy_id}")
+        price = float(self.data.Close[-1]) # Ensure price is float
+        # current_atr = self.atr[-1] # Moved this to where it's first needed
+        trade_symbol = self.data.symbol if hasattr(self.data, 'symbol') else 'N/A'
+
+        if self.current_strategy_id == 0:
+            if self.position:
+                return
+
+            # --- Retrieve Indicator Values ---
+            last_ema9 = self.ema9_s0[-1]
+            prev_ema9 = self.ema9_s0[-2] if len(self.ema9_s0) >= 2 else last_ema9
+            last_ema21 = self.ema21_s0[-1]
+            prev_ema21 = self.ema21_s0[-2] if len(self.ema21_s0) >= 2 else last_ema21
+            last_rsi = self.rsi_s0[-1]
+            last_supertrend_signal_numerical = self.st_s0[-1]
+            last_volume = self.data.Volume[-1]
+            last_volume_ma10 = self.volume_ma10_s0[-1]
+
+            # --- Calculate Recent High/Low ---
+            lookback = LOCAL_HIGH_LOW_LOOKBACK_PERIOD 
+            if len(self.data.High) < lookback + 2: # Need at least 'lookback' periods *before* the [-1] candle
+                print(f"DEBUG S0: Not enough data for recent high/low. Data len: {len(self.data.High)}, Lookback: {lookback}")
+                return 
+            
+            recent_high = self.data.High[-lookback-1:-1].max()
+            recent_low = self.data.Low[-lookback-1:-1].min()
+
+            # --- Define Conditions ---
+            ema_crossed_up = prev_ema9 < prev_ema21 and last_ema9 > last_ema21
+            rsi_valid_long = 50 <= last_rsi <= 70
+            supertrend_is_green = (last_supertrend_signal_numerical == 1)
+            volume_is_strong = last_volume > last_volume_ma10 if not pd.isna(last_volume_ma10) and last_volume_ma10 != 0 else False
+            price_broke_high = price > recent_high
+
+            ema_crossed_down = prev_ema9 > prev_ema21 and last_ema9 < last_ema21
+            rsi_valid_short = 30 <= last_rsi <= 50
+            supertrend_is_red = (last_supertrend_signal_numerical == -1)
+            price_broke_low = price < recent_low
+            
+            buy_conditions_met = [ema_crossed_up, rsi_valid_long, supertrend_is_green, volume_is_strong, price_broke_high]
+            sell_conditions_met = [ema_crossed_down, rsi_valid_short, supertrend_is_red, volume_is_strong, price_broke_low]
+            
+            num_buy_conditions_true = sum(buy_conditions_met)
+            num_sell_conditions_true = sum(sell_conditions_met)
+
+            trade_side = None
+            if num_buy_conditions_true >= SCALPING_REQUIRED_BUY_CONDITIONS:
+                trade_side = 'buy'
+            elif num_sell_conditions_true >= SCALPING_REQUIRED_SELL_CONDITIONS:
+                trade_side = 'sell'
+
+            if trade_side:
+                current_atr_s0 = self.atr[-1] 
+
+                if pd.isna(current_atr_s0) or current_atr_s0 == 0:
+                    print(f"DEBUG S0: Invalid ATR ({current_atr_s0}) for dynamic SL/TP. Symbol {trade_symbol}. Skipping trade.")
+                    return
+
+                sl_price = None
+                tp_price = None
+                entry_price = price 
+
+                if trade_side == 'buy':
+                    sl_distance = current_atr_s0 * self.SL_ATR_MULTI
+                    calculated_sl = entry_price - sl_distance
+                    if calculated_sl >= entry_price:
+                        print(f"DEBUG S0: Invalid SL for BUY. SL: {calculated_sl}, Entry: {entry_price}. Symbol {trade_symbol}. Skipping trade.")
+                        return
+                    risk_per_unit = entry_price - calculated_sl
+                    calculated_tp = entry_price + (risk_per_unit * self.RR)
+                    sl_price = round(calculated_sl, self.PRICE_PRECISION_BT)
+                    tp_price = round(calculated_tp, self.PRICE_PRECISION_BT)
+                    if tp_price <= entry_price:
+                        print(f"DEBUG S0: Invalid TP for BUY. TP: {tp_price}, Entry: {entry_price}. Symbol {trade_symbol}. Skipping trade.")
+                        return
+                    print(f"DEBUG S0: BUY Signal - Entry: {entry_price}, ATR: {current_atr_s0:.{self.PRICE_PRECISION_BT}f}, SL: {sl_price}, TP: {tp_price}. Conditions met: {num_buy_conditions_true}")
+                    self.buy(sl=sl_price, tp=tp_price, size=0.02)
+
+                elif trade_side == 'sell':
+                    sl_distance = current_atr_s0 * self.SL_ATR_MULTI
+                    calculated_sl = entry_price + sl_distance
+                    if calculated_sl <= entry_price:
+                        print(f"DEBUG S0: Invalid SL for SELL. SL: {calculated_sl}, Entry: {entry_price}. Symbol {trade_symbol}. Skipping trade.")
+                        return
+                    risk_per_unit = calculated_sl - entry_price
+                    calculated_tp = entry_price - (risk_per_unit * self.RR)
+                    sl_price = round(calculated_sl, self.PRICE_PRECISION_BT)
+                    tp_price = round(calculated_tp, self.PRICE_PRECISION_BT)
+                    if tp_price >= entry_price:
+                        print(f"DEBUG S0: Invalid TP for SELL. TP: {tp_price}, Entry: {entry_price}. Symbol {trade_symbol}. Skipping trade.")
+                        return
+                    print(f"DEBUG S0: SELL Signal - Entry: {entry_price}, ATR: {current_atr_s0:.{self.PRICE_PRECISION_BT}f}, SL: {sl_price}, TP: {tp_price}. Conditions met: {num_sell_conditions_true}")
+                    self.sell(sl=sl_price, tp=tp_price, size=0.02)
+
+        elif self.current_strategy_id == 1:
+            # Strategy S1: EMA Cross + SuperTrend
+            if self.position: # Only trade if no position is open
+                return
+
+            # Get current price and indicator values
+            price = float(self.data.Close[-1]) # Already available from top of function
+            
+            # Ensure indicators have enough values
+            if len(self.ema_short_s1) < 2 or len(self.ema_long_s1) < 2 or len(self.rsi_s1) < 1 or len(self.st_s1) < 1:
+                print(f"DEBUG S1: Not enough indicator data for {trade_symbol}. Skipping.")
+                return
+
+            last_ema_short = self.ema_short_s1[-1]
+            prev_ema_short = self.ema_short_s1[-2]
+            last_ema_long = self.ema_long_s1[-1]
+            prev_ema_long = self.ema_long_s1[-2]
+            
+            last_rsi = self.rsi_s1[-1]
+            last_st_signal_numerical = self.st_s1[-1] # 1 for green, -1 for red
+
+            # Define conditions from strategy_ema_supertrend
+            ema_crossed_up_s1 = prev_ema_short < prev_ema_long and last_ema_short > last_ema_long
+            st_green_s1 = (last_st_signal_numerical == 1)
+            rsi_long_ok_s1 = 40 <= last_rsi <= 70
+            
+            buy_conditions_s1 = [ema_crossed_up_s1, st_green_s1, rsi_long_ok_s1]
+            num_buy_conditions_met_s1 = sum(buy_conditions_s1)
+
+            ema_crossed_down_s1 = prev_ema_short > prev_ema_long and last_ema_short < last_ema_long
+            st_red_s1 = (last_st_signal_numerical == -1)
+            rsi_short_ok_s1 = 30 <= last_rsi <= 60
+
+            sell_conditions_s1 = [ema_crossed_down_s1, st_red_s1, rsi_short_ok_s1]
+            num_sell_conditions_met_s1 = sum(sell_conditions_s1)
+
+            REQUIRED_CONDITIONS_S1 = 2 
+            trade_side = None
+
+            if num_buy_conditions_met_s1 >= REQUIRED_CONDITIONS_S1:
+                trade_side = 'buy'
+            elif num_sell_conditions_met_s1 >= REQUIRED_CONDITIONS_S1:
+                trade_side = 'sell'
+
+            if trade_side:
+                current_atr_s1 = self.atr[-1] 
+
+                if pd.isna(current_atr_s1) or current_atr_s1 == 0:
+                    print(f"DEBUG S1: Invalid ATR ({current_atr_s1}) for dynamic SL/TP. Symbol {trade_symbol}. Skipping trade.")
+                    return
+
+                sl_price_calc = None # Renamed to avoid confusion with sl_price from outer scope
+                tp_price_calc = None # Renamed to avoid confusion with tp_price from outer scope
+                entry_price = price 
+
+                if trade_side == 'buy':
+                    sl_distance = current_atr_s1 * self.SL_ATR_MULTI
+                    calculated_sl = entry_price - sl_distance
+                    if calculated_sl >= entry_price:
+                        print(f"DEBUG S1: Invalid SL for BUY. SL: {calculated_sl}, Entry: {entry_price}. Symbol {trade_symbol}. Skipping trade.")
+                        return
+                    risk_per_unit = entry_price - calculated_sl
+                    calculated_tp = entry_price + (risk_per_unit * self.RR)
+                    sl_price_calc = round(calculated_sl, self.PRICE_PRECISION_BT)
+                    tp_price_calc = round(calculated_tp, self.PRICE_PRECISION_BT)
+                    if tp_price_calc <= entry_price:
+                        print(f"DEBUG S1: Invalid TP for BUY. TP: {tp_price_calc}, Entry: {entry_price}. Symbol {trade_symbol}. Skipping trade.")
+                        return
+                    
+                    print(f"DEBUG S1: BUY Signal - Entry: {entry_price}, ATR: {current_atr_s1:.{self.PRICE_PRECISION_BT}f}, SL: {sl_price_calc}, TP: {tp_price_calc}. Conditions met: {num_buy_conditions_met_s1}/3")
+                    self.buy(sl=sl_price_calc, tp=tp_price_calc, size=0.02) 
+
+                elif trade_side == 'sell':
+                    sl_distance = current_atr_s1 * self.SL_ATR_MULTI
+                    calculated_sl = entry_price + sl_distance
+                    if calculated_sl <= entry_price:
+                        print(f"DEBUG S1: Invalid SL for SELL. SL: {calculated_sl}, Entry: {entry_price}. Symbol {trade_symbol}. Skipping trade.")
+                        return
+                    risk_per_unit = calculated_sl - entry_price
+                    calculated_tp = entry_price - (risk_per_unit * self.RR)
+                    sl_price_calc = round(calculated_sl, self.PRICE_PRECISION_BT)
+                    tp_price_calc = round(calculated_tp, self.PRICE_PRECISION_BT)
+                    if tp_price_calc >= entry_price:
+                        print(f"DEBUG S1: Invalid TP for SELL. TP: {tp_price_calc}, Entry: {entry_price}. Symbol {trade_symbol}. Skipping trade.")
+                        return
+
+                    print(f"DEBUG S1: SELL Signal - Entry: {entry_price}, ATR: {current_atr_s1:.{self.PRICE_PRECISION_BT}f}, SL: {sl_price_calc}, TP: {tp_price_calc}. Conditions met: {num_sell_conditions_met_s1}/3")
+                    self.sell(sl=sl_price_calc, tp=tp_price_calc, size=0.02)
+
+        elif self.current_strategy_id == 5: # Logic for Strategy 5 (existing simplified RSI with ATR SL/TP)
+            current_atr = self.atr[-1] # Ensure current_atr is defined for this block
+            if not self.position:
+                if pd.isna(current_atr) or current_atr == 0:
+                    print(f"DEBUG BacktestStrategyWrapper.next: Symbol {trade_symbol} - Invalid ATR ({current_atr}) for dynamic SL/TP (S5). Skipping trade.")
+                    return
+
+                sl_price_calculated = None
+                tp_price_calculated = None
+                
+                take_long = self.rsi[-1] < 30
+                take_short = self.rsi[-1] > 70
+
+                if take_long:
+                    sl_distance = current_atr * self.SL_ATR_MULTI
+                    calculated_sl = price - sl_distance
+                    if calculated_sl >= price:
+                        print(f"DEBUG BacktestStrategyWrapper.next: Symbol {trade_symbol} - Calculated SL ({calculated_sl}) for BUY is not below entry price ({price}). Skipping trade.")
+                        return
+                    risk_per_unit = price - calculated_sl
+                    calculated_tp = price + (risk_per_unit * self.RR)
+                    
+                    sl_price_calculated = round(calculated_sl, self.PRICE_PRECISION_BT)
+                    tp_price_calculated = round(calculated_tp, self.PRICE_PRECISION_BT)
+
+                    if tp_price_calculated <= price:
+                        print(f"DEBUG BacktestStrategyWrapper.next: Symbol {trade_symbol} - Calculated TP ({tp_price_calculated}) for BUY is not above entry price ({price}). Skipping trade.")
+                        return
+                    
+                    print(f"DEBUG BacktestStrategyWrapper.next: BUY Signal for {trade_symbol} - Entry: {price}, ATR: {current_atr:.{self.PRICE_PRECISION_BT}f}, SL: {sl_price_calculated}, TP: {tp_price_calculated}")
+                    self.buy(size=0.02, sl=sl_price_calculated, tp=tp_price_calculated)
+
+                elif take_short:
+                    sl_distance = current_atr * self.SL_ATR_MULTI
+                    calculated_sl = price + sl_distance
+                    if calculated_sl <= price:
+                        print(f"DEBUG BacktestStrategyWrapper.next: Symbol {trade_symbol} - Calculated SL ({calculated_sl}) for SELL is not above entry price ({price}). Skipping trade.")
+                        return
+                    risk_per_unit = calculated_sl - price
+                    calculated_tp = price - (risk_per_unit * self.RR)
+
+                    sl_price_calculated = round(calculated_sl, self.PRICE_PRECISION_BT)
+                    tp_price_calculated = round(calculated_tp, self.PRICE_PRECISION_BT)
+
+                    if tp_price_calculated >= price:
+                        print(f"DEBUG BacktestStrategyWrapper.next: Symbol {trade_symbol} - Calculated TP ({tp_price_calculated}) for SELL is not below entry price ({price}). Skipping trade.")
+                        return
+
+                    print(f"DEBUG BacktestStrategyWrapper.next: SELL Signal for {trade_symbol} - Entry: {price}, ATR: {current_atr:.{self.PRICE_PRECISION_BT}f}, SL: {sl_price_calculated}, TP: {tp_price_calculated}")
+                    self.sell(size=0.02, sl=sl_price_calculated, tp=tp_price_calculated)
+            
+            if self.current_strategy_id != 5: # If it was the else block
+                 print(f"DEBUG BacktestStrategyWrapper.next: Strategy ID {self.current_strategy_id} - Executed default RSI logic with ATR SL/TP.")
+
+        # Fallback message if no logic path was taken (should not happen with current_strategy_id == 5 or True structure)
+        # else:
+        #     print(f"DEBUG BacktestStrategyWrapper.next: Strategy ID {self.current_strategy_id} - No explicit trading logic defined and not caught by fallback. No action taken.")
 
 # Function to execute backtest
 def execute_backtest(strategy_id_for_backtest, symbol, timeframe, interval_days, ui_tp, ui_sl):
@@ -252,14 +569,35 @@ def execute_backtest(strategy_id_for_backtest, symbol, timeframe, interval_days,
     # Future: Pass strategy-specific parameters (ema_period, rsi_period) if needed
     
     # Update the class variables for TP/SL before instantiating Backtest
+    print(f"DEBUG execute_backtest: Received ui_tp: {ui_tp*100:.2f}%, ui_sl: {ui_sl*100:.2f}%")
     BacktestStrategyWrapper.user_tp = ui_tp
     BacktestStrategyWrapper.user_sl = ui_sl
+    BacktestStrategyWrapper.current_strategy_id = strategy_id_for_backtest
+    print(f"DEBUG execute_backtest: Set BacktestStrategyWrapper.current_strategy_id to: {strategy_id_for_backtest}")
 
+    print(f"DEBUG execute_backtest: Strategy params set - BacktestStrategyWrapper.user_tp: {BacktestStrategyWrapper.user_tp*100:.2f}%, BacktestStrategyWrapper.user_sl: {BacktestStrategyWrapper.user_sl*100:.2f}%")
+    print(f"DEBUG execute_backtest: Strategy RSI period: {BacktestStrategyWrapper.rsi_period}") # Also log rsi_period
     bt = Backtest(kl_df, BacktestStrategyWrapper, cash=10000, margin=1/10, commission=0.0007)
     try:
         stats = bt.run()
         print("Backtest completed.")
         # print(stats) # Stats can be very verbose, printed later or in UI
+        print(f"DEBUG execute_backtest: Stats object type: {type(stats)}")
+        if isinstance(stats, pd.Series):
+            print(f"DEBUG execute_backtest: Stats content (first few entries):\n{stats.head()}")
+        elif isinstance(stats, dict): # backtesting.py can sometimes return dicts
+             print(f"DEBUG execute_backtest: Stats content (dict):\n{stats}")
+        else:
+            print(f"DEBUG execute_backtest: Stats content:\n{stats}")
+
+        # Add a print for the _trades attribute if it exists
+        if hasattr(stats, '_trades') and not stats['_trades'].empty:
+            print(f"DEBUG execute_backtest: Trades DataFrame head:\n{stats['_trades'].head()}")
+        elif hasattr(stats, '_trades'):
+            print("DEBUG execute_backtest: Trades DataFrame is empty.")
+        else:
+            print("DEBUG execute_backtest: _trades attribute not found in stats.")
+
     except Exception as e:
         print(f"Error during backtest bt.run(): {e}")
         return f"Error during backtest simulation: {e}", None, None
@@ -418,11 +756,17 @@ def run_backtest_command():
 
 def perform_backtest_in_thread(strategy_id, symbol, timeframe, interval_days, tp, sl):
     global backtest_results_text_widget, root, status_var, backtest_run_button
+    print(f"DEBUG perform_backtest_in_thread: Received strategy_id: {strategy_id}, symbol: {symbol}, timeframe: {timeframe}, interval_days: {interval_days}, tp_percentage: {tp*100:.2f}%, sl_percentage: {sl*100:.2f}%")
     
     if status_var and root and root.winfo_exists():
         root.after(0, lambda: status_var.set("Backtest: Fetching kline data..."))
 
     stats_output, bt_object, plot_error_message = execute_backtest(strategy_id, symbol, timeframe, interval_days, tp, sl)
+    print(f"DEBUG perform_backtest_in_thread: execute_backtest returned stats_output type: {type(stats_output)}")
+    # Avoid printing large DataFrames or Series directly here if they are part of stats_output; execute_backtest already logs details
+    if isinstance(stats_output, str): # Error message
+        print(f"DEBUG perform_backtest_in_thread: execute_backtest returned error string: {stats_output}")
+    print(f"DEBUG perform_backtest_in_thread: execute_backtest returned plot_error_message: {plot_error_message}")
     
     if status_var and root and root.winfo_exists():
         if isinstance(stats_output, str) or plot_error_message : # If error string returned or plot error
@@ -432,6 +776,7 @@ def perform_backtest_in_thread(strategy_id, symbol, timeframe, interval_days, tp
 
 
     def update_ui_with_results():
+        print(f"DEBUG update_ui_with_results: Received stats_output type: {type(stats_output)}, plot_error_message: {plot_error_message}")
         final_status_message = "Backtest: Completed."
         print("DEBUG: Entered update_ui_with_results function.") # New
 
