@@ -791,7 +791,7 @@ def strategy_ema_supertrend(symbol):
         'signal': 'none',
         'conditions_met_count': 0,
         'conditions_to_start_wait_threshold': 2,
-        'conditions_for_full_signal_threshold': 2, # Changed from 3 to 2
+        'conditions_for_full_signal_threshold': 3, # Changed from 3 to 2
         'all_conditions_status': {
             'ema_cross_up': False, 'st_green': False, 'rsi_long_ok': False,
             'ema_cross_down': False, 'st_red': False, 'rsi_short_ok': False,
