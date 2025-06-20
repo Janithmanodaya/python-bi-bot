@@ -15,6 +15,107 @@ from backtesting import Backtest, Strategy
 # pandas is already imported
 # ta is already imported, ensure it's there.
 
+def calculate_dynamic_sl_tp(symbol: str, entry_price: float, side: str, atr_period: int = 14, rr: float = 1.5, buffer: float = 0.001):
+    # Ensure klines, get_price_precision are available in the scope or passed as arguments if necessary.
+    # Assuming they are globally accessible or defined in the same file as per the existing code structure.
+    # Also assumes 'ta' and 'pd' (pandas) are imported.
+
+    return_value = {'sl_price': None, 'tp_price': None, 'error': None}
+    
+    kl_df = klines(symbol) # Fetches 5m klines by default from existing function
+
+    if kl_df is None or kl_df.empty:
+        return_value['error'] = f"No kline data returned for {symbol}."
+        return return_value
+
+    # Ensure enough data for ATR calculation (atr_period + a few for stability)
+    if len(kl_df) < atr_period + 5: # Arbitrary buffer of 5, adjust if needed
+        return_value['error'] = f"Insufficient kline data for ATR calculation on {symbol} (need at least {atr_period + 5}, got {len(kl_df)})."
+        return return_value
+
+    try:
+        # Ensure columns are correct, klines() function seems to provide them
+        atr_indicator = ta.volatility.AverageTrueRange(
+            high=kl_df['High'],
+            low=kl_df['Low'],
+            close=kl_df['Close'],
+            window=atr_period,
+            fillna=False # Ensure NaNs are not filled prematurely by ta library itself
+        )
+        atr_series = atr_indicator.average_true_range()
+
+        if atr_series is None or atr_series.empty:
+            return_value['error'] = f"ATR calculation resulted in an empty series for {symbol}."
+            return return_value
+        
+        # Get the last valid ATR value
+        atr_value = atr_series.dropna().iloc[-1] if not atr_series.dropna().empty else None
+
+        if atr_value is None or pd.isna(atr_value) or atr_value == 0: # ATR could be zero in very flat markets
+            return_value['error'] = f"Invalid ATR value ({atr_value}) for {symbol}. Cannot calculate SL/TP."
+            return return_value
+
+    except Exception as e:
+        return_value['error'] = f"Error calculating ATR for {symbol}: {str(e)}"
+        return return_value
+
+    price_precision = get_price_precision(symbol)
+    if not isinstance(price_precision, int) or price_precision < 0:
+        # Fallback precision if get_price_precision fails or returns invalid
+        print(f"Warning: Invalid price_precision '{price_precision}' for {symbol} from get_price_precision. Defaulting to 2.")
+        price_precision = 2 
+
+
+    sl_calculated = None
+    tp_calculated = None
+
+    if side == 'up':
+        sl_calculated = entry_price - atr_value * (1 + buffer)
+        # Ensure SL is actually below entry for a long trade
+        if sl_calculated >= entry_price:
+            return_value['error'] = f"Calculated SL ({sl_calculated}) for 'up' side is not below entry price ({entry_price})."
+            # Optionally, could adjust SL here, e.g. entry_price - atr_value (without buffer), or just return error.
+            # For now, returning error as per strict interpretation.
+            return return_value
+        tp_calculated = entry_price + (entry_price - sl_calculated) * rr
+    elif side == 'down':
+        sl_calculated = entry_price + atr_value * (1 + buffer)
+        # Ensure SL is actually above entry for a short trade
+        if sl_calculated <= entry_price:
+            return_value['error'] = f"Calculated SL ({sl_calculated}) for 'down' side is not above entry price ({entry_price})."
+            return return_value
+        tp_calculated = entry_price - (sl_calculated - entry_price) * rr
+    else:
+        return_value['error'] = f"Invalid side '{side}' provided. Must be 'up' or 'down'."
+        return return_value
+
+    # Rounding
+    try:
+        return_value['sl_price'] = round(sl_calculated, price_precision)
+        return_value['tp_price'] = round(tp_calculated, price_precision)
+    except TypeError as te: # Handles if sl_calculated or tp_calculated are None (shouldn't happen if logic above is correct)
+         return_value['error'] = f"Error rounding SL/TP for {symbol}: {str(te)}. SL Calc: {sl_calculated}, TP Calc: {tp_calculated}, Precision: {price_precision}"
+         return_value['sl_price'] = None # Ensure they are None on error
+         return_value['tp_price'] = None
+         return return_value
+
+
+    # Final validation for TP vs Entry
+    if side == 'up' and return_value['tp_price'] is not None and return_value['tp_price'] <= entry_price:
+        return_value['error'] = f"Calculated TP ({return_value['tp_price']}) for 'up' side is not above entry price ({entry_price})."
+        # Setting TP to None, but SL might still be valid or could also be invalidated.
+        # Depending on requirements, might invalidate both or try to recalculate TP with a minimum distance.
+        # For now, just flagging the error and nullifying TP.
+        return_value['tp_price'] = None 
+        # Decide if SL should also be None or if the signal should be entirely invalidated.
+        # The current plan implies strategies will handle this if SL/TP is None or error is present.
+
+    elif side == 'down' and return_value['tp_price'] is not None and return_value['tp_price'] >= entry_price:
+        return_value['error'] = f"Calculated TP ({return_value['tp_price']}) for 'down' side is not below entry price ({entry_price})."
+        return_value['tp_price'] = None
+
+    return return_value
+
 
 # Placeholder function for klines_extended
 def klines_extended(symbol, timeframe, interval_days):
@@ -779,6 +880,51 @@ def scalping_strategy_signal(symbol):
                 return_data['conditions_met_count'] = num_sell_conditions_true
                 return_data['conditions_for_full_signal_threshold'] = SCALPING_REQUIRED_SELL_CONDITIONS
         
+        if return_data['signal'] != 'none':
+            try:
+                entry_price = kl['Close'].iloc[-1] # Ensure kl is available and has 'Close'
+                
+                # Call the new dynamic SL/TP function
+                # Using default values for atr_period, rr, buffer as per plan step context
+                dynamic_sl_tp_result = calculate_dynamic_sl_tp(
+                    symbol=symbol,
+                    entry_price=entry_price,
+                    side=return_data['signal'] 
+                )
+
+                if dynamic_sl_tp_result['error']:
+                    error_msg = f"Dynamic SL/TP calc error for {symbol} ({return_data['signal']}): {dynamic_sl_tp_result['error']}"
+                    print(error_msg)
+                    # Append to existing error or set if none. Be careful not to overwrite a more critical error.
+                    if return_data['error'] is None:
+                        return_data['error'] = error_msg
+                    else:
+                        return_data['error'] += f"; {error_msg}"
+                    # SL/TP will remain None as per their initialization in return_data
+                else:
+                    return_data['sl_price'] = dynamic_sl_tp_result['sl_price']
+                    return_data['tp_price'] = dynamic_sl_tp_result['tp_price']
+                    
+                    if return_data['sl_price'] is None or return_data['tp_price'] is None:
+                        error_msg = f"Dynamic SL/TP for {symbol} ({return_data['signal']}) resulted in None SL/TP without explicit error. Original calc error: {dynamic_sl_tp_result.get('error', 'N/A')}"
+                        print(error_msg)
+                        if return_data['error'] is None:
+                            return_data['error'] = error_msg
+                        else:
+                            return_data['error'] += f"; {error_msg}"
+
+            except Exception as e:
+                # Catch any unexpected error during this integration block
+                error_msg = f"Error during dynamic SL/TP integration in scalping_strategy_signal for {symbol}: {str(e)}"
+                print(error_msg)
+                if return_data['error'] is None:
+                    return_data['error'] = error_msg
+                else:
+                    return_data['error'] += f"; {error_msg}"
+                # Ensure SL/TP are None if any exception occurs here
+                return_data['sl_price'] = None
+                return_data['tp_price'] = None
+
         return return_data
 
     except Exception as e:
@@ -861,65 +1007,68 @@ def strategy_ema_supertrend(symbol):
                                    base_return['all_conditions_status']['st_red'], 
                                    base_return['all_conditions_status']['rsi_short_ok']])
 
-        final_signal_str = 'none' # Temporary variable for signal before SL/TP validation
-        sl_price_calc, tp_price_calc = None, None # Use temporary vars for calculations
-        
-        if len(kl['Low']) < 3 or len(kl['High']) < 3: 
-            base_return['error'] = "Not enough kline data for SL/TP calculation (need T-1, T-2)"
-            if met_buy_conditions >= met_sell_conditions: # Prioritize buy if counts are equal or buy is greater
-                 base_return['conditions_met_count'] = met_buy_conditions
-            else:
-                 base_return['conditions_met_count'] = met_sell_conditions
-            # all_conditions_status is already populated
-            return base_return
+        final_signal_str = 'none' 
+        calculated_sl, calculated_tp = None, None # For SL/TP values from dynamic function
 
-        price_precision = get_price_precision(symbol)
-
+        # Determine potential signal based on conditions first
         if met_buy_conditions >= 2: # Changed from == base_return['conditions_for_full_signal_threshold']
             final_signal_str = 'up'
             base_return['conditions_met_count'] = met_buy_conditions
-            swing_low = min(kl['Low'].iloc[-2], kl['Low'].iloc[-3])
-            sl_price_calc = round(swing_low - (kl['Low'].iloc[-1] * 0.001), price_precision) 
-            if current_price <= sl_price_calc: 
-                base_return['error'] = f"SL price {sl_price_calc} is at or above entry {current_price} for LONG"
-                final_signal_str = 'none' 
-            else:
-                risk_amount = current_price - sl_price_calc
-                tp_price_calc = round(current_price + (risk_amount * 1.5), price_precision)
-                if tp_price_calc <= current_price: 
-                    base_return['error'] = f"TP price {tp_price_calc} is at or below entry {current_price} for LONG"
-                    final_signal_str = 'none' 
-        
         elif met_sell_conditions >= 2: # Changed from == base_return['conditions_for_full_signal_threshold']
             final_signal_str = 'down'
             base_return['conditions_met_count'] = met_sell_conditions
-            swing_high = max(kl['High'].iloc[-2], kl['High'].iloc[-3])
-            sl_price_calc = round(swing_high + (kl['High'].iloc[-1] * 0.001), price_precision) 
-            if current_price >= sl_price_calc: 
-                base_return['error'] = f"SL price {sl_price_calc} is at or below entry {current_price} for SHORT"
-                final_signal_str = 'none' 
-            else:
-                risk_amount = sl_price_calc - current_price
-                tp_price_calc = round(current_price - (risk_amount * 1.5), price_precision)
-                if tp_price_calc >= current_price: 
-                    base_return['error'] = f"TP price {tp_price_calc} is at or above entry {current_price} for SHORT"
-                    final_signal_str = 'none' 
         else: # Not a full signal, determine conditions_met_count for partial/wait check
             if met_buy_conditions >= met_sell_conditions:
                  base_return['conditions_met_count'] = met_buy_conditions
             else:
                  base_return['conditions_met_count'] = met_sell_conditions
+            # No signal, so SL/TP remains None, error remains None unless set by pre-checks
+            base_return['signal'] = 'none'
+            return base_return # Exit early if no initial signal based on met conditions
 
-        base_return['signal'] = final_signal_str 
-        if final_signal_str != 'none': # Only set SL/TP if signal is valid
-            base_return['sl_price'] = sl_price_calc
-            base_return['tp_price'] = tp_price_calc
-        else: # Ensure SL/TP are None if signal is 'none'
-            base_return['sl_price'] = None
-            base_return['tp_price'] = None
-            if base_return['error']: # Print error only if it was set (e.g. by SL/TP validation)
-                 print(f"Strategy {STRATEGIES[1]} for {symbol}: Signal invalidated due to SL/TP error: {base_return['error']}")
-        
+        # If a signal ('up' or 'down') is determined, proceed to calculate dynamic SL/TP
+        if final_signal_str != 'none':
+            entry_price = current_price # current_price is already available
+
+            dynamic_sl_tp_result = calculate_dynamic_sl_tp(symbol, entry_price, final_signal_str)
+
+            if dynamic_sl_tp_result['error']:
+                base_return['error'] = f"S1 Dyn.SL/TP Error ({symbol}, {final_signal_str}): {dynamic_sl_tp_result['error']}"
+                final_signal_str = 'none' # Invalidate signal
+            else:
+                calculated_sl = dynamic_sl_tp_result['sl_price']
+                calculated_tp = dynamic_sl_tp_result['tp_price']
+
+                if calculated_sl is None or calculated_tp is None:
+                    base_return['error'] = f"S1 Dyn.SL/TP calc ({symbol}, {final_signal_str}) returned None for SL ({calculated_sl}) or TP ({calculated_tp}). Orig. err: {dynamic_sl_tp_result.get('error', 'N/A')}"
+                    final_signal_str = 'none' # Invalidate signal
+                elif final_signal_str == 'up':
+                    if calculated_sl >= entry_price:
+                        base_return['error'] = f"S1 SL price {calculated_sl} not below entry {entry_price} for LONG on {symbol}."
+                        final_signal_str = 'none'
+                    elif calculated_tp <= entry_price:
+                        base_return['error'] = f"S1 TP price {calculated_tp} not above entry {entry_price} for LONG on {symbol}."
+                        final_signal_str = 'none'
+                elif final_signal_str == 'down':
+                    if calculated_sl <= entry_price:
+                        base_return['error'] = f"S1 SL price {calculated_sl} not above entry {entry_price} for SHORT on {symbol}."
+                        final_signal_str = 'none'
+                    elif calculated_tp >= entry_price:
+                        base_return['error'] = f"S1 TP price {calculated_tp} not below entry {entry_price} for SHORT on {symbol}."
+                        final_signal_str = 'none'
+            
+            if final_signal_str != 'none':
+                base_return['sl_price'] = calculated_sl
+                base_return['tp_price'] = calculated_tp
+            else:
+                base_return['sl_price'] = None
+                base_return['tp_price'] = None
+                # Error message should already be set if final_signal_str is 'none'
+                if not base_return['error']: # Defensive: ensure an error is logged if signal invalidated
+                     base_return['error'] = f"S1 signal for {symbol} ({'up' if met_buy_conditions >=2 else 'down'}) invalidated during dynamic SL/TP processing."
+                print(f"Strategy {STRATEGIES.get(1, 'S1')} for {symbol}: Signal invalidated. Error: {base_return['error']}")
+
+        base_return['signal'] = final_signal_str
         return base_return
 
     except Exception as e:
@@ -1015,49 +1164,64 @@ def strategy_bollinger_band_mean_reversion(symbol):
                                    base_return['all_conditions_status']['volume_confirms_short']])
 
         final_signal_str = 'none'
-        sl_price_calc, tp_price_calc = None, None # Initialize calc variables
-        price_precision = get_price_precision(symbol)
-        buffer_percentage = 0.001
+        calculated_sl, calculated_tp = None, None
 
         if met_buy_conditions >= 2: # Changed from == base_return['conditions_for_full_signal_threshold']
             final_signal_str = 'up'
             base_return['conditions_met_count'] = met_buy_conditions
-            sl_price_calc = round(last_lower_bb - (current_price * buffer_percentage), price_precision)
-            tp_price_calc = round(last_middle_bb, price_precision)
-            if current_price <= sl_price_calc:
-                base_return['error'] = f"SL price {sl_price_calc} is at or above entry {current_price} for LONG"
-                final_signal_str = 'none'
-            elif tp_price_calc <= current_price: # Changed from elif to if for independent check
-                base_return['error'] = f"TP price {tp_price_calc} is at or below entry {current_price} for LONG"
-                final_signal_str = 'none'
-        
         elif met_sell_conditions >= 2: # Changed from == base_return['conditions_for_full_signal_threshold']
             final_signal_str = 'down'
             base_return['conditions_met_count'] = met_sell_conditions
-            sl_price_calc = round(last_upper_bb + (current_price * buffer_percentage), price_precision)
-            tp_price_calc = round(last_middle_bb, price_precision)
-            if current_price >= sl_price_calc:
-                base_return['error'] = f"SL price {sl_price_calc} is at or below entry {current_price} for SHORT"
-                final_signal_str = 'none'
-            elif tp_price_calc >= current_price: # Changed from elif to if for independent check
-                base_return['error'] = f"TP price {tp_price_calc} is at or above entry {current_price} for SHORT"
-                final_signal_str = 'none'
         else: # Not a full signal
             if met_buy_conditions >= met_sell_conditions: 
                  base_return['conditions_met_count'] = met_buy_conditions
             else:
                  base_return['conditions_met_count'] = met_sell_conditions
+            base_return['signal'] = 'none' # Ensure signal is none
+            return base_return # Exit early if no initial signal
+
+        # If a signal ('up' or 'down') is determined, proceed to calculate dynamic SL/TP
+        if final_signal_str != 'none':
+            entry_price = current_price # current_price is already available
+
+            dynamic_sl_tp_result = calculate_dynamic_sl_tp(symbol, entry_price, final_signal_str)
+
+            if dynamic_sl_tp_result['error']:
+                base_return['error'] = f"S2 Dyn.SL/TP Error ({symbol}, {final_signal_str}): {dynamic_sl_tp_result['error']}"
+                final_signal_str = 'none' # Invalidate signal
+            else:
+                calculated_sl = dynamic_sl_tp_result['sl_price']
+                calculated_tp = dynamic_sl_tp_result['tp_price']
+
+                if calculated_sl is None or calculated_tp is None:
+                    base_return['error'] = f"S2 Dyn.SL/TP calc ({symbol}, {final_signal_str}) returned None for SL ({calculated_sl}) or TP ({calculated_tp}). Orig. err: {dynamic_sl_tp_result.get('error', 'N/A')}"
+                    final_signal_str = 'none' # Invalidate signal
+                elif final_signal_str == 'up':
+                    if calculated_sl >= entry_price:
+                        base_return['error'] = f"S2 SL price {calculated_sl} not below entry {entry_price} for LONG on {symbol}."
+                        final_signal_str = 'none'
+                    elif calculated_tp <= entry_price:
+                        base_return['error'] = f"S2 TP price {calculated_tp} not above entry {entry_price} for LONG on {symbol}."
+                        final_signal_str = 'none'
+                elif final_signal_str == 'down':
+                    if calculated_sl <= entry_price:
+                        base_return['error'] = f"S2 SL price {calculated_sl} not above entry {entry_price} for SHORT on {symbol}."
+                        final_signal_str = 'none'
+                    elif calculated_tp >= entry_price:
+                        base_return['error'] = f"S2 TP price {calculated_tp} not below entry {entry_price} for SHORT on {symbol}."
+                        final_signal_str = 'none'
+            
+            if final_signal_str != 'none':
+                base_return['sl_price'] = calculated_sl
+                base_return['tp_price'] = calculated_tp
+            else:
+                base_return['sl_price'] = None
+                base_return['tp_price'] = None
+                if not base_return['error']: 
+                     base_return['error'] = f"S2 signal for {symbol} ({'up' if met_buy_conditions >=2 else 'down'}) invalidated during dynamic SL/TP processing."
+                print(f"Strategy {STRATEGIES.get(2, 'S2')} for {symbol}: Signal invalidated. Error: {base_return['error']}")
         
         base_return['signal'] = final_signal_str
-        if final_signal_str != 'none':
-            base_return['sl_price'] = sl_price_calc
-            base_return['tp_price'] = tp_price_calc
-        else:
-            base_return['sl_price'] = None
-            base_return['tp_price'] = None
-            if base_return['error']: 
-                 print(f"Strategy {STRATEGIES[2]} for {symbol}: Signal invalidated due to SL/TP error: {base_return['error']}")
-        
         return base_return
 
     except Exception as e:
@@ -1192,48 +1356,64 @@ def strategy_vwap_breakout_momentum(symbol):
                                    base_return['all_conditions_status']['atr_volatility_confirms_short']])
         
         final_signal_str = 'none'
-        sl_price_calc, tp_price_calc = None, None # Initialize calc variables
-        price_precision = get_price_precision(symbol)
+        calculated_sl, calculated_tp = None, None
 
         if met_buy_conditions >= 2: # Changed from == base_return['conditions_for_full_signal_threshold']
             final_signal_str = 'up'
             base_return['conditions_met_count'] = met_buy_conditions
-            sl_price_calc = round(last_vwap, price_precision)
-            tp_price_calc = round(current_price + (last_atr * 1.2), price_precision)
-            if current_price <= sl_price_calc: 
-                base_return['error'] = f"S3 SL price {sl_price_calc} is at or above entry {current_price} for LONG"
-                final_signal_str = 'none'
-            elif tp_price_calc <= current_price: 
-                base_return['error'] = f"S3 TP price {tp_price_calc} is at or below entry {current_price} for LONG"
-                final_signal_str = 'none'
-
         elif met_sell_conditions >= 2: # Changed from == base_return['conditions_for_full_signal_threshold']
             final_signal_str = 'down'
             base_return['conditions_met_count'] = met_sell_conditions
-            sl_price_calc = round(last_vwap, price_precision)
-            tp_price_calc = round(current_price - (last_atr * 1.2), price_precision)
-            if current_price >= sl_price_calc: 
-                base_return['error'] = f"S3 SL price {sl_price_calc} is at or above entry {current_price} for SHORT"
-                final_signal_str = 'none'
-            elif tp_price_calc >= current_price: 
-                base_return['error'] = f"S3 TP price {tp_price_calc} is at or above entry {current_price} for SHORT"
-                final_signal_str = 'none'
         else: # Not a full signal
             if met_buy_conditions >= met_sell_conditions:
                  base_return['conditions_met_count'] = met_buy_conditions
             else:
                  base_return['conditions_met_count'] = met_sell_conditions
+            base_return['signal'] = 'none' # Ensure signal is none
+            return base_return # Exit early if no initial signal
 
-        base_return['signal'] = final_signal_str
+        # If a signal ('up' or 'down') is determined, proceed to calculate dynamic SL/TP
         if final_signal_str != 'none':
-            base_return['sl_price'] = sl_price_calc
-            base_return['tp_price'] = tp_price_calc
-        else:
-            base_return['sl_price'] = None
-            base_return['tp_price'] = None
-            if base_return['error']:
-                print(f"Strategy {STRATEGIES[3]} for {symbol}: Signal invalidated due to SL/TP error: {base_return['error']}")
+            entry_price = current_price # current_price is already available (kl_day_df['Close'].iloc[-1])
+
+            dynamic_sl_tp_result = calculate_dynamic_sl_tp(symbol, entry_price, final_signal_str)
+
+            if dynamic_sl_tp_result['error']:
+                base_return['error'] = f"S3 Dyn.SL/TP Error ({symbol}, {final_signal_str}): {dynamic_sl_tp_result['error']}"
+                final_signal_str = 'none' # Invalidate signal
+            else:
+                calculated_sl = dynamic_sl_tp_result['sl_price']
+                calculated_tp = dynamic_sl_tp_result['tp_price']
+
+                if calculated_sl is None or calculated_tp is None:
+                    base_return['error'] = f"S3 Dyn.SL/TP calc ({symbol}, {final_signal_str}) returned None for SL ({calculated_sl}) or TP ({calculated_tp}). Orig. err: {dynamic_sl_tp_result.get('error', 'N/A')}"
+                    final_signal_str = 'none' # Invalidate signal
+                elif final_signal_str == 'up':
+                    if calculated_sl >= entry_price:
+                        base_return['error'] = f"S3 SL price {calculated_sl} not below entry {entry_price} for LONG on {symbol}."
+                        final_signal_str = 'none'
+                    elif calculated_tp <= entry_price:
+                        base_return['error'] = f"S3 TP price {calculated_tp} not above entry {entry_price} for LONG on {symbol}."
+                        final_signal_str = 'none'
+                elif final_signal_str == 'down':
+                    if calculated_sl <= entry_price:
+                        base_return['error'] = f"S3 SL price {calculated_sl} not above entry {entry_price} for SHORT on {symbol}."
+                        final_signal_str = 'none'
+                    elif calculated_tp >= entry_price:
+                        base_return['error'] = f"S3 TP price {calculated_tp} not below entry {entry_price} for SHORT on {symbol}."
+                        final_signal_str = 'none'
+            
+            if final_signal_str != 'none':
+                base_return['sl_price'] = calculated_sl
+                base_return['tp_price'] = calculated_tp
+            else:
+                base_return['sl_price'] = None
+                base_return['tp_price'] = None
+                if not base_return['error']: 
+                     base_return['error'] = f"S3 signal for {symbol} ({'up' if met_buy_conditions >=2 else 'down'}) invalidated during dynamic SL/TP processing."
+                print(f"Strategy {STRATEGIES.get(3, 'S3')} for {symbol}: Signal invalidated. Error: {base_return['error']}")
         
+        base_return['signal'] = final_signal_str
         return base_return
 
     except Exception as e:
@@ -1418,27 +1598,50 @@ def strategy_macd_divergence_pivot(symbol):
         
         # SL/TP Calculation
         if final_signal != 'none':
-            price_precision = get_price_precision(symbol)
-            if final_signal == 'up':
-                sl_price = round(divergence_low_price - last_atr, price_precision)
-                tp_price = round(pivots['P'], price_precision) # Target Pivot P
-                if current_price <= sl_price or tp_price <= current_price:
-                    base_return['error'] = f"S4 LONG SL/TP invalid: SL={sl_price}, TP={tp_price}, Entry={current_price}"
-                    final_signal = 'none'
-            elif final_signal == 'down':
-                sl_price = round(divergence_high_price + last_atr, price_precision)
-                tp_price = round(pivots['P'], price_precision) # Target Pivot P
-                if current_price >= sl_price or tp_price >= current_price:
-                    base_return['error'] = f"S4 SHORT SL/TP invalid: SL={sl_price}, TP={tp_price}, Entry={current_price}"
-                    final_signal = 'none'
+            entry_price = current_price # current_price is the entry price for dynamic calculation
             
-            if final_signal == 'none' and base_return['error']:
-                 print(f"Strategy {STRATEGIES[4]} for {symbol}: Signal invalidated: {base_return['error']}")
+            dynamic_sl_tp_result = calculate_dynamic_sl_tp(symbol, entry_price, final_signal)
+            calculated_sl = None
+            calculated_tp = None
 
+            if dynamic_sl_tp_result['error']:
+                base_return['error'] = f"S4 Dyn.SL/TP Error ({symbol}, {final_signal}): {dynamic_sl_tp_result['error']}"
+                final_signal = 'none' # Invalidate the signal
+            else:
+                calculated_sl = dynamic_sl_tp_result['sl_price']
+                calculated_tp = dynamic_sl_tp_result['tp_price']
 
+                if calculated_sl is None or calculated_tp is None:
+                    base_return['error'] = f"S4 Dyn.SL/TP calc ({symbol}, {final_signal}) returned None for SL ({calculated_sl}) or TP ({calculated_tp}). Orig. err: {dynamic_sl_tp_result.get('error', 'N/A')}"
+                    final_signal = 'none'
+                elif final_signal == 'up': # Validation for 'up'
+                    if calculated_sl >= entry_price:
+                        base_return['error'] = f"S4 SL {calculated_sl} not below entry {entry_price} for LONG on {symbol}."
+                        final_signal = 'none'
+                    elif calculated_tp <= entry_price:
+                        base_return['error'] = f"S4 TP {calculated_tp} not above entry {entry_price} for LONG on {symbol}."
+                        final_signal = 'none'
+                elif final_signal == 'down': # Validation for 'down'
+                    if calculated_sl <= entry_price:
+                        base_return['error'] = f"S4 SL {calculated_sl} not above entry {entry_price} for SHORT on {symbol}."
+                        final_signal = 'none'
+                    elif calculated_tp >= entry_price:
+                        base_return['error'] = f"S4 TP {calculated_tp} not below entry {entry_price} for SHORT on {symbol}."
+                        final_signal = 'none'
+
+            if final_signal != 'none':
+                base_return['sl_price'] = calculated_sl
+                base_return['tp_price'] = calculated_tp
+            else:
+                base_return['sl_price'] = None
+                base_return['tp_price'] = None
+                if not base_return['error']: # Ensure an error is logged if signal invalidated
+                     base_return['error'] = f"S4 signal for {symbol} invalidated during dynamic SL/TP processing."
+                # This print will catch these dynamic SL/TP related invalidations too.
+                print(f"Strategy {STRATEGIES.get(4, 'S4')} for {symbol}: Signal invalidated. Error: {base_return['error']}")
+        
         base_return['signal'] = final_signal
-        base_return['sl_price'] = sl_price if final_signal != 'none' else None
-        base_return['tp_price'] = tp_price if final_signal != 'none' else None
+        # sl_price and tp_price are set above based on final_signal status
         # divergence_price_point already set when divergence found
         
         return base_return
@@ -1561,37 +1764,79 @@ def strategy_rsi_enhanced(symbol):
 
         num_core_sell_conditions_met = sum([cond_rsi_crossed_below_70, cond_duration_overbought_met, cond_rsi_slope_down_met, cond_price_below_sma50_met])
 
-        price_precision = get_price_precision(symbol)
+        # Initialize SL/TP in base_return to None before any calculation attempt
+        base_return['sl_price'] = None
+        base_return['tp_price'] = None
+        calculated_sl = None # To store results from dynamic_sl_tp
+        calculated_tp = None # To store results from dynamic_sl_tp
         
+        # Determine initial signal based on conditions
         if num_core_buy_conditions_met >= 2: 
             base_return['signal'] = 'up'
             base_return['conditions_met_count'] = num_core_buy_conditions_met
-            sl_p = round(current_price * (1 - SL_PERCENT), price_precision)
-            tp_p = round(current_price * (1 + TP_PERCENT), price_precision)
-            if sl_p >= current_price or tp_p <= current_price: 
-                base_return['error'] = f"S5 BUY Invalid SL/TP: SL={sl_p}, TP={tp_p}, Entry={current_price}"
-                base_return['signal'] = 'none' 
-            else:
-                base_return['sl_price'] = sl_p
-                base_return['tp_price'] = tp_p
-        
         elif num_core_sell_conditions_met >= 2: 
             base_return['signal'] = 'down'
             base_return['conditions_met_count'] = num_core_sell_conditions_met
-            sl_p = round(current_price * (1 + SL_PERCENT), price_precision)
-            tp_p = round(current_price * (1 - TP_PERCENT), price_precision)
-            if sl_p <= current_price or tp_p >= current_price: 
-                base_return['error'] = f"S5 SELL Invalid SL/TP: SL={sl_p}, TP={tp_p}, Entry={current_price}"
-                base_return['signal'] = 'none' 
-            else:
-                base_return['sl_price'] = sl_p
-                base_return['tp_price'] = tp_p
         else: 
             base_return['conditions_met_count'] = max(num_core_buy_conditions_met, num_core_sell_conditions_met)
             base_return['signal'] = 'none'
 
+        # If a signal is determined, calculate and validate dynamic SL/TP
+        if base_return['signal'] != 'none':
+            entry_price = current_price # current_price is the entry price
+
+            dynamic_sl_tp_result = calculate_dynamic_sl_tp(symbol, entry_price, base_return['signal'])
+
+            if dynamic_sl_tp_result['error']:
+                base_return['error'] = f"S5 Dyn.SL/TP Error ({symbol}, {base_return['signal']}): {dynamic_sl_tp_result['error']}"
+                base_return['signal'] = 'none' # Invalidate the signal
+            else:
+                calculated_sl = dynamic_sl_tp_result['sl_price']
+                calculated_tp = dynamic_sl_tp_result['tp_price']
+
+                if calculated_sl is None or calculated_tp is None:
+                    # Append error if one already exists from condition checks, otherwise set it.
+                    err_msg = f"S5 Dyn.SL/TP calc ({symbol}, {base_return['signal']}) returned None for SL ({calculated_sl}) or TP ({calculated_tp}). Orig. err: {dynamic_sl_tp_result.get('error', 'N/A')}"
+                    if base_return['error']: base_return['error'] += "; " + err_msg
+                    else: base_return['error'] = err_msg
+                    base_return['signal'] = 'none'
+                # Ensure base_return['signal'] hasn't been changed to 'none' before this validation
+                elif base_return['signal'] == 'up': 
+                    if calculated_sl >= entry_price:
+                        err_msg = f"S5 SL {calculated_sl} not below entry {entry_price} for LONG on {symbol}."
+                        if base_return['error']: base_return['error'] += "; " + err_msg
+                        else: base_return['error'] = err_msg
+                        base_return['signal'] = 'none'
+                    elif calculated_tp <= entry_price:
+                        err_msg = f"S5 TP {calculated_tp} not above entry {entry_price} for LONG on {symbol}."
+                        if base_return['error']: base_return['error'] += "; " + err_msg
+                        else: base_return['error'] = err_msg
+                        base_return['signal'] = 'none'
+                elif base_return['signal'] == 'down': 
+                    if calculated_sl <= entry_price:
+                        err_msg = f"S5 SL {calculated_sl} not above entry {entry_price} for SHORT on {symbol}."
+                        if base_return['error']: base_return['error'] += "; " + err_msg
+                        else: base_return['error'] = err_msg
+                        base_return['signal'] = 'none'
+                    elif calculated_tp >= entry_price:
+                        err_msg = f"S5 TP {calculated_tp} not below entry {entry_price} for SHORT on {symbol}."
+                        if base_return['error']: base_return['error'] += "; " + err_msg
+                        else: base_return['error'] = err_msg
+                        base_return['signal'] = 'none'
+
+            # Update base_return SL/TP based on final signal state
+            if base_return['signal'] != 'none': # If signal is still valid
+                base_return['sl_price'] = calculated_sl
+                base_return['tp_price'] = calculated_tp
+            else: # Signal was invalidated during SL/TP calculation/validation
+                base_return['sl_price'] = None # Ensure they are None
+                base_return['tp_price'] = None
+                if not base_return['error']: # Ensure an error is logged if not already set
+                     base_return['error'] = f"S5 signal for {symbol} invalidated during dynamic SL/TP processing."
+                # The print below will catch this state.
+
         if base_return['error'] and base_return['signal'] == 'none': 
-             print(f"Strategy {STRATEGIES.get(5, 'S5')} for {symbol}: Signal invalidated by error: {base_return['error']}")
+             print(f"Strategy {STRATEGIES.get(5, 'S5')} for {symbol}: Signal invalidated or error occurred: {base_return['error']}")
         
     except IndexError as ie:
         base_return['error'] = f"S5 IndexError for {symbol}: {str(ie)}. RSI len: {len(rsi_series) if 'rsi_series' in locals() else 'N/A'}, KL len: {len(kl) if 'kl' in locals() else 'N/A'}"
