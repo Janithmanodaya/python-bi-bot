@@ -15,7 +15,8 @@ from backtesting import Backtest, Strategy
 # pandas is already imported
 # ta is already imported, ensure it's there.
 
-def calculate_dynamic_sl_tp(symbol: str, entry_price: float, side: str, atr_period: int = 14, rr: float = 1.5, buffer: float = 0.001):
+DEFAULT_ATR_MULTIPLIER = 2.0 # Moved here
+def calculate_dynamic_sl_tp(symbol: str, entry_price: float, side: str, atr_period: int = 14, rr: float = 1.5, atr_multiplier: float = DEFAULT_ATR_MULTIPLIER): # Changed buffer to atr_multiplier
     # Ensure klines, get_price_precision are available in the scope or passed as arguments if necessary.
     # Assuming they are globally accessible or defined in the same file as per the existing code structure.
     # Also assumes 'ta' and 'pd' (pandas) are imported.
@@ -70,7 +71,7 @@ def calculate_dynamic_sl_tp(symbol: str, entry_price: float, side: str, atr_peri
     tp_calculated = None
 
     if side == 'up':
-        sl_calculated = entry_price - atr_value * (1 + buffer)
+        sl_calculated = entry_price - (atr_value * atr_multiplier) # Changed calculation
         # Ensure SL is actually below entry for a long trade
         if sl_calculated >= entry_price:
             return_value['error'] = f"Calculated SL ({sl_calculated}) for 'up' side is not below entry price ({entry_price})."
@@ -79,7 +80,7 @@ def calculate_dynamic_sl_tp(symbol: str, entry_price: float, side: str, atr_peri
             return return_value
         tp_calculated = entry_price + (entry_price - sl_calculated) * rr
     elif side == 'down':
-        sl_calculated = entry_price + atr_value * (1 + buffer)
+        sl_calculated = entry_price + (atr_value * atr_multiplier) # Changed calculation
         # Ensure SL is actually above entry for a short trade
         if sl_calculated <= entry_price:
             return_value['error'] = f"Calculated SL ({sl_calculated}) for 'down' side is not above entry price ({entry_price})."
@@ -263,7 +264,7 @@ class BacktestStrategyWrapper(Strategy):
     
     current_strategy_id = 5 # Defaulting to 5 for "New RSI-Based Strategy"
     RR = 1.5  # Risk/Reward ratio
-    SL_ATR_MULTI = 1.0 # Multiplier for ATR to determine SL distance
+    SL_ATR_MULTI = DEFAULT_ATR_MULTIPLIER # Multiplier for ATR to determine SL distance
     PRICE_PRECISION_BT = 4 # Default rounding precision for backtesting
 
     def init(self):
@@ -903,6 +904,7 @@ leverage = 5
 margin_type_setting = 'ISOLATED' # Margin type
 qty_concurrent_positions = 100
 LOCAL_HIGH_LOW_LOOKBACK_PERIOD = 20 # New global for breakout logic
+# DEFAULT_ATR_MULTIPLIER = 2.0 # No longer here
 
 # --- GUI Helper Function ---
 def update_text_widget_content(widget, content_list):
