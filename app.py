@@ -799,7 +799,18 @@ def run_backtest_command():
         backtest_run_button.config(state=tk.DISABLED)
 
     try:
-        symbol = backtest_symbol_var.get().strip().upper()
+        symbols_str = backtest_symbol_var.get().strip().upper() # Changed variable name
+        if not symbols_str:
+            messagebox.showerror("Input Error", "Symbol(s) field cannot be empty.")
+            if backtest_run_button: backtest_run_button.config(state=tk.NORMAL)
+            return
+        
+        symbols_list = [s.strip() for s in symbols_str.split(',') if s.strip()]
+        if not symbols_list:
+            messagebox.showerror("Input Error", "No valid symbols provided. Please enter symbols separated by commas.")
+            if backtest_run_button: backtest_run_button.config(state=tk.NORMAL)
+            return
+
         timeframe = backtest_timeframe_var.get().strip()
         interval_str = backtest_interval_var.get().strip()
         selected_strategy_name = backtest_selected_strategy_var.get()
@@ -852,8 +863,9 @@ def run_backtest_command():
         if current_backtest_sl_tp_mode == "Percentage":
             tp_str = backtest_tp_var.get().strip() # TP %
             sl_str = backtest_sl_var.get().strip() # SL %
-            if not all([symbol, timeframe, interval_str, tp_str, sl_str, selected_strategy_name]):
-                messagebox.showerror("Input Error", "All backtest fields (including TP/SL Percentages) are required for 'Percentage' mode.")
+            # Check if symbols_list is empty, timeframe, interval_str, etc. are present
+            if not all([symbols_list, timeframe, interval_str, tp_str, sl_str, selected_strategy_name]): # Changed 'symbol' to 'symbols_list'
+                messagebox.showerror("Input Error", "All backtest fields (including Symbol(s) and TP/SL Percentages) are required for 'Percentage' mode.")
                 if backtest_run_button: backtest_run_button.config(state=tk.NORMAL)
                 return
             tp_percentage = float(tp_str) / 100.0
@@ -865,8 +877,8 @@ def run_backtest_command():
         elif current_backtest_sl_tp_mode == "Fixed PnL":
             sl_pnl_str = backtest_sl_pnl_amount_var.get().strip()
             tp_pnl_str = backtest_tp_pnl_amount_var.get().strip()
-            if not all([symbol, timeframe, interval_str, sl_pnl_str, tp_pnl_str, selected_strategy_name]):
-                messagebox.showerror("Input Error", "All backtest fields (including SL/TP PnL Amounts) are required for 'Fixed PnL' mode.")
+            if not all([symbols_list, timeframe, interval_str, sl_pnl_str, tp_pnl_str, selected_strategy_name]): # Changed 'symbol' to 'symbols_list'
+                messagebox.showerror("Input Error", "All backtest fields (including Symbol(s) and SL/TP PnL Amounts) are required for 'Fixed PnL' mode.")
                 if backtest_run_button: backtest_run_button.config(state=tk.NORMAL)
                 return
             sl_pnl = float(sl_pnl_str)
@@ -879,8 +891,8 @@ def run_backtest_command():
             # For ATR/Dynamic, specific TP/SL inputs might not be needed from main UI
             # as strategy itself calculates them. Or, UI could provide ATR multiplier and RR.
             # For now, assume strategy handles it, no direct numeric inputs for ATR SL/TP from here.
-            if not all([symbol, timeframe, interval_str, selected_strategy_name]):
-                 messagebox.showerror("Input Error", "Symbol, Timeframe, Interval, and Strategy are required for 'ATR/Dynamic' mode.")
+            if not all([symbols_list, timeframe, interval_str, selected_strategy_name]): # Changed 'symbol' to 'symbols_list'
+                 messagebox.showerror("Input Error", "Symbol(s), Timeframe, Interval, and Strategy are required for 'ATR/Dynamic' mode.")
                  if backtest_run_button: backtest_run_button.config(state=tk.NORMAL)
                  return
             # sl_percentage and tp_percentage (and sl_pnl, tp_pnl) remain 0.0 as they are not used.
@@ -909,18 +921,19 @@ def run_backtest_command():
         # Clear previous results
         if backtest_results_text_widget and root and root.winfo_exists():
             backtest_results_text_widget.config(state=tk.NORMAL)
-            backtest_results_text_widget.delete('1.0', tk.END)
-            backtest_results_text_widget.insert(tk.END, f"Starting backtest for {symbol}, Strategy: {selected_strategy_name}, SL/TP Mode: {current_backtest_sl_tp_mode}...\n")
+            backtest_results_text_widget.delete('1.0', tk.END) # Clear previous results before starting new batch
+            backtest_results_text_widget.insert(tk.END, f"Starting backtests for {len(symbols_list)} symbol(s): {', '.join(symbols_list)}\nStrategy: {selected_strategy_name}, SL/TP Mode: {current_backtest_sl_tp_mode}...\n\n")
             backtest_results_text_widget.config(state=tk.DISABLED)
+        
         if status_var and root and root.winfo_exists():
-            status_var.set("Backtest: Initializing...")
+            status_var.set(f"Backtest: Initializing for {len(symbols_list)} symbols...")
 
-
-        thread = threading.Thread(target=perform_backtest_in_thread, 
-                                  args=(strategy_id_for_backtest, symbol, timeframe, interval_days, 
-                                        tp_percentage, sl_percentage, # Pass Percentage values
-                                        current_backtest_sl_tp_mode, sl_pnl, tp_pnl, # Pass Mode and PnL values
-                                        starting_capital, leverage_val), # Pass starting_capital and leverage_val
+        # Threading for the entire loop of symbols
+        thread = threading.Thread(target=perform_backtest_for_multiple_symbols, 
+                                  args=(symbols_list, strategy_id_for_backtest, timeframe, interval_days, 
+                                        tp_percentage, sl_percentage,
+                                        current_backtest_sl_tp_mode, sl_pnl, tp_pnl,
+                                        starting_capital, leverage_val),
                                   daemon=True)
         thread.start()
 
@@ -931,119 +944,180 @@ def run_backtest_command():
         messagebox.showerror("Error", f"An unexpected error occurred in run_backtest_command: {e}")
         if backtest_results_text_widget and root and root.winfo_exists():
             backtest_results_text_widget.config(state=tk.NORMAL)
-            backtest_results_text_widget.insert(tk.END, f"\nError: {e}")
+            backtest_results_text_widget.insert(tk.END, f"\nError setting up backtest batch: {e}")
             backtest_results_text_widget.config(state=tk.DISABLED)
         if backtest_run_button: backtest_run_button.config(state=tk.NORMAL)
 
-def perform_backtest_in_thread(strategy_id, symbol, timeframe, interval_days, 
-                               tp_percentage_val, sl_percentage_val, # Explicitly named percentage params
-                               passed_sl_tp_mode, sl_pnl_val, tp_pnl_val, # Explicitly named mode and PnL params
-                               starting_capital_val, leverage_val): # Added leverage_val
+
+# New function to handle the loop and call perform_backtest_in_thread for each symbol
+def perform_backtest_for_multiple_symbols(symbols_list, strategy_id, timeframe, interval_days,
+                                          tp_percentage_val, sl_percentage_val,
+                                          passed_sl_tp_mode, sl_pnl_val, tp_pnl_val,
+                                          starting_capital_val, leverage_val):
     global backtest_results_text_widget, root, status_var, backtest_run_button
+    all_symbols_completed = True
+
+    for i, symbol_item in enumerate(symbols_list):
+        if not (root and root.winfo_exists()): # Check if UI is still alive
+            print("UI closed, aborting multi-symbol backtest.")
+            break 
+        
+        print(f"\nProcessing symbol {i+1}/{len(symbols_list)}: {symbol_item}")
+        if status_var:
+             root.after(0, lambda s=symbol_item, num=i+1, total=len(symbols_list): status_var.set(f"Backtest: Processing {s} ({num}/{total})"))
+        
+        # This will call the original perform_backtest_in_thread logic for a single symbol
+        # But we need to adapt how results are displayed.
+        # For simplicity, let's make perform_backtest_in_thread directly update UI or return results to here
+        
+        # Re-evaluating: It's better to call execute_backtest directly here and manage UI updates
+        # to avoid complex threading handoffs for each symbol's detailed results.
+        
+        # Update UI to show which symbol is being processed
+        if backtest_results_text_widget:
+            root.after(0, lambda sym=symbol_item: (
+                backtest_results_text_widget.config(state=tk.NORMAL),
+                backtest_results_text_widget.insert(tk.END, f"--- Backtesting for {sym} ---\nFetching data...\n"),
+                backtest_results_text_widget.see(tk.END), # Scroll to end
+                backtest_results_text_widget.config(state=tk.DISABLED)
+            ))
+
+        stats_output, bt_object, plot_error_message = execute_backtest(
+            strategy_id, symbol_item, timeframe, interval_days,
+            tp_percentage_val, sl_percentage_val,
+            passed_sl_tp_mode, sl_pnl_val, tp_pnl_val,
+            starting_capital_val, leverage_val
+        )
+
+        # Update UI with results for this specific symbol
+        if root and root.winfo_exists() and backtest_results_text_widget:
+            def update_ui_for_symbol_result(sym, stats, plot_err):
+                backtest_results_text_widget.config(state=tk.NORMAL)
+                if isinstance(stats, pd.Series):
+                    stats_str = f"Results for {sym}:\n"
+                    stats_str += "--------------------\n"
+                    for index, value in stats.items():
+                        if index in ['_equity_curve', '_trades']: continue
+                        stats_str += f"{index}: {value:.2f}\n" if isinstance(value, float) else f"{index}: {value}\n"
+                    backtest_results_text_widget.insert(tk.END, stats_str)
+                elif isinstance(stats, str): # Error message from execute_backtest
+                    backtest_results_text_widget.insert(tk.END, f"Error for {sym}: {stats}\n")
+                elif stats is not None:
+                    backtest_results_text_widget.insert(tk.END, f"Results for {sym}:\n{str(stats)}\n")
+                else:
+                    backtest_results_text_widget.insert(tk.END, f"No statistics returned for {sym}.\n")
+
+                if plot_err:
+                    backtest_results_text_widget.insert(tk.END, f"Plotting Error for {sym}: {plot_err}\n")
+                # Plot window for each symbol would have opened via execute_backtest if successful
+
+                backtest_results_text_widget.insert(tk.END, "\n---\n\n") # Separator
+                backtest_results_text_widget.see(tk.END)
+                backtest_results_text_widget.config(state=tk.DISABLED)
+
+            root.after(0, update_ui_for_symbol_result, symbol_item, stats_output, plot_error_message)
+        
+        if isinstance(stats_output, str): # If execute_backtest returned an error string
+            all_symbols_completed = False # Mark that at least one symbol failed
+            print(f"Error during backtest for {symbol_item}: {stats_output}")
+        
+        sleep(1) # Small delay between symbols if needed, e.g., for API rate limits or UI responsiveness
+
+    # Final status update after all symbols are processed
+    if root and root.winfo_exists():
+        final_msg = "All symbol backtests completed." if all_symbols_completed else "Backtests completed with some errors."
+        root.after(0, lambda: status_var.set(f"Backtest: {final_msg}"))
+        if backtest_run_button:
+            root.after(0, lambda: backtest_run_button.config(state=tk.NORMAL))
+
+# Original perform_backtest_in_thread is no longer directly called by run_backtest_command's thread.
+# It is effectively replaced by perform_backtest_for_multiple_symbols which calls execute_backtest in a loop.
+# We can remove or comment out the old perform_backtest_in_thread if it's no longer used.
+# For now, let's comment it out to avoid confusion.
+
+# def perform_backtest_in_thread(strategy_id, symbol, timeframe, interval_days, 
+#                                tp_percentage_val, sl_percentage_val, # Explicitly named percentage params
+#                                passed_sl_tp_mode, sl_pnl_val, tp_pnl_val, # Explicitly named mode and PnL params
+#                                starting_capital_val, leverage_val): # Added leverage_val
+#     global backtest_results_text_widget, root, status_var, backtest_run_button
     
-    print(f"DEBUG perform_backtest_in_thread: Strategy ID: {strategy_id}, Symbol: {symbol}, Timeframe: {timeframe}, Interval: {interval_days} days, Start Capital: ${starting_capital_val:.2f}, Leverage: {leverage_val}x") # Added leverage_val
-    print(f"DEBUG perform_backtest_in_thread: SL/TP Mode: {passed_sl_tp_mode}")
-    if passed_sl_tp_mode == "Percentage":
-        print(f"DEBUG perform_backtest_in_thread: TP %: {tp_percentage_val*100:.2f}%, SL %: {sl_percentage_val*100:.2f}%")
-    elif passed_sl_tp_mode == "Fixed PnL":
-        print(f"DEBUG perform_backtest_in_thread: SL PnL: ${sl_pnl_val:.2f}, TP PnL: ${tp_pnl_val:.2f}")
+#     print(f"DEBUG perform_backtest_in_thread: Strategy ID: {strategy_id}, Symbol: {symbol}, Timeframe: {timeframe}, Interval: {interval_days} days, Start Capital: ${starting_capital_val:.2f}, Leverage: {leverage_val}x") 
+#     print(f"DEBUG perform_backtest_in_thread: SL/TP Mode: {passed_sl_tp_mode}")
+#     if passed_sl_tp_mode == "Percentage":
+#         print(f"DEBUG perform_backtest_in_thread: TP %: {tp_percentage_val*100:.2f}%, SL %: {sl_percentage_val*100:.2f}%")
+#     elif passed_sl_tp_mode == "Fixed PnL":
+#         print(f"DEBUG perform_backtest_in_thread: SL PnL: ${sl_pnl_val:.2f}, TP PnL: ${tp_pnl_val:.2f}")
     
-    if status_var and root and root.winfo_exists():
-        root.after(0, lambda: status_var.set("Backtest: Fetching kline data..."))
+#     if status_var and root and root.winfo_exists():
+#         root.after(0, lambda: status_var.set(f"Backtest: Fetching kline data for {symbol}...")) # Modified for symbol
 
-    stats_output, bt_object, plot_error_message = execute_backtest(
-        strategy_id, symbol, timeframe, interval_days, 
-        tp_percentage_val, sl_percentage_val, # Pass the correctly named percentage values
-        passed_sl_tp_mode, sl_pnl_val, tp_pnl_val, # Pass the mode and PnL values
-        starting_capital_val, leverage_val # Pass starting_capital_val and leverage_val
-    )
-    # ... (rest of the function remains largely the same) ...
-    print(f"DEBUG perform_backtest_in_thread: execute_backtest returned stats_output type: {type(stats_output)}")
-    # Avoid printing large DataFrames or Series directly here if they are part of stats_output; execute_backtest already logs details
-    if isinstance(stats_output, str): # Error message
-        print(f"DEBUG perform_backtest_in_thread: execute_backtest returned error string: {stats_output}")
-    print(f"DEBUG perform_backtest_in_thread: execute_backtest returned plot_error_message: {plot_error_message}")
+#     stats_output, bt_object, plot_error_message = execute_backtest(
+#         strategy_id, symbol, timeframe, interval_days, 
+#         tp_percentage_val, sl_percentage_val, 
+#         passed_sl_tp_mode, sl_pnl_val, tp_pnl_val, 
+#         starting_capital_val, leverage_val 
+#     )
     
-    if status_var and root and root.winfo_exists():
-        if isinstance(stats_output, str) or plot_error_message : # If error string returned or plot error
-             root.after(0, lambda: status_var.set("Backtest: Error encountered."))
-        else:
-             root.after(0, lambda: status_var.set("Backtest: Simulation complete. Preparing results..."))
+#     print(f"DEBUG perform_backtest_in_thread ({symbol}): execute_backtest returned stats_output type: {type(stats_output)}")
+#     if isinstance(stats_output, str): 
+#         print(f"DEBUG perform_backtest_in_thread ({symbol}): execute_backtest returned error string: {stats_output}")
+#     print(f"DEBUG perform_backtest_in_thread ({symbol}): execute_backtest returned plot_error_message: {plot_error_message}")
+    
+#     if status_var and root and root.winfo_exists():
+#         if isinstance(stats_output, str) or plot_error_message : 
+#              root.after(0, lambda: status_var.set(f"Backtest: Error for {symbol}.")) # Modified for symbol
+#         else:
+#              root.after(0, lambda: status_var.set(f"Backtest: Sim complete for {symbol}. Preparing results...")) # Modified for symbol
 
 
-    def update_ui_with_results():
-        print(f"DEBUG update_ui_with_results: Received stats_output type: {type(stats_output)}, plot_error_message: {plot_error_message}")
-        final_status_message = "Backtest: Completed."
-        print("DEBUG: Entered update_ui_with_results function.") # New
-
-        if backtest_results_text_widget and root and root.winfo_exists():
-            backtest_results_text_widget.config(state=tk.NORMAL)
-            backtest_results_text_widget.delete('1.0', tk.END) # Clear "Starting..." or previous debug messages
-            backtest_results_text_widget.insert(tk.END, "DEBUG: Initial test write to results widget successful.\n") # Test write
-            print("DEBUG: Successfully performed initial test write to widget.")
-        else:
-            print("DEBUG: backtest_results_text_widget is None or not available at the start of update_ui_with_results.")
-            # If widget is not available, further UI updates for it are pointless.
-            # Consider how to handle this, maybe return or log. For now, printing is fine.
-
-        print(f"DEBUG: Type of stats_output: {type(stats_output)}")
-        if stats_output is not None:
-            print(f"DEBUG: Content of stats_output (first 500 chars): {str(stats_output)[:500]}")
-        else:
-            print("DEBUG: stats_output is None.")
-
-        if backtest_results_text_widget and root and root.winfo_exists(): # Check again before complex logic
-            # The original logic for displaying stats or errors:
-            if isinstance(stats_output, pd.Series):
-                stats_str = "Backtest Results:\n"
-                stats_str += "--------------------\n"
-                for index, value in stats_output.items():
-                    if index in ['_equity_curve', '_trades']:
-                        continue
-                    if isinstance(value, float):
-                        stats_str += f"{index}: {value:.2f}\n"
-                    else:
-                        stats_str += f"{index}: {value}\n"
-                print(f"DEBUG: Formatted stats_str (first 500 chars): {stats_str[:500]}") # New print
-                backtest_results_text_widget.insert(tk.END, stats_str) # Appending after initial debug message
-            elif isinstance(stats_output, str):
-                print(f"DEBUG: stats_output is a string (error message): {stats_output}") # New print
-                backtest_results_text_widget.insert(tk.END, stats_output) # Appending
-            elif stats_output is not None:
-                stats_str = str(stats_output)
-                print(f"DEBUG: stats_output is other non-None type, converting to str: {stats_str[:500]}") # New print
-                backtest_results_text_widget.insert(tk.END, stats_str) # Appending
+#     def update_ui_with_results_per_symbol(current_symbol, stats_data, plot_err_msg, bt_obj): # Added current_symbol
+#         final_status_message_symbol = f"Backtest: Completed for {current_symbol}."
+        
+#         if backtest_results_text_widget and root and root.winfo_exists():
+#             backtest_results_text_widget.config(state=tk.NORMAL)
+#             # Append results, do not delete previous ones if running multiple symbols
+#             backtest_results_text_widget.insert(tk.END, f"\n*** Backtest Results for {current_symbol} ***\n") # Header for symbol
             
-            print("DEBUG: Attempted to insert main content into widget.")
+#             if isinstance(stats_data, pd.Series):
+#                 stats_str = "--------------------\n"
+#                 for index, value in stats_data.items():
+#                     if index in ['_equity_curve', '_trades']:
+#                         continue
+#                     if isinstance(value, float):
+#                         stats_str += f"{index}: {value:.2f}\n"
+#                     else:
+#                         stats_str += f"{index}: {value}\n"
+#                 backtest_results_text_widget.insert(tk.END, stats_str)
+#             elif isinstance(stats_data, str): # Error message
+#                 backtest_results_text_widget.insert(tk.END, f"Error: {stats_data}\n")
+#             elif stats_data is not None:
+#                 backtest_results_text_widget.insert(tk.END, str(stats_data) + "\n")
+#             else:
+#                 backtest_results_text_widget.insert(tk.END, "Backtest did not return statistics or an error message.\n")
 
-            if plot_error_message:
-                print(f"DEBUG: Plot error message: {plot_error_message}") # New print
-                backtest_results_text_widget.insert(tk.END, f"\n\n{plot_error_message}")
+#             if plot_err_msg:
+#                 backtest_results_text_widget.insert(tk.END, f"\n{plot_err_msg}\n")
             
-            if bt_object and not plot_error_message:
-                # ... (plotting logic, potentially add debug prints around bt.plot() if suspected) ...
-                backtest_results_text_widget.insert(tk.END, "\n\nPlot window should have opened (if data was sufficient).")
+#             if bt_obj and not plot_err_msg:
+#                 backtest_results_text_widget.insert(tk.END, f"Plot window for {current_symbol} should have opened (if data was sufficient).\n")
             
-            if stats_output is None and not isinstance(stats_output, str):
-                print("DEBUG: stats_output is None and not an error string. Displaying no stats message.") # New
-                backtest_results_text_widget.insert(tk.END, "Backtest did not return statistics or an error message.")
-            
-            backtest_results_text_widget.config(state=tk.DISABLED)
-        else:
-            print("DEBUG: backtest_results_text_widget became unavailable before main content insertion.")
+#             backtest_results_text_widget.insert(tk.END, "---\n") # Separator
+#             backtest_results_text_widget.config(state=tk.DISABLED)
+#             backtest_results_text_widget.see(tk.END) # Scroll to the end
+#         else:
+#             print(f"UI update skipped for {current_symbol}: Results widget not available.")
 
-        if status_var and root and root.winfo_exists():
-            root.after(0, lambda: status_var.set(final_status_message)) # final_status_message needs to be set based on outcomes
-        if backtest_run_button and root and root.winfo_exists(): 
-            backtest_run_button.config(state=tk.NORMAL)
-        print("DEBUG: Exiting update_ui_with_results function.") # New
+#         if status_var and root and root.winfo_exists():
+#             # Status var will be updated by the calling loop (perform_backtest_for_multiple_symbols)
+#             pass 
+#         # backtest_run_button re-enabling will be handled by the outer loop function
 
-    if root and root.winfo_exists(): 
-        root.after(0, update_ui_with_results)
-    else: # Fallback if root is not available (e.g., if app is closing)
-        print("UI update skipped: Root window not available.")
-        if isinstance(stats_output, str): print(stats_output)
-        elif stats_output: print(str(stats_output))
+#     if root and root.winfo_exists(): 
+#         root.after(0, update_ui_with_results_per_symbol, symbol, stats_output, plot_error_message, bt_object)
+#     else: 
+#         print(f"UI update skipped for {symbol}: Root window not available.")
+#         if isinstance(stats_output, str): print(f"Error for {symbol}: {stats_output}")
+#         elif stats_output: print(f"Stats for {symbol}:\n{str(stats_output)}")
 
 
 # Binance API URLs
