@@ -318,11 +318,12 @@ class BacktestStrategyWrapper(Strategy):
     sl_pnl_amount_bt = 0.0
     tp_pnl_amount_bt = 0.0
     # user_sl and user_tp (percentages) are already class attributes
+    leverage = 1.0 # Default leverage for backtesting
 
 
     def init(self):
         # Use self.sl_tp_mode_bt (or whatever name is chosen for the class attribute)
-        print(f"DEBUG BacktestStrategyWrapper.init: Initializing for strategy ID {self.current_strategy_id}, SL/TP Mode: {getattr(self, 'sl_tp_mode_bt', 'N/A')}")
+        print(f"DEBUG BacktestStrategyWrapper.init: Initializing for strategy ID {self.current_strategy_id}, SL/TP Mode: {getattr(self, 'sl_tp_mode_bt', 'N/A')}, Leverage: {self.leverage}")
         if self.current_strategy_id == 5:
             self.rsi_period_val = getattr(self, 'rsi_period', 14) 
             self.rsi = self.I(rsi_bt, self.data.Close, self.rsi_period_val, name='RSI_S5')
@@ -588,9 +589,10 @@ class BacktestStrategyWrapper(Strategy):
 def execute_backtest(strategy_id_for_backtest, symbol, timeframe, interval_days, 
                      ui_tp_percentage, ui_sl_percentage, # Percentage based
                      sl_tp_mode, sl_pnl_amount_val, tp_pnl_amount_val, # PnL and Mode based
-                     starting_capital # New parameter for starting capital
+                     starting_capital, # New parameter for starting capital
+                     leverage_bt # New parameter for leverage
                      ):
-    print(f"Executing backtest for Strategy ID {strategy_id_for_backtest} on {symbol} ({timeframe}, {interval_days} days), Start Capital: ${starting_capital:.2f}, Mode: {sl_tp_mode}")
+    print(f"Executing backtest for Strategy ID {strategy_id_for_backtest} on {symbol} ({timeframe}, {interval_days} days), Start Capital: ${starting_capital:.2f}, Leverage: {leverage_bt}x, Mode: {sl_tp_mode}") # Added leverage_bt to print
     if sl_tp_mode == "Percentage":
         print(f"  TP %: {ui_tp_percentage*100:.2f}%, SL %: {ui_sl_percentage*100:.2f}%")
     elif sl_tp_mode == "Fixed PnL":
@@ -644,7 +646,21 @@ def execute_backtest(strategy_id_for_backtest, symbol, timeframe, interval_days,
     
     print(f"DEBUG execute_backtest: Strategy RSI period: {getattr(BacktestStrategyWrapper, 'rsi_period', 'N/A')}") # Also log rsi_period
 
-    bt = Backtest(kl_df, BacktestStrategyWrapper, cash=starting_capital, margin=1/10, commission=0.0007)
+    # Set leverage for the strategy wrapper instance (though it's mainly for logging within the wrapper)
+    BacktestStrategyWrapper.leverage = leverage_bt
+
+    # Calculate margin for backtesting.py: margin = 1 / leverage
+    # Ensure leverage_bt >= 1. If leverage_bt is 0 or less, or less than 1, default to 1 (no leverage, margin=1).
+    if leverage_bt < 1:
+        print(f"Warning: Invalid leverage {leverage_bt}x provided for backtest. Defaulting to 1x (no leverage).")
+        margin_val = 1.0
+        BacktestStrategyWrapper.leverage = 1.0 # Also update the class attribute for consistency in logs
+    else:
+        margin_val = 1 / leverage_bt
+    
+    print(f"DEBUG execute_backtest: Calculated margin for Backtest: {margin_val} (from leverage: {leverage_bt}x)")
+
+    bt = Backtest(kl_df, BacktestStrategyWrapper, cash=starting_capital, margin=margin_val, commission=0.0007)
     try:
         stats = bt.run()
         print("Backtest completed.")
@@ -776,7 +792,7 @@ def run_backtest_command():
     global backtest_symbol_var, backtest_timeframe_var, backtest_interval_var
     global backtest_tp_var, backtest_sl_var, backtest_selected_strategy_var
     # Add new global vars for backtesting PnL and Mode
-    global backtest_sl_pnl_amount_var, backtest_tp_pnl_amount_var, backtest_sl_tp_mode_var, backtest_starting_capital_var
+    global backtest_sl_pnl_amount_var, backtest_tp_pnl_amount_var, backtest_sl_tp_mode_var, backtest_starting_capital_var, backtest_leverage_var # Added backtest_leverage_var
     global backtest_results_text_widget, STRATEGIES, root, status_var, backtest_run_button
 
     if backtest_run_button:
@@ -788,6 +804,7 @@ def run_backtest_command():
         interval_str = backtest_interval_var.get().strip()
         selected_strategy_name = backtest_selected_strategy_var.get()
         starting_capital_str = backtest_starting_capital_var.get().strip()
+        leverage_str = backtest_leverage_var.get().strip() # Get leverage string
         
         # Get SL/TP mode for backtesting
         current_backtest_sl_tp_mode = backtest_sl_tp_mode_var.get()
@@ -798,7 +815,9 @@ def run_backtest_command():
         sl_pnl = 0.0
         tp_pnl = 0.0
         starting_capital = 10000 # Default starting capital
+        leverage_val = 1.0 # Default leverage
 
+        # Validate Starting Capital
         if not starting_capital_str:
             messagebox.showerror("Input Error", "Starting Capital is required.")
             if backtest_run_button: backtest_run_button.config(state=tk.NORMAL)
@@ -811,6 +830,22 @@ def run_backtest_command():
                 return
         except ValueError:
             messagebox.showerror("Input Error", "Invalid number format for Starting Capital.")
+            if backtest_run_button: backtest_run_button.config(state=tk.NORMAL)
+            return
+        
+        # Validate Leverage
+        if not leverage_str:
+            messagebox.showerror("Input Error", "Leverage is required.")
+            if backtest_run_button: backtest_run_button.config(state=tk.NORMAL)
+            return
+        try:
+            leverage_val = float(leverage_str)
+            if leverage_val < 1: # Leverage must be >= 1
+                messagebox.showerror("Input Error", "Leverage must be 1 or greater.")
+                if backtest_run_button: backtest_run_button.config(state=tk.NORMAL)
+                return
+        except ValueError:
+            messagebox.showerror("Input Error", "Invalid number format for Leverage.")
             if backtest_run_button: backtest_run_button.config(state=tk.NORMAL)
             return
 
@@ -885,12 +920,12 @@ def run_backtest_command():
                                   args=(strategy_id_for_backtest, symbol, timeframe, interval_days, 
                                         tp_percentage, sl_percentage, # Pass Percentage values
                                         current_backtest_sl_tp_mode, sl_pnl, tp_pnl, # Pass Mode and PnL values
-                                        starting_capital), # Pass starting_capital
+                                        starting_capital, leverage_val), # Pass starting_capital and leverage_val
                                   daemon=True)
         thread.start()
 
-    except ValueError: # Catches float/int conversion errors
-        messagebox.showerror("Input Error", "Invalid number format for Interval, TP/SL %, PnL Amounts, or Starting Capital.")
+    except ValueError: # Catches float/int conversion errors for Interval, TP/SL %, PnL Amounts, Starting Capital, or Leverage
+        messagebox.showerror("Input Error", "Invalid number format for Interval, TP/SL %, PnL Amounts, Starting Capital, or Leverage.")
         if backtest_run_button: backtest_run_button.config(state=tk.NORMAL) 
     except Exception as e:
         messagebox.showerror("Error", f"An unexpected error occurred in run_backtest_command: {e}")
@@ -903,10 +938,10 @@ def run_backtest_command():
 def perform_backtest_in_thread(strategy_id, symbol, timeframe, interval_days, 
                                tp_percentage_val, sl_percentage_val, # Explicitly named percentage params
                                passed_sl_tp_mode, sl_pnl_val, tp_pnl_val, # Explicitly named mode and PnL params
-                               starting_capital_val): # New parameter for starting capital
+                               starting_capital_val, leverage_val): # Added leverage_val
     global backtest_results_text_widget, root, status_var, backtest_run_button
     
-    print(f"DEBUG perform_backtest_in_thread: Strategy ID: {strategy_id}, Symbol: {symbol}, Timeframe: {timeframe}, Interval: {interval_days} days, Start Capital: ${starting_capital_val:.2f}")
+    print(f"DEBUG perform_backtest_in_thread: Strategy ID: {strategy_id}, Symbol: {symbol}, Timeframe: {timeframe}, Interval: {interval_days} days, Start Capital: ${starting_capital_val:.2f}, Leverage: {leverage_val}x") # Added leverage_val
     print(f"DEBUG perform_backtest_in_thread: SL/TP Mode: {passed_sl_tp_mode}")
     if passed_sl_tp_mode == "Percentage":
         print(f"DEBUG perform_backtest_in_thread: TP %: {tp_percentage_val*100:.2f}%, SL %: {sl_percentage_val*100:.2f}%")
@@ -920,7 +955,7 @@ def perform_backtest_in_thread(strategy_id, symbol, timeframe, interval_days,
         strategy_id, symbol, timeframe, interval_days, 
         tp_percentage_val, sl_percentage_val, # Pass the correctly named percentage values
         passed_sl_tp_mode, sl_pnl_val, tp_pnl_val, # Pass the mode and PnL values
-        starting_capital_val # Pass starting_capital_val
+        starting_capital_val, leverage_val # Pass starting_capital_val and leverage_val
     )
     # ... (rest of the function remains largely the same) ...
     print(f"DEBUG perform_backtest_in_thread: execute_backtest returned stats_output type: {type(stats_output)}")
@@ -3960,6 +3995,7 @@ if __name__ == "__main__":
     backtest_tp_pnl_amount_var = tk.StringVar(value="20") # Default $20 TP PnL
     backtest_sl_tp_mode_var = tk.StringVar(value="ATR/Dynamic") # Default mode
     backtest_starting_capital_var = tk.StringVar(value="10000") # Default starting capital
+    backtest_leverage_var = tk.StringVar(value="1") # New StringVar for backtest leverage, default 1x
 
     backtest_selected_strategy_var = tk.StringVar()
 
@@ -4166,12 +4202,17 @@ if __name__ == "__main__":
     ttk.Label(backtest_params_grid, text="Start Capital ($):").grid(row=4, column=0, padx=2, pady=2, sticky='w')
     backtest_starting_capital_entry = ttk.Entry(backtest_params_grid, textvariable=backtest_starting_capital_var, width=12)
     backtest_starting_capital_entry.grid(row=4, column=1, padx=2, pady=2, sticky='w')
+
+    # Row 5: Leverage for Backtesting
+    ttk.Label(backtest_params_grid, text="Leverage (e.g., 10):").grid(row=5, column=0, padx=2, pady=2, sticky='w')
+    backtest_leverage_entry = ttk.Entry(backtest_params_grid, textvariable=backtest_leverage_var, width=7)
+    backtest_leverage_entry.grid(row=5, column=1, padx=2, pady=2, sticky='w')
     
-    # Row 5: Backtest Strategy
-    ttk.Label(backtest_params_grid, text="Backtest Strategy:").grid(row=5, column=0, padx=2, pady=2, sticky='w')
+    # Row 6: Backtest Strategy (was Row 5)
+    ttk.Label(backtest_params_grid, text="Backtest Strategy:").grid(row=6, column=0, padx=2, pady=2, sticky='w')
     backtest_strategy_combobox = ttk.Combobox(backtest_params_grid, textvariable=backtest_selected_strategy_var, values=list(STRATEGIES.values()), width=25, state="readonly")
     if STRATEGIES: backtest_strategy_combobox.current(ACTIVE_STRATEGY_ID if ACTIVE_STRATEGY_ID in STRATEGIES else 0) # Default to current active or first
-    backtest_strategy_combobox.grid(row=5, column=1, columnspan=3, padx=2, pady=2, sticky='w')
+    backtest_strategy_combobox.grid(row=6, column=1, columnspan=3, padx=2, pady=2, sticky='w') # Corrected row to 6
     
     # backtest_run_button is defined after its parent backtesting_frame is fully configured.
     # It's not a child of backtest_params_grid, so its definition remains separate but after backtesting_frame.
