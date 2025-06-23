@@ -92,28 +92,74 @@ def calculate_dynamic_sl_tp(symbol: str, entry_price: float, side: str, atr_peri
 
     # Rounding
     try:
+        # Before rounding, check if calculated SL/TP are positive
+        if sl_calculated <= 0:
+            return_value['error'] = f"Calculated SL price ({sl_calculated}) is not positive for {symbol}."
+            return_value['sl_price'] = None
+            return_value['tp_price'] = None # Invalidate TP as well if SL is invalid
+            return return_value
+        
+        if tp_calculated <= 0:
+            return_value['error'] = f"Calculated TP price ({tp_calculated}) is not positive for {symbol}."
+            # SL might still be valid, but TP is not. Depending on strategy, this might be acceptable or invalidate the signal.
+            # For now, let's invalidate TP but keep SL if it was positive.
+            # However, since TP depends on SL, if SL was the issue, TP would also be affected.
+            # If SL was valid but TP calculation (e.g. RR part) made it non-positive, only TP is invalid.
+            return_value['tp_price'] = None 
+            # If SL was fine, keep it: return_value['sl_price'] = round(sl_calculated, price_precision) 
+            # But it's safer to invalidate both if one part of the critical SL/TP pair is bad.
+            # Forcing TP to None if it's bad. SL would have been caught by the check above if it was bad.
+            # If SL is positive but TP is not, it implies an issue with RR or the difference calculation part.
+            # Let's be strict: if TP is bad, and SL was good, we still might want to invalidate the signal.
+            # For now, if TP is non-positive, just nullify TP. The calling strategy should decide what to do.
+            # Re-evaluating: if tp_calculated is <=0, it's a critical failure. Invalidate both for safety.
+            if return_value['sl_price'] is not None: # If SL was previously considered okay
+                 return_value['sl_price'] = round(sl_calculated, price_precision) # keep the rounded SL
+            # but if tp is bad, the signal might be unusable.
+            # The strategy should handle this if tp_price is None.
+            # Let's stick to: if sl_calculated <= 0, both are None. If tp_calculated <=0, only tp is None (sl might be valid).
+            # This will be handled by the subsequent checks as well.
+
         return_value['sl_price'] = round(sl_calculated, price_precision)
         return_value['tp_price'] = round(tp_calculated, price_precision)
-    except TypeError as te: # Handles if sl_calculated or tp_calculated are None (shouldn't happen if logic above is correct)
+
+    except TypeError as te: # Handles if sl_calculated or tp_calculated are None
          return_value['error'] = f"Error rounding SL/TP for {symbol}: {str(te)}. SL Calc: {sl_calculated}, TP Calc: {tp_calculated}, Precision: {price_precision}"
-         return_value['sl_price'] = None # Ensure they are None on error
+         return_value['sl_price'] = None 
          return_value['tp_price'] = None
          return return_value
 
+    # Final validation for SL/TP prices being positive after rounding
+    if return_value['sl_price'] is not None and return_value['sl_price'] <= 0:
+        return_value['error'] = f"Rounded SL price ({return_value['sl_price']}) is not positive for {symbol}."
+        return_value['sl_price'] = None
+        return_value['tp_price'] = None # Invalidate TP as well
+        return return_value
 
-    # Final validation for TP vs Entry
-    if side == 'up' and return_value['tp_price'] is not None and return_value['tp_price'] <= entry_price:
-        return_value['error'] = f"Calculated TP ({return_value['tp_price']}) for 'up' side is not above entry price ({entry_price})."
-        # Setting TP to None, but SL might still be valid or could also be invalidated.
-        # Depending on requirements, might invalidate both or try to recalculate TP with a minimum distance.
-        # For now, just flagging the error and nullifying TP.
-        return_value['tp_price'] = None 
-        # Decide if SL should also be None or if the signal should be entirely invalidated.
-        # The current plan implies strategies will handle this if SL/TP is None or error is present.
-
-    elif side == 'down' and return_value['tp_price'] is not None and return_value['tp_price'] >= entry_price:
-        return_value['error'] = f"Calculated TP ({return_value['tp_price']}) for 'down' side is not below entry price ({entry_price})."
+    if return_value['tp_price'] is not None and return_value['tp_price'] <= 0:
+        return_value['error'] = f"Rounded TP price ({return_value['tp_price']}) is not positive for {symbol}."
         return_value['tp_price'] = None
+        # SL might still be valid, but the strategy should check if tp_price is None.
+        # No need to return immediately here if SL is valid.
+
+    # Final validation for TP vs Entry (and SL vs Entry was done earlier implicitly)
+    if side == 'up':
+        if return_value['sl_price'] is not None and return_value['sl_price'] >= entry_price:
+             return_value['error'] = f"SL price ({return_value['sl_price']}) for 'up' side not below entry ({entry_price})."
+             return_value['sl_price'] = None; return_value['tp_price'] = None; return return_value
+        if return_value['tp_price'] is not None and return_value['tp_price'] <= entry_price:
+            return_value['error'] = f"TP price ({return_value['tp_price']}) for 'up' side not above entry ({entry_price})."
+            return_value['tp_price'] = None 
+            # SL might still be valid. Strategy should check.
+
+    elif side == 'down':
+        if return_value['sl_price'] is not None and return_value['sl_price'] <= entry_price:
+            return_value['error'] = f"SL price ({return_value['sl_price']}) for 'down' side not above entry ({entry_price})."
+            return_value['sl_price'] = None; return_value['tp_price'] = None; return return_value
+        if return_value['tp_price'] is not None and return_value['tp_price'] >= entry_price:
+            return_value['error'] = f"TP price ({return_value['tp_price']}) for 'down' side not below entry ({entry_price})."
+            return_value['tp_price'] = None
+            # SL might still be valid. Strategy should check.
 
     return return_value
 
@@ -313,6 +359,7 @@ class BacktestStrategyWrapper(Strategy):
         # --- SL/TP Price Calculation Block (Common for all strategies) ---
         sl_final_price = None
         tp_final_price = None
+        sl_long, tp_long, sl_short, tp_short = None, None, None, None # Initialize here
         entry_price_for_calc = price # Current price for SL/TP calculation
         
         # For PnL calculation, estimate asset quantity based on equity fraction
@@ -325,27 +372,41 @@ class BacktestStrategyWrapper(Strategy):
         asset_qty_for_pnl_calc = (self.equity * trade_size_fraction_bt) / entry_price_for_calc if entry_price_for_calc > 0 else 0
 
         if self.sl_tp_mode_bt == "Percentage":
-            if self.user_sl > 0 and self.user_tp > 0: # user_sl/tp are percentages like 0.02 for 2%
+            # Validate user_sl and user_tp to be between 0 (exclusive) and 1 (exclusive for SL, less critical for TP but good practice)
+            if 0 < self.user_sl < 1 and 0 < self.user_tp: 
                 # For a potential long trade
-                sl_long = round(entry_price_for_calc * (1 - self.user_sl), self.PRICE_PRECISION_BT)
-                tp_long = round(entry_price_for_calc * (1 + self.user_tp), self.PRICE_PRECISION_BT)
+                _sl_long_raw = entry_price_for_calc * (1 - self.user_sl)
+                _tp_long_raw = entry_price_for_calc * (1 + self.user_tp)
                 # For a potential short trade
-                sl_short = round(entry_price_for_calc * (1 + self.user_sl), self.PRICE_PRECISION_BT)
-                tp_short = round(entry_price_for_calc * (1 - self.user_tp), self.PRICE_PRECISION_BT)
-                # The actual sl/tp will be chosen based on trade direction determined by strategy
-                # print(f"DEBUG BT Percentage: Potential Long SL/TP: {sl_long}/{tp_long}, Short SL/TP: {sl_short}/{tp_short}") # DEBUG
+                _sl_short_raw = entry_price_for_calc * (1 + self.user_sl)
+                _tp_short_raw = entry_price_for_calc * (1 - self.user_tp)
+
+                # Ensure SL/TP are positive before rounding
+                if _sl_long_raw > 0: sl_long = round(_sl_long_raw, self.PRICE_PRECISION_BT)
+                if _tp_long_raw > 0: tp_long = round(_tp_long_raw, self.PRICE_PRECISION_BT)
+                if _sl_short_raw > 0: sl_short = round(_sl_short_raw, self.PRICE_PRECISION_BT)
+                if _tp_short_raw > 0: tp_short = round(_tp_short_raw, self.PRICE_PRECISION_BT)
+            else:
+                print(f"DEBUG BT Percentage: Invalid user_sl ({self.user_sl}) or user_tp ({self.user_tp}). Must be > 0 (and SL < 1).")
+                # sl_long, tp_long, etc., remain None
+
         elif self.sl_tp_mode_bt == "Fixed PnL":
             if self.sl_pnl_amount_bt > 0 and self.tp_pnl_amount_bt > 0 and asset_qty_for_pnl_calc > 0:
                 # For a potential long trade
-                sl_long = round(entry_price_for_calc - (self.sl_pnl_amount_bt / asset_qty_for_pnl_calc), self.PRICE_PRECISION_BT)
-                tp_long = round(entry_price_for_calc + (self.tp_pnl_amount_bt / asset_qty_for_pnl_calc), self.PRICE_PRECISION_BT)
+                _sl_long_raw = entry_price_for_calc - (self.sl_pnl_amount_bt / asset_qty_for_pnl_calc)
+                _tp_long_raw = entry_price_for_calc + (self.tp_pnl_amount_bt / asset_qty_for_pnl_calc)
                 # For a potential short trade
-                sl_short = round(entry_price_for_calc + (self.sl_pnl_amount_bt / asset_qty_for_pnl_calc), self.PRICE_PRECISION_BT)
-                tp_short = round(entry_price_for_calc - (self.tp_pnl_amount_bt / asset_qty_for_pnl_calc), self.PRICE_PRECISION_BT)
-                # print(f"DEBUG BT Fixed PnL: Potential Long SL/TP: {sl_long}/{tp_long}, Short SL/TP: {sl_short}/{tp_short} (Qty: {asset_qty_for_pnl_calc})") # DEBUG
+                _sl_short_raw = entry_price_for_calc + (self.sl_pnl_amount_bt / asset_qty_for_pnl_calc)
+                _tp_short_raw = entry_price_for_calc - (self.tp_pnl_amount_bt / asset_qty_for_pnl_calc)
+
+                if _sl_long_raw > 0: sl_long = round(_sl_long_raw, self.PRICE_PRECISION_BT)
+                if _tp_long_raw > 0: tp_long = round(_tp_long_raw, self.PRICE_PRECISION_BT)
+                if _sl_short_raw > 0: sl_short = round(_sl_short_raw, self.PRICE_PRECISION_BT)
+                if _tp_short_raw > 0: tp_short = round(_tp_short_raw, self.PRICE_PRECISION_BT)
             else:
-                # print(f"DEBUG BT Fixed PnL: Cannot calculate. Amounts positive? ({self.sl_pnl_amount_bt > 0}, {self.tp_pnl_amount_bt > 0}), AssetQty positive? ({asset_qty_for_pnl_calc > 0})") # DEBUG
-                pass # sl_final_price, tp_final_price remain None
+                print(f"DEBUG BT Fixed PnL: Cannot calculate. Amounts positive? ({self.sl_pnl_amount_bt > 0}, {self.tp_pnl_amount_bt > 0}), AssetQty positive? ({asset_qty_for_pnl_calc > 0})")
+                # sl_long, tp_long, etc., remain None
+        
         # If ATR/Dynamic, sl_final_price and tp_final_price remain None; strategy logic will calculate them.
         # --- End of Common SL/TP Price Calculation Block ---
 
@@ -399,11 +460,15 @@ class BacktestStrategyWrapper(Strategy):
                 elif self.sl_tp_mode_bt == "Percentage":
                     sl_price = sl_long if trade_side_s0 == 'buy' else sl_short
                     tp_price = tp_long if trade_side_s0 == 'buy' else tp_short
-                    if sl_price is None or tp_price is None: return # Could not calculate
+                    if sl_price is None or tp_price is None or sl_price <=0 or tp_price <=0: return # Could not calculate or invalid
+                    if trade_side_s0 == 'buy' and (sl_price >= entry_price_s0 or tp_price <= entry_price_s0): return # Validate logic
+                    if trade_side_s0 == 'sell' and (sl_price <= entry_price_s0 or tp_price >= entry_price_s0): return # Validate logic
                 elif self.sl_tp_mode_bt == "Fixed PnL":
                     sl_price = sl_long if trade_side_s0 == 'buy' else sl_short
                     tp_price = tp_long if trade_side_s0 == 'buy' else tp_short
-                    if sl_price is None or tp_price is None: return # Could not calculate
+                    if sl_price is None or tp_price is None or sl_price <=0 or tp_price <=0: return # Could not calculate or invalid
+                    if trade_side_s0 == 'buy' and (sl_price >= entry_price_s0 or tp_price <= entry_price_s0): return # Validate logic
+                    if trade_side_s0 == 'sell' and (sl_price <= entry_price_s0 or tp_price >= entry_price_s0): return # Validate logic
                 else: return # Unknown mode
 
                 if trade_side_s0 == 'buy': self.buy(sl=sl_price, tp=tp_price, size=trade_size_to_use_in_order)
@@ -448,11 +513,17 @@ class BacktestStrategyWrapper(Strategy):
                 elif self.sl_tp_mode_bt == "Percentage":
                     sl_to_use_s1 = sl_long if trade_side_s1 == 'buy' else sl_short
                     tp_to_use_s1 = tp_long if trade_side_s1 == 'buy' else tp_short
+                    if sl_to_use_s1 is None or tp_to_use_s1 is None or sl_to_use_s1 <= 0 or tp_to_use_s1 <= 0: return
+                    if trade_side_s1 == 'buy' and (sl_to_use_s1 >= entry_price_s1 or tp_to_use_s1 <= entry_price_s1): return
+                    if trade_side_s1 == 'sell' and (sl_to_use_s1 <= entry_price_s1 or tp_to_use_s1 >= entry_price_s1): return
                 elif self.sl_tp_mode_bt == "Fixed PnL":
                     sl_to_use_s1 = sl_long if trade_side_s1 == 'buy' else sl_short
                     tp_to_use_s1 = tp_long if trade_side_s1 == 'buy' else tp_short
+                    if sl_to_use_s1 is None or tp_to_use_s1 is None or sl_to_use_s1 <= 0 or tp_to_use_s1 <= 0: return
+                    if trade_side_s1 == 'buy' and (sl_to_use_s1 >= entry_price_s1 or tp_to_use_s1 <= entry_price_s1): return
+                    if trade_side_s1 == 'sell' and (sl_to_use_s1 <= entry_price_s1 or tp_to_use_s1 >= entry_price_s1): return
                 
-                if sl_to_use_s1 is None or tp_to_use_s1 is None: return
+                if sl_to_use_s1 is None or tp_to_use_s1 is None: return # This check is somewhat redundant now but harmless
 
                 if trade_side_s1 == 'buy': self.buy(sl=sl_to_use_s1, tp=tp_to_use_s1, size=trade_size_to_use_in_order)
                 else: self.sell(sl=sl_to_use_s1, tp=tp_to_use_s1, size=trade_size_to_use_in_order)
@@ -485,11 +556,17 @@ class BacktestStrategyWrapper(Strategy):
                 elif self.sl_tp_mode_bt == "Percentage":
                     sl_to_use_s5 = sl_long if trade_side_s5 == 'buy' else sl_short
                     tp_to_use_s5 = tp_long if trade_side_s5 == 'buy' else tp_short
+                    if sl_to_use_s5 is None or tp_to_use_s5 is None or sl_to_use_s5 <= 0 or tp_to_use_s5 <= 0: return
+                    if trade_side_s5 == 'buy' and (sl_to_use_s5 >= entry_price_s5 or tp_to_use_s5 <= entry_price_s5): return
+                    if trade_side_s5 == 'sell' and (sl_to_use_s5 <= entry_price_s5 or tp_to_use_s5 >= entry_price_s5): return
                 elif self.sl_tp_mode_bt == "Fixed PnL":
                     sl_to_use_s5 = sl_long if trade_side_s5 == 'buy' else sl_short
                     tp_to_use_s5 = tp_long if trade_side_s5 == 'buy' else tp_short
+                    if sl_to_use_s5 is None or tp_to_use_s5 is None or sl_to_use_s5 <= 0 or tp_to_use_s5 <= 0: return
+                    if trade_side_s5 == 'buy' and (sl_to_use_s5 >= entry_price_s5 or tp_to_use_s5 <= entry_price_s5): return
+                    if trade_side_s5 == 'sell' and (sl_to_use_s5 <= entry_price_s5 or tp_to_use_s5 >= entry_price_s5): return
 
-                if sl_to_use_s5 is None or tp_to_use_s5 is None: return
+                if sl_to_use_s5 is None or tp_to_use_s5 is None: return # Redundant but safe
                 
                 if trade_side_s5 == 'buy': self.buy(sl=sl_to_use_s5, tp=tp_to_use_s5, size=trade_size_to_use_in_order)
                 else: self.sell(sl=sl_to_use_s5, tp=tp_to_use_s5, size=trade_size_to_use_in_order)
@@ -510,9 +587,10 @@ class BacktestStrategyWrapper(Strategy):
 # Function to execute backtest
 def execute_backtest(strategy_id_for_backtest, symbol, timeframe, interval_days, 
                      ui_tp_percentage, ui_sl_percentage, # Percentage based
-                     sl_tp_mode, sl_pnl_amount_val, tp_pnl_amount_val # PnL and Mode based
+                     sl_tp_mode, sl_pnl_amount_val, tp_pnl_amount_val, # PnL and Mode based
+                     starting_capital # New parameter for starting capital
                      ):
-    print(f"Executing backtest for Strategy ID {strategy_id_for_backtest} on {symbol} ({timeframe}, {interval_days} days), Mode: {sl_tp_mode}")
+    print(f"Executing backtest for Strategy ID {strategy_id_for_backtest} on {symbol} ({timeframe}, {interval_days} days), Start Capital: ${starting_capital:.2f}, Mode: {sl_tp_mode}")
     if sl_tp_mode == "Percentage":
         print(f"  TP %: {ui_tp_percentage*100:.2f}%, SL %: {ui_sl_percentage*100:.2f}%")
     elif sl_tp_mode == "Fixed PnL":
@@ -566,7 +644,7 @@ def execute_backtest(strategy_id_for_backtest, symbol, timeframe, interval_days,
     
     print(f"DEBUG execute_backtest: Strategy RSI period: {getattr(BacktestStrategyWrapper, 'rsi_period', 'N/A')}") # Also log rsi_period
 
-    bt = Backtest(kl_df, BacktestStrategyWrapper, cash=10000, margin=1/10, commission=0.0007)
+    bt = Backtest(kl_df, BacktestStrategyWrapper, cash=starting_capital, margin=1/10, commission=0.0007)
     try:
         stats = bt.run()
         print("Backtest completed.")
@@ -690,6 +768,7 @@ conditions_text_widget = None # For displaying signal conditions
 backtest_sl_pnl_amount_var = None
 backtest_tp_pnl_amount_var = None
 backtest_sl_tp_mode_var = None
+backtest_starting_capital_var = None # New var for starting capital
 
 
 # --- Backtesting UI Command and Threading Logic ---
@@ -697,7 +776,7 @@ def run_backtest_command():
     global backtest_symbol_var, backtest_timeframe_var, backtest_interval_var
     global backtest_tp_var, backtest_sl_var, backtest_selected_strategy_var
     # Add new global vars for backtesting PnL and Mode
-    global backtest_sl_pnl_amount_var, backtest_tp_pnl_amount_var, backtest_sl_tp_mode_var
+    global backtest_sl_pnl_amount_var, backtest_tp_pnl_amount_var, backtest_sl_tp_mode_var, backtest_starting_capital_var
     global backtest_results_text_widget, STRATEGIES, root, status_var, backtest_run_button
 
     if backtest_run_button:
@@ -708,6 +787,7 @@ def run_backtest_command():
         timeframe = backtest_timeframe_var.get().strip()
         interval_str = backtest_interval_var.get().strip()
         selected_strategy_name = backtest_selected_strategy_var.get()
+        starting_capital_str = backtest_starting_capital_var.get().strip()
         
         # Get SL/TP mode for backtesting
         current_backtest_sl_tp_mode = backtest_sl_tp_mode_var.get()
@@ -717,6 +797,22 @@ def run_backtest_command():
         sl_percentage = 0.0
         sl_pnl = 0.0
         tp_pnl = 0.0
+        starting_capital = 10000 # Default starting capital
+
+        if not starting_capital_str:
+            messagebox.showerror("Input Error", "Starting Capital is required.")
+            if backtest_run_button: backtest_run_button.config(state=tk.NORMAL)
+            return
+        try:
+            starting_capital = float(starting_capital_str)
+            if starting_capital <= 0:
+                messagebox.showerror("Input Error", "Starting Capital must be a positive value.")
+                if backtest_run_button: backtest_run_button.config(state=tk.NORMAL)
+                return
+        except ValueError:
+            messagebox.showerror("Input Error", "Invalid number format for Starting Capital.")
+            if backtest_run_button: backtest_run_button.config(state=tk.NORMAL)
+            return
 
         if current_backtest_sl_tp_mode == "Percentage":
             tp_str = backtest_tp_var.get().strip() # TP %
@@ -788,12 +884,13 @@ def run_backtest_command():
         thread = threading.Thread(target=perform_backtest_in_thread, 
                                   args=(strategy_id_for_backtest, symbol, timeframe, interval_days, 
                                         tp_percentage, sl_percentage, # Pass Percentage values
-                                        current_backtest_sl_tp_mode, sl_pnl, tp_pnl), # Pass Mode and PnL values
+                                        current_backtest_sl_tp_mode, sl_pnl, tp_pnl, # Pass Mode and PnL values
+                                        starting_capital), # Pass starting_capital
                                   daemon=True)
         thread.start()
 
     except ValueError: # Catches float/int conversion errors
-        messagebox.showerror("Input Error", "Invalid number format for Interval, TP/SL %, or PnL Amounts.")
+        messagebox.showerror("Input Error", "Invalid number format for Interval, TP/SL %, PnL Amounts, or Starting Capital.")
         if backtest_run_button: backtest_run_button.config(state=tk.NORMAL) 
     except Exception as e:
         messagebox.showerror("Error", f"An unexpected error occurred in run_backtest_command: {e}")
@@ -805,10 +902,11 @@ def run_backtest_command():
 
 def perform_backtest_in_thread(strategy_id, symbol, timeframe, interval_days, 
                                tp_percentage_val, sl_percentage_val, # Explicitly named percentage params
-                               passed_sl_tp_mode, sl_pnl_val, tp_pnl_val): # Explicitly named mode and PnL params
+                               passed_sl_tp_mode, sl_pnl_val, tp_pnl_val, # Explicitly named mode and PnL params
+                               starting_capital_val): # New parameter for starting capital
     global backtest_results_text_widget, root, status_var, backtest_run_button
     
-    print(f"DEBUG perform_backtest_in_thread: Strategy ID: {strategy_id}, Symbol: {symbol}, Timeframe: {timeframe}, Interval: {interval_days} days")
+    print(f"DEBUG perform_backtest_in_thread: Strategy ID: {strategy_id}, Symbol: {symbol}, Timeframe: {timeframe}, Interval: {interval_days} days, Start Capital: ${starting_capital_val:.2f}")
     print(f"DEBUG perform_backtest_in_thread: SL/TP Mode: {passed_sl_tp_mode}")
     if passed_sl_tp_mode == "Percentage":
         print(f"DEBUG perform_backtest_in_thread: TP %: {tp_percentage_val*100:.2f}%, SL %: {sl_percentage_val*100:.2f}%")
@@ -821,7 +919,8 @@ def perform_backtest_in_thread(strategy_id, symbol, timeframe, interval_days,
     stats_output, bt_object, plot_error_message = execute_backtest(
         strategy_id, symbol, timeframe, interval_days, 
         tp_percentage_val, sl_percentage_val, # Pass the correctly named percentage values
-        passed_sl_tp_mode, sl_pnl_val, tp_pnl_val # Pass the mode and PnL values
+        passed_sl_tp_mode, sl_pnl_val, tp_pnl_val, # Pass the mode and PnL values
+        starting_capital_val # Pass starting_capital_val
     )
     # ... (rest of the function remains largely the same) ...
     print(f"DEBUG perform_backtest_in_thread: execute_backtest returned stats_output type: {type(stats_output)}")
@@ -3860,6 +3959,7 @@ if __name__ == "__main__":
     backtest_sl_pnl_amount_var = tk.StringVar(value="10") # Default $10 SL PnL
     backtest_tp_pnl_amount_var = tk.StringVar(value="20") # Default $20 TP PnL
     backtest_sl_tp_mode_var = tk.StringVar(value="ATR/Dynamic") # Default mode
+    backtest_starting_capital_var = tk.StringVar(value="10000") # Default starting capital
 
     backtest_selected_strategy_var = tk.StringVar()
 
@@ -4061,12 +4161,17 @@ if __name__ == "__main__":
     ttk.Label(backtest_params_grid, text="TP PnL Amt ($):").grid(row=3, column=2, padx=2, pady=2, sticky='w')
     backtest_tp_pnl_amount_entry = ttk.Entry(backtest_params_grid, textvariable=backtest_tp_pnl_amount_var, width=7)
     backtest_tp_pnl_amount_entry.grid(row=3, column=3, padx=2, pady=2, sticky='w')
+
+    # Row 4: Starting Capital
+    ttk.Label(backtest_params_grid, text="Start Capital ($):").grid(row=4, column=0, padx=2, pady=2, sticky='w')
+    backtest_starting_capital_entry = ttk.Entry(backtest_params_grid, textvariable=backtest_starting_capital_var, width=12)
+    backtest_starting_capital_entry.grid(row=4, column=1, padx=2, pady=2, sticky='w')
     
-    # Row 4: Backtest Strategy
-    ttk.Label(backtest_params_grid, text="Backtest Strategy:").grid(row=4, column=0, padx=2, pady=2, sticky='w')
+    # Row 5: Backtest Strategy
+    ttk.Label(backtest_params_grid, text="Backtest Strategy:").grid(row=5, column=0, padx=2, pady=2, sticky='w')
     backtest_strategy_combobox = ttk.Combobox(backtest_params_grid, textvariable=backtest_selected_strategy_var, values=list(STRATEGIES.values()), width=25, state="readonly")
     if STRATEGIES: backtest_strategy_combobox.current(ACTIVE_STRATEGY_ID if ACTIVE_STRATEGY_ID in STRATEGIES else 0) # Default to current active or first
-    backtest_strategy_combobox.grid(row=4, column=1, columnspan=3, padx=2, pady=2, sticky='w')
+    backtest_strategy_combobox.grid(row=5, column=1, columnspan=3, padx=2, pady=2, sticky='w')
     
     # backtest_run_button is defined after its parent backtesting_frame is fully configured.
     # It's not a child of backtest_params_grid, so its definition remains separate but after backtesting_frame.
