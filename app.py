@@ -267,8 +267,14 @@ class BacktestStrategyWrapper(Strategy):
     SL_ATR_MULTI = DEFAULT_ATR_MULTIPLIER # Multiplier for ATR to determine SL distance
     PRICE_PRECISION_BT = 4 # Default rounding precision for backtesting
 
+    # Attributes for new SL/TP modes, to be set by execute_backtest
+    sl_tp_mode = "ATR/Dynamic"  # Default mode
+    sl_pnl_amount = 0.0         # For Fixed PnL mode
+    tp_pnl_amount = 0.0         # For Fixed PnL mode
+
+
     def init(self):
-        print(f"DEBUG BacktestStrategyWrapper.init: Initializing for strategy ID {self.current_strategy_id}")
+        print(f"DEBUG BacktestStrategyWrapper.init: Initializing for strategy ID {self.current_strategy_id}, SL/TP Mode: {getattr(self, 'sl_tp_mode', 'N/A')}")
         if self.current_strategy_id == 5:
             # price = self.data.Close # This line can be removed or commented out
             self.rsi_period_val = getattr(self, 'rsi_period', 14) # Use rsi_period from class if available
@@ -386,7 +392,9 @@ class BacktestStrategyWrapper(Strategy):
                         print(f"DEBUG S0: Invalid TP for BUY. TP: {tp_price}, Entry: {entry_price}. Symbol {trade_symbol}. Skipping trade.")
                         return
                     print(f"DEBUG S0: BUY Signal - Entry: {entry_price}, ATR: {current_atr_s0:.{self.PRICE_PRECISION_BT}f}, SL: {sl_price}, TP: {tp_price}. Conditions met: {num_buy_conditions_true}")
-                    self.buy(sl=sl_price, tp=tp_price, size=0.02)
+                    # Use fixed size for backtesting consistency for now
+                    trade_size_asset = 0.02 
+                    self.buy(sl=sl_price, tp=tp_price, size=trade_size_asset)
 
                 elif trade_side == 'sell':
                     sl_distance = current_atr_s0 * self.SL_ATR_MULTI
@@ -402,9 +410,63 @@ class BacktestStrategyWrapper(Strategy):
                         print(f"DEBUG S0: Invalid TP for SELL. TP: {tp_price}, Entry: {entry_price}. Symbol {trade_symbol}. Skipping trade.")
                         return
                     print(f"DEBUG S0: SELL Signal - Entry: {entry_price}, ATR: {current_atr_s0:.{self.PRICE_PRECISION_BT}f}, SL: {sl_price}, TP: {tp_price}. Conditions met: {num_sell_conditions_true}")
-                    self.sell(sl=sl_price, tp=tp_price, size=0.02)
+                    trade_size_asset = 0.02 # Use fixed size for backtesting consistency
+                    self.sell(sl=sl_price, tp=tp_price, size=trade_size_asset)
 
-        elif self.current_strategy_id == 1:
+        elif self.current_strategy_id == 1: # EMA Cross + SuperTrend (ATR/Dynamic SL/TP)
+            # This strategy, like S0, currently uses ATR-based SL/TP.
+            # The new modes ('Percentage', 'Fixed PnL') will be handled by a general block
+            # before this strategy-specific logic if those modes are active.
+            # If mode is 'ATR/Dynamic', this existing logic will run.
+            
+            # General SL/TP calculation based on self.sl_tp_mode
+            # This block will determine sl_final and tp_final to be used by any strategy logic below
+            sl_final = None
+            tp_final = None
+            entry_price_for_mode_calc = price # price is self.data.Close[-1]
+            
+            # Determine asset quantity for PnL calculation if size is fractional equity
+            # Assume self.buy(size=0.02) means 0.02 of equity.
+            # This trade_size_asset_for_calc is only for calculating PnL-based SL/TP prices.
+            # The actual size passed to self.buy/sell will still be the original fractional value (e.g., 0.02).
+            trade_size_fraction = 0.02 # This is the 'size' param typically used in self.buy/sell
+            asset_qty_for_pnl_calc = (self.equity * trade_size_fraction) / entry_price_for_mode_calc if entry_price_for_mode_calc > 0 else 0
+
+            if self.sl_tp_mode == "Percentage":
+                if self.user_sl > 0 and self.user_tp > 0: # Ensure valid percentages
+                    # Determine side for SL/TP calculation (potential trade, not necessarily current position)
+                    # This part needs to be decided by the strategy's signal (buy or sell)
+                    # For now, let's assume strategy logic below will determine 'trade_side'
+                    # and then we can use it. Or, calculate for both and strategy picks.
+                    # Simplified: assume calculating for a long if no position, or current position if exists.
+                    is_potential_long = not self.position or self.position.is_long
+
+                    if is_potential_long: 
+                        sl_final = round(entry_price_for_mode_calc * (1 - self.user_sl), self.PRICE_PRECISION_BT)
+                        tp_final = round(entry_price_for_mode_calc * (1 + self.user_tp), self.PRICE_PRECISION_BT)
+                    else: # Potential short
+                        sl_final = round(entry_price_for_mode_calc * (1 + self.user_sl), self.PRICE_PRECISION_BT)
+                        tp_final = round(entry_price_for_mode_calc * (1 - self.user_tp), self.PRICE_PRECISION_BT)
+                    print(f"DEBUG Backtest S1/General: Using Percentage SL/TP. SL: {sl_final}, TP: {tp_final}")
+
+            elif self.sl_tp_mode == "Fixed PnL":
+                if self.sl_pnl_amount > 0 and self.tp_pnl_amount > 0 and asset_qty_for_pnl_calc > 0:
+                    is_potential_long = not self.position or self.position.is_long
+                    if is_potential_long: # Potential long
+                        sl_final = round(entry_price_for_mode_calc - (self.sl_pnl_amount / asset_qty_for_pnl_calc), self.PRICE_PRECISION_BT)
+                        tp_final = round(entry_price_for_mode_calc + (self.tp_pnl_amount / asset_qty_for_pnl_calc), self.PRICE_PRECISION_BT)
+                    else: # Potential short
+                        sl_final = round(entry_price_for_mode_calc + (self.sl_pnl_amount / asset_qty_for_pnl_calc), self.PRICE_PRECISION_BT)
+                        tp_final = round(entry_price_for_mode_calc - (self.tp_pnl_amount / asset_qty_for_pnl_calc), self.PRICE_PRECISION_BT)
+                    print(f"DEBUG Backtest S1/General: Using Fixed PnL SL/TP. SL: {sl_final}, TP: {tp_final} (AssetQtyForPnL: {asset_qty_for_pnl_calc:.6f})")
+                else:
+                    print(f"DEBUG Backtest S1/General: Cannot calculate Fixed PnL SL/TP. PnL amounts positive? ({self.sl_pnl_amount > 0}, {self.tp_pnl_amount > 0}), AssetQty positive? ({asset_qty_for_pnl_calc > 0})")
+            
+            # If ATR/Dynamic, sl_final and tp_final remain None here; strategy logic below will calculate them.
+            # The trade_size_asset used in strategy logic (e.g. S1, S5) should be the fractional size (0.02)
+            trade_size_asset = trade_size_fraction 
+
+
             # Strategy S1: EMA Cross + SuperTrend
             if self.position: # Only trade if no position is open
                 return
@@ -449,112 +511,146 @@ class BacktestStrategyWrapper(Strategy):
                 trade_side = 'sell'
 
             if trade_side:
-                current_atr_s1 = self.atr[-1] 
+                # Use sl_final, tp_final if mode is Percentage or Fixed PnL
+                # Otherwise, calculate ATR-based SL/TP if mode is ATR/Dynamic
+                sl_to_use = sl_final
+                tp_to_use = tp_final
+                entry_price = price # Current price
 
-                if pd.isna(current_atr_s1) or current_atr_s1 == 0:
-                    print(f"DEBUG S1: Invalid ATR ({current_atr_s1}) for dynamic SL/TP. Symbol {trade_symbol}. Skipping trade.")
-                    return
-
-                sl_price_calc = None # Renamed to avoid confusion with sl_price from outer scope
-                tp_price_calc = None # Renamed to avoid confusion with tp_price from outer scope
-                entry_price = price 
-
-                if trade_side == 'buy':
-                    sl_distance = current_atr_s1 * self.SL_ATR_MULTI
-                    calculated_sl = entry_price - sl_distance
-                    if calculated_sl >= entry_price:
-                        print(f"DEBUG S1: Invalid SL for BUY. SL: {calculated_sl}, Entry: {entry_price}. Symbol {trade_symbol}. Skipping trade.")
-                        return
-                    risk_per_unit = entry_price - calculated_sl
-                    calculated_tp = entry_price + (risk_per_unit * self.RR)
-                    sl_price_calc = round(calculated_sl, self.PRICE_PRECISION_BT)
-                    tp_price_calc = round(calculated_tp, self.PRICE_PRECISION_BT)
-                    if tp_price_calc <= entry_price:
-                        print(f"DEBUG S1: Invalid TP for BUY. TP: {tp_price_calc}, Entry: {entry_price}. Symbol {trade_symbol}. Skipping trade.")
+                if self.sl_tp_mode == "ATR/Dynamic":
+                    current_atr_s1 = self.atr[-1] 
+                    if pd.isna(current_atr_s1) or current_atr_s1 == 0:
+                        print(f"DEBUG S1 (ATR): Invalid ATR ({current_atr_s1}). Symbol {trade_symbol}. Skipping trade.")
                         return
                     
-                    print(f"DEBUG S1: BUY Signal - Entry: {entry_price}, ATR: {current_atr_s1:.{self.PRICE_PRECISION_BT}f}, SL: {sl_price_calc}, TP: {tp_price_calc}. Conditions met: {num_buy_conditions_met_s1}/3")
-                    self.buy(sl=sl_price_calc, tp=tp_price_calc, size=0.02) 
-
-                elif trade_side == 'sell':
-                    sl_distance = current_atr_s1 * self.SL_ATR_MULTI
-                    calculated_sl = entry_price + sl_distance
-                    if calculated_sl <= entry_price:
-                        print(f"DEBUG S1: Invalid SL for SELL. SL: {calculated_sl}, Entry: {entry_price}. Symbol {trade_symbol}. Skipping trade.")
-                        return
-                    risk_per_unit = calculated_sl - entry_price
-                    calculated_tp = entry_price - (risk_per_unit * self.RR)
-                    sl_price_calc = round(calculated_sl, self.PRICE_PRECISION_BT)
-                    tp_price_calc = round(calculated_tp, self.PRICE_PRECISION_BT)
-                    if tp_price_calc >= entry_price:
-                        print(f"DEBUG S1: Invalid TP for SELL. TP: {tp_price_calc}, Entry: {entry_price}. Symbol {trade_symbol}. Skipping trade.")
-                        return
-
-                    print(f"DEBUG S1: SELL Signal - Entry: {entry_price}, ATR: {current_atr_s1:.{self.PRICE_PRECISION_BT}f}, SL: {sl_price_calc}, TP: {tp_price_calc}. Conditions met: {num_sell_conditions_met_s1}/3")
-                    self.sell(sl=sl_price_calc, tp=tp_price_calc, size=0.02)
-
-        elif self.current_strategy_id == 5: # Logic for Strategy 5 (existing simplified RSI with ATR SL/TP)
-            current_atr = self.atr[-1] # Ensure current_atr is defined for this block
-            if not self.position:
-                if pd.isna(current_atr) or current_atr == 0:
-                    print(f"DEBUG BacktestStrategyWrapper.next: Symbol {trade_symbol} - Invalid ATR ({current_atr}) for dynamic SL/TP (S5). Skipping trade.")
-                    return
-
-                sl_price_calculated = None
-                tp_price_calculated = None
+                    if trade_side == 'buy':
+                        sl_distance = current_atr_s1 * self.SL_ATR_MULTI
+                        calculated_sl_atr = entry_price - sl_distance
+                        if calculated_sl_atr >= entry_price: print(f"DEBUG S1 (ATR): Invalid SL for BUY. SL:{calculated_sl_atr}, Entry:{entry_price}. Skip."); return
+                        risk_per_unit_atr = entry_price - calculated_sl_atr
+                        calculated_tp_atr = entry_price + (risk_per_unit_atr * self.RR)
+                        sl_to_use = round(calculated_sl_atr, self.PRICE_PRECISION_BT)
+                        tp_to_use = round(calculated_tp_atr, self.PRICE_PRECISION_BT)
+                        if tp_to_use <= entry_price: print(f"DEBUG S1 (ATR): Invalid TP for BUY. TP:{tp_to_use}, Entry:{entry_price}. Skip."); return
+                    elif trade_side == 'sell':
+                        sl_distance = current_atr_s1 * self.SL_ATR_MULTI
+                        calculated_sl_atr = entry_price + sl_distance
+                        if calculated_sl_atr <= entry_price: print(f"DEBUG S1 (ATR): Invalid SL for SELL. SL:{calculated_sl_atr}, Entry:{entry_price}. Skip."); return
+                        risk_per_unit_atr = calculated_sl_atr - entry_price
+                        calculated_tp_atr = entry_price - (risk_per_unit_atr * self.RR)
+                        sl_to_use = round(calculated_sl_atr, self.PRICE_PRECISION_BT)
+                        tp_to_use = round(calculated_tp_atr, self.PRICE_PRECISION_BT)
+                        if tp_to_use >= entry_price: print(f"DEBUG S1 (ATR): Invalid TP for SELL. TP:{tp_to_use}, Entry:{entry_price}. Skip."); return
+                    print(f"DEBUG S1 (ATR): {trade_side.upper()} Signal - Entry:{entry_price}, ATR:{current_atr_s1:.{self.PRICE_PRECISION_BT}f}, SL:{sl_to_use}, TP:{tp_to_use}")
                 
-                take_long = self.rsi[-1] < 30
-                take_short = self.rsi[-1] > 70
+                if sl_to_use is None or tp_to_use is None:
+                    print(f"DEBUG S1: SL/TP not determined for mode {self.sl_tp_mode}. Skipping trade.")
+                    return
 
-                if take_long:
-                    sl_distance = current_atr * self.SL_ATR_MULTI
-                    calculated_sl = price - sl_distance
-                    if calculated_sl >= price:
-                        print(f"DEBUG BacktestStrategyWrapper.next: Symbol {trade_symbol} - Calculated SL ({calculated_sl}) for BUY is not below entry price ({price}). Skipping trade.")
-                        return
-                    risk_per_unit = price - calculated_sl
-                    calculated_tp = price + (risk_per_unit * self.RR)
-                    
-                    sl_price_calculated = round(calculated_sl, self.PRICE_PRECISION_BT)
-                    tp_price_calculated = round(calculated_tp, self.PRICE_PRECISION_BT)
+                # Final validation of sl_to_use and tp_to_use against entry_price
+                if trade_side == 'buy':
+                    if sl_to_use >= entry_price: print(f"DEBUG S1 Final Val: SL {sl_to_use} not < entry {entry_price} for BUY. Skip."); return
+                    if tp_to_use <= entry_price: print(f"DEBUG S1 Final Val: TP {tp_to_use} not > entry {entry_price} for BUY. Skip."); return
+                    print(f"DEBUG S1: Final BUY Signal ({self.sl_tp_mode} mode) - Entry: {entry_price}, SL: {sl_to_use}, TP: {tp_to_use}. Conditions met: {num_buy_conditions_met_s1}/3")
+                    self.buy(sl=sl_to_use, tp=tp_to_use, size=trade_size_asset) 
+                elif trade_side == 'sell':
+                    if sl_to_use <= entry_price: print(f"DEBUG S1 Final Val: SL {sl_to_use} not > entry {entry_price} for SELL. Skip."); return
+                    if tp_to_use >= entry_price: print(f"DEBUG S1 Final Val: TP {tp_to_use} not < entry {entry_price} for SELL. Skip."); return
+                    print(f"DEBUG S1: Final SELL Signal ({self.sl_tp_mode} mode) - Entry: {entry_price}, SL: {sl_to_use}, TP: {tp_to_use}. Conditions met: {num_sell_conditions_met_s1}/3")
+                    self.sell(sl=sl_to_use, tp=tp_to_use, size=trade_size_asset)
 
-                    if tp_price_calculated <= price:
-                        print(f"DEBUG BacktestStrategyWrapper.next: Symbol {trade_symbol} - Calculated TP ({tp_price_calculated}) for BUY is not above entry price ({price}). Skipping trade.")
-                        return
-                    
-                    print(f"DEBUG BacktestStrategyWrapper.next: BUY Signal for {trade_symbol} - Entry: {price}, ATR: {current_atr:.{self.PRICE_PRECISION_BT}f}, SL: {sl_price_calculated}, TP: {tp_price_calculated}")
-                    self.buy(size=0.02, sl=sl_price_calculated, tp=tp_price_calculated)
-
-                elif take_short:
-                    sl_distance = current_atr * self.SL_ATR_MULTI
-                    calculated_sl = price + sl_distance
-                    if calculated_sl <= price:
-                        print(f"DEBUG BacktestStrategyWrapper.next: Symbol {trade_symbol} - Calculated SL ({calculated_sl}) for SELL is not above entry price ({price}). Skipping trade.")
-                        return
-                    risk_per_unit = calculated_sl - price
-                    calculated_tp = price - (risk_per_unit * self.RR)
-
-                    sl_price_calculated = round(calculated_sl, self.PRICE_PRECISION_BT)
-                    tp_price_calculated = round(calculated_tp, self.PRICE_PRECISION_BT)
-
-                    if tp_price_calculated >= price:
-                        print(f"DEBUG BacktestStrategyWrapper.next: Symbol {trade_symbol} - Calculated TP ({tp_price_calculated}) for SELL is not below entry price ({price}). Skipping trade.")
-                        return
-
-                    print(f"DEBUG BacktestStrategyWrapper.next: SELL Signal for {trade_symbol} - Entry: {price}, ATR: {current_atr:.{self.PRICE_PRECISION_BT}f}, SL: {sl_price_calculated}, TP: {tp_price_calculated}")
-                    self.sell(size=0.02, sl=sl_price_calculated, tp=tp_price_calculated)
+        elif self.current_strategy_id == 5: # Logic for Strategy 5 (New RSI-Based Strategy)
+            # This strategy will also use the sl_final, tp_final from the mode calculation block
+            # or calculate its own ATR SL/TP if mode is ATR/Dynamic.
             
-            if self.current_strategy_id != 5: # If it was the else block
-                 print(f"DEBUG BacktestStrategyWrapper.next: Strategy ID {self.current_strategy_id} - Executed default RSI logic with ATR SL/TP.")
+            sl_to_use_s5 = sl_final # From general mode calculation block
+            tp_to_use_s5 = tp_final # From general mode calculation block
+            entry_price_s5 = price  # price is self.data.Close[-1]
 
-        # Fallback message if no logic path was taken (should not happen with current_strategy_id == 5 or True structure)
-        # else:
-        #     print(f"DEBUG BacktestStrategyWrapper.next: Strategy ID {self.current_strategy_id} - No explicit trading logic defined and not caught by fallback. No action taken.")
+            if not self.position:
+                if self.sl_tp_mode == "ATR/Dynamic":
+                    current_atr_s5 = self.atr[-1] 
+                    if pd.isna(current_atr_s5) or current_atr_s5 == 0:
+                        print(f"DEBUG S5 (ATR): Invalid ATR ({current_atr_s5}). Symbol {trade_symbol}. Skipping trade.")
+                        return
+                    # ATR calculation logic for S5 (similar to S0/S1 if they were ATR based)
+                    take_long_s5_atr = self.rsi[-1] < 30
+                    take_short_s5_atr = self.rsi[-1] > 70
+                    if take_long_s5_atr:
+                        sl_dist = current_atr_s5 * self.SL_ATR_MULTI
+                        calc_sl = entry_price_s5 - sl_dist
+                        if calc_sl >= entry_price_s5: print(f"DEBUG S5 (ATR) BUY: SL {calc_sl} not < entry. Skip."); return
+                        risk_pu = entry_price_s5 - calc_sl
+                        calc_tp = entry_price_s5 + (risk_pu * self.RR)
+                        sl_to_use_s5 = round(calc_sl, self.PRICE_PRECISION_BT)
+                        tp_to_use_s5 = round(calc_tp, self.PRICE_PRECISION_BT)
+                        if tp_to_use_s5 <= entry_price_s5: print(f"DEBUG S5 (ATR) BUY: TP {tp_to_use_s5} not > entry. Skip."); return
+                        print(f"DEBUG S5 (ATR) BUY: Entry:{entry_price_s5}, ATR:{current_atr_s5:.{self.PRICE_PRECISION_BT}f}, SL:{sl_to_use_s5}, TP:{tp_to_use_s5}")
+                        self.buy(size=trade_size_asset, sl=sl_to_use_s5, tp=tp_to_use_s5)
+                    elif take_short_s5_atr:
+                        sl_dist = current_atr_s5 * self.SL_ATR_MULTI
+                        calc_sl = entry_price_s5 + sl_dist
+                        if calc_sl <= entry_price_s5: print(f"DEBUG S5 (ATR) SELL: SL {calc_sl} not > entry. Skip."); return
+                        risk_pu = calc_sl - entry_price_s5
+                        calc_tp = entry_price_s5 - (risk_pu * self.RR)
+                        sl_to_use_s5 = round(calc_sl, self.PRICE_PRECISION_BT)
+                        tp_to_use_s5 = round(calc_tp, self.PRICE_PRECISION_BT)
+                        if tp_to_use_s5 >= entry_price_s5: print(f"DEBUG S5 (ATR) SELL: TP {tp_to_use_s5} not < entry. Skip."); return
+                        print(f"DEBUG S5 (ATR) SELL: Entry:{entry_price_s5}, ATR:{current_atr_s5:.{self.PRICE_PRECISION_BT}f}, SL:{sl_to_use_s5}, TP:{tp_to_use_s5}")
+                        self.sell(size=trade_size_asset, sl=sl_to_use_s5, tp=tp_to_use_s5)
+                
+                elif self.sl_tp_mode in ["Percentage", "Fixed PnL"]: # Use pre-calculated sl_final, tp_final
+                    if sl_to_use_s5 is None or tp_to_use_s5 is None:
+                        print(f"DEBUG S5 ({self.sl_tp_mode}): SL/TP not determined. Skipping trade.")
+                        return
+                    
+                    take_long_s5_mode = self.rsi[-1] < 30
+                    take_short_s5_mode = self.rsi[-1] > 70
+
+                    if take_long_s5_mode:
+                        if sl_to_use_s5 >= entry_price_s5: print(f"DEBUG S5 ({self.sl_tp_mode}) BUY: SL {sl_to_use_s5} not < entry. Skip."); return
+                        if tp_to_use_s5 <= entry_price_s5: print(f"DEBUG S5 ({self.sl_tp_mode}) BUY: TP {tp_to_use_s5} not > entry. Skip."); return
+                        print(f"DEBUG S5 ({self.sl_tp_mode}) BUY: Entry:{entry_price_s5}, SL:{sl_to_use_s5}, TP:{tp_to_use_s5}")
+                        self.buy(size=trade_size_asset, sl=sl_to_use_s5, tp=tp_to_use_s5)
+                    elif take_short_s5_mode:
+                        if sl_to_use_s5 <= entry_price_s5: print(f"DEBUG S5 ({self.sl_tp_mode}) SELL: SL {sl_to_use_s5} not > entry. Skip."); return
+                        if tp_to_use_s5 >= entry_price_s5: print(f"DEBUG S5 ({self.sl_tp_mode}) SELL: TP {tp_to_use_s5} not < entry. Skip."); return
+                        print(f"DEBUG S5 ({self.sl_tp_mode}) SELL: Entry:{entry_price_s5}, SL:{sl_to_use_s5}, TP:{tp_to_use_s5}")
+                        self.sell(size=trade_size_asset, sl=sl_to_use_s5, tp=tp_to_use_s5)
+            
+            # This print was for a different context, removing it as S5 logic is self-contained above for trades.
+            # if self.current_strategy_id != 5: 
+            #      print(f"DEBUG BacktestStrategyWrapper.next: Strategy ID {self.current_strategy_id} - Executed default RSI logic with ATR SL/TP.")
+
+        # Fallback message if no logic path was taken
+        # else: # This else corresponds to `if self.current_strategy_id == 0:`
+        #    print(f"DEBUG BacktestStrategyWrapper.next: Strategy ID {self.current_strategy_id} (Not 0, 1, or 5) - No explicit trading logic. Mode: {self.sl_tp_mode}")
+        #    # Generic handling for other strategies if they exist and use Percentage or Fixed PnL
+        #    if not self.position and self.sl_tp_mode in ["Percentage", "Fixed PnL"]:
+        #        if sl_final is not None and tp_final is not None:
+        #            # Example: Simple RSI condition for any other strategy ID
+        #            if self.rsi[-1] < 30 : # Example buy condition
+        #                if sl_final < price and tp_final > price:
+        #                     print(f"DEBUG Default BUY for S{self.current_strategy_id} ({self.sl_tp_mode}): P:{price}, SL:{sl_final}, TP:{tp_final}")
+        #                     self.buy(size=trade_size_asset, sl=sl_final, tp=tp_final)
+        #            elif self.rsi[-1] > 70: # Example sell condition
+        #                if sl_final > price and tp_final < price:
+        #                     print(f"DEBUG Default SELL for S{self.current_strategy_id} ({self.sl_tp_mode}): P:{price}, SL:{sl_final}, TP:{tp_final}")
+        #                     self.sell(size=trade_size_asset, sl=sl_final, tp=tp_final)
 
 # Function to execute backtest
-def execute_backtest(strategy_id_for_backtest, symbol, timeframe, interval_days, ui_tp, ui_sl):
-    print(f"Executing backtest for Strategy ID {strategy_id_for_backtest} on {symbol} ({timeframe}, {interval_days} days)")
-    print(f"TP: {ui_tp*100}%, SL: {ui_sl*100}%")
+def execute_backtest(strategy_id_for_backtest, symbol, timeframe, interval_days, 
+                     ui_tp_percentage, ui_sl_percentage, # Percentage based
+                     sl_tp_mode, sl_pnl_amount_val, tp_pnl_amount_val # PnL and Mode based
+                     ):
+    print(f"Executing backtest for Strategy ID {strategy_id_for_backtest} on {symbol} ({timeframe}, {interval_days} days), Mode: {sl_tp_mode}")
+    if sl_tp_mode == "Percentage":
+        print(f"  TP %: {ui_tp_percentage*100:.2f}%, SL %: {ui_sl_percentage*100:.2f}%")
+    elif sl_tp_mode == "Fixed PnL":
+        print(f"  SL PnL: ${sl_pnl_amount_val:.2f}, TP PnL: ${tp_pnl_amount_val:.2f}")
+    elif sl_tp_mode == "ATR/Dynamic":
+        print(f"  Using ATR/Dynamic SL/TP defined in strategy.")
+
 
     kl_df, klines_error_msg = klines_extended(symbol, timeframe, interval_days)
 
@@ -571,13 +667,37 @@ def execute_backtest(strategy_id_for_backtest, symbol, timeframe, interval_days,
     
     # Update the class variables for TP/SL before instantiating Backtest
     print(f"DEBUG execute_backtest: Received ui_tp: {ui_tp*100:.2f}%, ui_sl: {ui_sl*100:.2f}%")
-    BacktestStrategyWrapper.user_tp = ui_tp
-    BacktestStrategyWrapper.user_sl = ui_sl
     BacktestStrategyWrapper.current_strategy_id = strategy_id_for_backtest
+    BacktestStrategyWrapper.sl_tp_mode = sl_tp_mode # New: Pass mode
+    
     print(f"DEBUG execute_backtest: Set BacktestStrategyWrapper.current_strategy_id to: {strategy_id_for_backtest}")
+    print(f"DEBUG execute_backtest: Set BacktestStrategyWrapper.sl_tp_mode to: {sl_tp_mode}")
 
-    print(f"DEBUG execute_backtest: Strategy params set - BacktestStrategyWrapper.user_tp: {BacktestStrategyWrapper.user_tp*100:.2f}%, BacktestStrategyWrapper.user_sl: {BacktestStrategyWrapper.user_sl*100:.2f}%")
-    print(f"DEBUG execute_backtest: Strategy RSI period: {BacktestStrategyWrapper.rsi_period}") # Also log rsi_period
+    if sl_tp_mode == "Percentage":
+        BacktestStrategyWrapper.user_tp = ui_tp_percentage # Ensure this is the percentage value (0.xx)
+        BacktestStrategyWrapper.user_sl = ui_sl_percentage # Ensure this is the percentage value (0.xx)
+        print(f"DEBUG execute_backtest: Using Percentage SL/TP - TP: {BacktestStrategyWrapper.user_tp*100:.2f}%, SL: {BacktestStrategyWrapper.user_sl*100:.2f}%")
+    elif sl_tp_mode == "Fixed PnL":
+        BacktestStrategyWrapper.sl_pnl_amount = sl_pnl_amount_val # New
+        BacktestStrategyWrapper.tp_pnl_amount = tp_pnl_amount_val # New
+        # user_tp and user_sl (percentages) are not used in this mode by BacktestStrategyWrapper
+        BacktestStrategyWrapper.user_tp = 0 # Or some indicator they are not used
+        BacktestStrategyWrapper.user_sl = 0
+        print(f"DEBUG execute_backtest: Using Fixed PnL SL/TP - SL PnL: ${BacktestStrategyWrapper.sl_pnl_amount:.2f}, TP PnL: ${BacktestStrategyWrapper.tp_pnl_amount:.2f}")
+    elif sl_tp_mode == "ATR/Dynamic":
+        # ATR/Dynamic mode relies on strategy's internal ATR calculations for SL/TP.
+        # RR and SL_ATR_MULTI are already class variables in BacktestStrategyWrapper.
+        # ui_tp_percentage and ui_sl_percentage are not directly used here.
+        # They could potentially be used to set RR or SL_ATR_MULTI if the UI is designed for that.
+        # For now, assume BacktestStrategyWrapper.RR and BacktestStrategyWrapper.SL_ATR_MULTI are used.
+        BacktestStrategyWrapper.user_tp = 0 # Indicate not used
+        BacktestStrategyWrapper.user_sl = 0
+        print(f"DEBUG execute_backtest: Using ATR/Dynamic SL/TP. RR: {BacktestStrategyWrapper.RR}, SL_ATR_MULTI: {BacktestStrategyWrapper.SL_ATR_MULTI}")
+    
+    # print(f"DEBUG execute_backtest: Strategy params set - BacktestStrategyWrapper.user_tp: {BacktestStrategyWrapper.user_tp*100:.2f}%, BacktestStrategyWrapper.user_sl: {BacktestStrategyWrapper.user_sl*100:.2f}%")
+    # The above print might be misleading if PnL mode is active, so commented out / adjust.
+    print(f"DEBUG execute_backtest: Strategy RSI period: {getattr(BacktestStrategyWrapper, 'rsi_period', 'N/A')}") # Also log rsi_period
+
     bt = Backtest(kl_df, BacktestStrategyWrapper, cash=10000, margin=1/10, commission=0.0007)
     try:
         stats = bt.run()
@@ -663,6 +783,11 @@ backtest_run_button = None # Added for enabling/disabling
 account_risk_percent_var = None
 tp_percent_var = None
 sl_percent_var = None
+# New PnL based SL/TP StringVars for Trading Parameters
+sl_pnl_amount_var = None
+tp_pnl_amount_var = None
+sl_tp_mode_var = None
+
 leverage_var = None
 qty_concurrent_positions_var = None
 local_high_low_lookback_var = None
@@ -678,6 +803,11 @@ strategy_checkbox_vars = {}
 account_risk_percent_entry = None
 tp_percent_entry = None
 sl_percent_entry = None
+# New PnL based SL/TP Entry/Combobox widgets for Trading Parameters
+sl_pnl_amount_entry = None
+tp_pnl_amount_entry = None
+sl_tp_mode_combobox = None
+
 leverage_entry = None
 qty_concurrent_positions_entry = None
 local_high_low_lookback_entry = None
@@ -688,11 +818,18 @@ strategy_radio_buttons = [] # List to hold strategy radio buttons
 params_widgets = [] # List to hold all parameter input widgets (will extend with strategy_radio_buttons)
 conditions_text_widget = None # For displaying signal conditions
 
+# Backtesting UI Variables - New PnL and Mode vars
+backtest_sl_pnl_amount_var = None
+backtest_tp_pnl_amount_var = None
+backtest_sl_tp_mode_var = None
+
 
 # --- Backtesting UI Command and Threading Logic ---
 def run_backtest_command():
     global backtest_symbol_var, backtest_timeframe_var, backtest_interval_var
     global backtest_tp_var, backtest_sl_var, backtest_selected_strategy_var
+    # Add new global vars for backtesting PnL and Mode
+    global backtest_sl_pnl_amount_var, backtest_tp_pnl_amount_var, backtest_sl_tp_mode_var
     global backtest_results_text_widget, STRATEGIES, root, status_var, backtest_run_button
 
     if backtest_run_button:
@@ -702,11 +839,93 @@ def run_backtest_command():
         symbol = backtest_symbol_var.get().strip().upper()
         timeframe = backtest_timeframe_var.get().strip()
         interval_str = backtest_interval_var.get().strip()
-        tp_str = backtest_tp_var.get().strip()
-        sl_str = backtest_sl_var.get().strip()
         selected_strategy_name = backtest_selected_strategy_var.get()
+        
+        # Get SL/TP mode for backtesting
+        current_backtest_sl_tp_mode = backtest_sl_tp_mode_var.get()
 
-        if not all([symbol, timeframe, interval_str, tp_str, sl_str, selected_strategy_name]):
+        # Default values, will be overwritten if not 'Percentage'
+        tp_percentage = 0.0
+        sl_percentage = 0.0
+        sl_pnl = 0.0
+        tp_pnl = 0.0
+
+        if current_backtest_sl_tp_mode == "Percentage":
+            tp_str = backtest_tp_var.get().strip() # TP %
+            sl_str = backtest_sl_var.get().strip() # SL %
+            if not all([symbol, timeframe, interval_str, tp_str, sl_str, selected_strategy_name]):
+                messagebox.showerror("Input Error", "All backtest fields (including TP/SL Percentages) are required for 'Percentage' mode.")
+                if backtest_run_button: backtest_run_button.config(state=tk.NORMAL)
+                return
+            tp_percentage = float(tp_str) / 100.0
+            sl_percentage = float(sl_str) / 100.0
+            if not (0 < tp_percentage < 1 and 0 < sl_percentage < 1):
+                messagebox.showerror("Input Error", "TP and SL percentages must be between 0 and 100 (exclusive of 0).")
+                if backtest_run_button: backtest_run_button.config(state=tk.NORMAL)
+                return
+        elif current_backtest_sl_tp_mode == "Fixed PnL":
+            sl_pnl_str = backtest_sl_pnl_amount_var.get().strip()
+            tp_pnl_str = backtest_tp_pnl_amount_var.get().strip()
+            if not all([symbol, timeframe, interval_str, sl_pnl_str, tp_pnl_str, selected_strategy_name]):
+                messagebox.showerror("Input Error", "All backtest fields (including SL/TP PnL Amounts) are required for 'Fixed PnL' mode.")
+                if backtest_run_button: backtest_run_button.config(state=tk.NORMAL)
+                return
+            sl_pnl = float(sl_pnl_str)
+            tp_pnl = float(tp_pnl_str)
+            if not (sl_pnl > 0 and tp_pnl > 0): # PnL amounts must be positive
+                messagebox.showerror("Input Error", "SL and TP PnL amounts must be positive values.")
+                if backtest_run_button: backtest_run_button.config(state=tk.NORMAL)
+                return
+        elif current_backtest_sl_tp_mode == "ATR/Dynamic":
+            # For ATR/Dynamic, specific TP/SL inputs might not be needed from main UI
+            # as strategy itself calculates them. Or, UI could provide ATR multiplier and RR.
+            # For now, assume strategy handles it, no direct numeric inputs for ATR SL/TP from here.
+            if not all([symbol, timeframe, interval_str, selected_strategy_name]):
+                 messagebox.showerror("Input Error", "Symbol, Timeframe, Interval, and Strategy are required for 'ATR/Dynamic' mode.")
+                 if backtest_run_button: backtest_run_button.config(state=tk.NORMAL)
+                 return
+            # sl_percentage and tp_percentage (and sl_pnl, tp_pnl) remain 0.0 as they are not used.
+            # The BacktestStrategyWrapper will use its internal ATR logic.
+        else: # Should not happen with Combobox
+            messagebox.showerror("Input Error", "Invalid SL/TP Mode selected for backtest.")
+            if backtest_run_button: backtest_run_button.config(state=tk.NORMAL)
+            return
+
+        interval_days = int(interval_str)
+        # if not (0 < tp_percentage < 1 and 0 < sl_percentage < 1): # Validation moved up
+        #     messagebox.showerror("Input Error", "TP and SL percentages must be between 0 and 100 (exclusive of 0, inclusive of values that result in <1 after division by 100). E.g., 0.01 to 0.99 after conversion.")
+        #     return # This return was problematic, removed as validation is mode-specific now.
+            
+        strategy_id_for_backtest = None
+        for id, name in STRATEGIES.items():
+            if name == selected_strategy_name:
+                strategy_id_for_backtest = id
+                break
+        
+        if strategy_id_for_backtest is None: # Should not happen with Combobox
+            messagebox.showerror("Input Error", "Invalid strategy selected.")
+            if backtest_run_button: backtest_run_button.config(state=tk.NORMAL)
+            return
+
+        # Clear previous results
+        if backtest_results_text_widget and root and root.winfo_exists():
+            backtest_results_text_widget.config(state=tk.NORMAL)
+            backtest_results_text_widget.delete('1.0', tk.END)
+            backtest_results_text_widget.insert(tk.END, f"Starting backtest for {symbol}, Strategy: {selected_strategy_name}, SL/TP Mode: {current_backtest_sl_tp_mode}...\n")
+            backtest_results_text_widget.config(state=tk.DISABLED)
+        if status_var and root and root.winfo_exists():
+            status_var.set("Backtest: Initializing...")
+
+
+        thread = threading.Thread(target=perform_backtest_in_thread, 
+                                  args=(strategy_id_for_backtest, symbol, timeframe, interval_days, 
+                                        tp_percentage, sl_percentage, # These are for 'Percentage' mode
+                                        current_backtest_sl_tp_mode, sl_pnl, tp_pnl), # New args for PnL/Mode
+                                  daemon=True)
+        thread.start()
+
+    except ValueError:
+        messagebox.showerror("Input Error", "Invalid number format for Interval, TP/SL %, or PnL Amounts.")
             messagebox.showerror("Input Error", "All backtest fields are required.")
             return
 
@@ -757,12 +976,23 @@ def run_backtest_command():
 
 def perform_backtest_in_thread(strategy_id, symbol, timeframe, interval_days, tp, sl):
     global backtest_results_text_widget, root, status_var, backtest_run_button
-    print(f"DEBUG perform_backtest_in_thread: Received strategy_id: {strategy_id}, symbol: {symbol}, timeframe: {timeframe}, interval_days: {interval_days}, tp_percentage: {tp*100:.2f}%, sl_percentage: {sl*100:.2f}%")
+    # The parameters tp, sl are now tp_percentage, sl_percentage
+    print(f"DEBUG perform_backtest_in_thread: Strategy ID: {strategy_id}, Symbol: {symbol}, Timeframe: {timeframe}, Interval: {interval_days} days")
+    print(f"DEBUG perform_backtest_in_thread: SL/TP Mode: {passed_sl_tp_mode}") # Renamed to avoid conflict
+    if passed_sl_tp_mode == "Percentage":
+        print(f"DEBUG perform_backtest_in_thread: TP %: {tp_percentage*100:.2f}%, SL %: {sl_percentage*100:.2f}%")
+    elif passed_sl_tp_mode == "Fixed PnL":
+        print(f"DEBUG perform_backtest_in_thread: SL PnL: ${sl_pnl_val:.2f}, TP PnL: ${tp_pnl_val:.2f}") # Renamed
     
     if status_var and root and root.winfo_exists():
         root.after(0, lambda: status_var.set("Backtest: Fetching kline data..."))
 
-    stats_output, bt_object, plot_error_message = execute_backtest(strategy_id, symbol, timeframe, interval_days, tp, sl)
+    stats_output, bt_object, plot_error_message = execute_backtest(
+        strategy_id, symbol, timeframe, interval_days, 
+        tp_percentage, sl_percentage, # These are the percentage values passed
+        passed_sl_tp_mode, sl_pnl_val, tp_pnl_val # Pass the new PnL and mode values
+    )
+    # ... (rest of the function remains largely the same) ...
     print(f"DEBUG perform_backtest_in_thread: execute_backtest returned stats_output type: {type(stats_output)}")
     # Avoid printing large DataFrames or Series directly here if they are part of stats_output; execute_backtest already logs details
     if isinstance(stats_output, str): # Error message
@@ -905,6 +1135,12 @@ margin_type_setting = 'ISOLATED' # Margin type
 qty_concurrent_positions = 100
 LOCAL_HIGH_LOW_LOOKBACK_PERIOD = 20 # New global for breakout logic
 # DEFAULT_ATR_MULTIPLIER = 2.0 # No longer here
+
+# New Global variables for PnL based SL/TP settings
+SL_TP_MODE = "ATR/Dynamic" # Default SL/TP mode
+SL_PNL_AMOUNT = 10.0       # Default SL PnL amount in $
+TP_PNL_AMOUNT = 20.0       # Default TP PnL amount in $
+
 
 # --- GUI Helper Function ---
 def update_text_widget_content(widget, content_list):
@@ -1228,49 +1464,41 @@ def scalping_strategy_signal(symbol):
                 return_data['conditions_for_full_signal_threshold'] = SCALPING_REQUIRED_SELL_CONDITIONS
         
         if return_data['signal'] != 'none':
-            try:
-                entry_price = kl['Close'].iloc[-1] # Ensure kl is available and has 'Close'
-                
-                # Call the new dynamic SL/TP function
-                # Using default values for atr_period, rr, buffer as per plan step context
-                dynamic_sl_tp_result = calculate_dynamic_sl_tp(
-                    symbol=symbol,
-                    entry_price=entry_price,
-                    side=return_data['signal'] 
-                )
+            # Only calculate dynamic SL/TP if mode is ATR/Dynamic
+            if SL_TP_MODE == "ATR/Dynamic":
+                try:
+                    entry_price = kl['Close'].iloc[-1]
+                    dynamic_sl_tp_result = calculate_dynamic_sl_tp(
+                        symbol=symbol,
+                        entry_price=entry_price,
+                        side=return_data['signal']
+                    )
 
-                if dynamic_sl_tp_result['error']:
-                    error_msg = f"Dynamic SL/TP calc error for {symbol} ({return_data['signal']}): {dynamic_sl_tp_result['error']}"
-                    print(error_msg)
-                    # Append to existing error or set if none. Be careful not to overwrite a more critical error.
-                    if return_data['error'] is None:
-                        return_data['error'] = error_msg
-                    else:
-                        return_data['error'] += f"; {error_msg}"
-                    # SL/TP will remain None as per their initialization in return_data
-                else:
-                    return_data['sl_price'] = dynamic_sl_tp_result['sl_price']
-                    return_data['tp_price'] = dynamic_sl_tp_result['tp_price']
-                    
-                    if return_data['sl_price'] is None or return_data['tp_price'] is None:
-                        error_msg = f"Dynamic SL/TP for {symbol} ({return_data['signal']}) resulted in None SL/TP without explicit error. Original calc error: {dynamic_sl_tp_result.get('error', 'N/A')}"
+                    if dynamic_sl_tp_result['error']:
+                        error_msg = f"Dynamic SL/TP calc error for {symbol} ({return_data['signal']}): {dynamic_sl_tp_result['error']}"
                         print(error_msg)
-                        if return_data['error'] is None:
-                            return_data['error'] = error_msg
-                        else:
-                            return_data['error'] += f"; {error_msg}"
-
-            except Exception as e:
-                # Catch any unexpected error during this integration block
-                error_msg = f"Error during dynamic SL/TP integration in scalping_strategy_signal for {symbol}: {str(e)}"
-                print(error_msg)
-                if return_data['error'] is None:
-                    return_data['error'] = error_msg
-                else:
-                    return_data['error'] += f"; {error_msg}"
-                # Ensure SL/TP are None if any exception occurs here
+                        if return_data['error'] is None: return_data['error'] = error_msg
+                        else: return_data['error'] += f"; {error_msg}"
+                        # SL/TP remain None
+                    else:
+                        return_data['sl_price'] = dynamic_sl_tp_result['sl_price']
+                        return_data['tp_price'] = dynamic_sl_tp_result['tp_price']
+                        if return_data['sl_price'] is None or return_data['tp_price'] is None:
+                            error_msg = f"Dynamic SL/TP for {symbol} ({return_data['signal']}) resulted in None SL/TP. Orig. err: {dynamic_sl_tp_result.get('error', 'N/A')}"
+                            print(error_msg)
+                            if return_data['error'] is None: return_data['error'] = error_msg
+                            else: return_data['error'] += f"; {error_msg}"
+                except Exception as e:
+                    error_msg = f"Error during dynamic SL/TP integration in scalping_strategy_signal for {symbol}: {str(e)}"
+                    print(error_msg)
+                    if return_data['error'] is None: return_data['error'] = error_msg
+                    else: return_data['error'] += f"; {error_msg}"
+                    return_data['sl_price'] = None
+                    return_data['tp_price'] = None
+            else: # For "Percentage" or "Fixed PnL" modes, strategy doesn't set SL/TP prices
                 return_data['sl_price'] = None
                 return_data['tp_price'] = None
+                print(f"Scalping strategy ({symbol}): SL/TP calculation deferred to open_order (Mode: {SL_TP_MODE}).")
 
         return return_data
 
@@ -1373,47 +1601,42 @@ def strategy_ema_supertrend(symbol):
             base_return['signal'] = 'none'
             return base_return # Exit early if no initial signal based on met conditions
 
-        # If a signal ('up' or 'down') is determined, proceed to calculate dynamic SL/TP
+        # If a signal ('up' or 'down') is determined, proceed to calculate SL/TP based on mode
         if final_signal_str != 'none':
-            entry_price = current_price # current_price is already available
+            if SL_TP_MODE == "ATR/Dynamic":
+                entry_price = current_price
+                dynamic_sl_tp_result = calculate_dynamic_sl_tp(symbol, entry_price, final_signal_str)
 
-            dynamic_sl_tp_result = calculate_dynamic_sl_tp(symbol, entry_price, final_signal_str)
+                if dynamic_sl_tp_result['error']:
+                    base_return['error'] = f"S1 Dyn.SL/TP Error ({symbol}, {final_signal_str}): {dynamic_sl_tp_result['error']}"
+                    final_signal_str = 'none' 
+                else:
+                    calculated_sl = dynamic_sl_tp_result['sl_price']
+                    calculated_tp = dynamic_sl_tp_result['tp_price']
 
-            if dynamic_sl_tp_result['error']:
-                base_return['error'] = f"S1 Dyn.SL/TP Error ({symbol}, {final_signal_str}): {dynamic_sl_tp_result['error']}"
-                final_signal_str = 'none' # Invalidate signal
-            else:
-                calculated_sl = dynamic_sl_tp_result['sl_price']
-                calculated_tp = dynamic_sl_tp_result['tp_price']
-
-                if calculated_sl is None or calculated_tp is None:
-                    base_return['error'] = f"S1 Dyn.SL/TP calc ({symbol}, {final_signal_str}) returned None for SL ({calculated_sl}) or TP ({calculated_tp}). Orig. err: {dynamic_sl_tp_result.get('error', 'N/A')}"
-                    final_signal_str = 'none' # Invalidate signal
-                elif final_signal_str == 'up':
-                    if calculated_sl >= entry_price:
-                        base_return['error'] = f"S1 SL price {calculated_sl} not below entry {entry_price} for LONG on {symbol}."
+                    if calculated_sl is None or calculated_tp is None:
+                        base_return['error'] = f"S1 Dyn.SL/TP calc ({symbol}, {final_signal_str}) returned None. Orig. err: {dynamic_sl_tp_result.get('error', 'N/A')}"
                         final_signal_str = 'none'
-                    elif calculated_tp <= entry_price:
-                        base_return['error'] = f"S1 TP price {calculated_tp} not above entry {entry_price} for LONG on {symbol}."
-                        final_signal_str = 'none'
-                elif final_signal_str == 'down':
-                    if calculated_sl <= entry_price:
-                        base_return['error'] = f"S1 SL price {calculated_sl} not above entry {entry_price} for SHORT on {symbol}."
-                        final_signal_str = 'none'
-                    elif calculated_tp >= entry_price:
-                        base_return['error'] = f"S1 TP price {calculated_tp} not below entry {entry_price} for SHORT on {symbol}."
-                        final_signal_str = 'none'
+                    elif final_signal_str == 'up':
+                        if calculated_sl >= entry_price: final_signal_str = 'none'; base_return['error'] = f"S1 SL {calculated_sl} not < entry {entry_price}."
+                        elif calculated_tp <= entry_price: final_signal_str = 'none'; base_return['error'] = f"S1 TP {calculated_tp} not > entry {entry_price}."
+                    elif final_signal_str == 'down':
+                        if calculated_sl <= entry_price: final_signal_str = 'none'; base_return['error'] = f"S1 SL {calculated_sl} not > entry {entry_price}."
+                        elif calculated_tp >= entry_price: final_signal_str = 'none'; base_return['error'] = f"S1 TP {calculated_tp} not < entry {entry_price}."
+                
+                if final_signal_str != 'none':
+                    base_return['sl_price'] = calculated_sl
+                    base_return['tp_price'] = calculated_tp
+                else: # Signal invalidated by SL/TP calculation
+                    base_return['sl_price'] = None
+                    base_return['tp_price'] = None
+                    if not base_return['error']: base_return['error'] = "S1 signal invalidated during ATR SL/TP processing."
+                    print(f"Strategy {STRATEGIES.get(1, 'S1')} for {symbol} (ATR Mode): Signal invalidated. Error: {base_return['error']}")
             
-            if final_signal_str != 'none':
-                base_return['sl_price'] = calculated_sl
-                base_return['tp_price'] = calculated_tp
-            else:
+            else: # "Percentage" or "Fixed PnL" mode
                 base_return['sl_price'] = None
                 base_return['tp_price'] = None
-                # Error message should already be set if final_signal_str is 'none'
-                if not base_return['error']: # Defensive: ensure an error is logged if signal invalidated
-                     base_return['error'] = f"S1 signal for {symbol} ({'up' if met_buy_conditions >=2 else 'down'}) invalidated during dynamic SL/TP processing."
-                print(f"Strategy {STRATEGIES.get(1, 'S1')} for {symbol}: Signal invalidated. Error: {base_return['error']}")
+                print(f"Strategy {STRATEGIES.get(1, 'S1')} for {symbol}: SL/TP calculation deferred to open_order (Mode: {SL_TP_MODE}).")
 
         base_return['signal'] = final_signal_str
         return base_return
@@ -1527,46 +1750,41 @@ def strategy_bollinger_band_mean_reversion(symbol):
             base_return['signal'] = 'none' # Ensure signal is none
             return base_return # Exit early if no initial signal
 
-        # If a signal ('up' or 'down') is determined, proceed to calculate dynamic SL/TP
+        # If a signal ('up' or 'down') is determined, proceed to calculate SL/TP based on mode
         if final_signal_str != 'none':
-            entry_price = current_price # current_price is already available
+            if SL_TP_MODE == "ATR/Dynamic":
+                entry_price = current_price
+                dynamic_sl_tp_result = calculate_dynamic_sl_tp(symbol, entry_price, final_signal_str)
 
-            dynamic_sl_tp_result = calculate_dynamic_sl_tp(symbol, entry_price, final_signal_str)
+                if dynamic_sl_tp_result['error']:
+                    base_return['error'] = f"S2 Dyn.SL/TP Error ({symbol}, {final_signal_str}): {dynamic_sl_tp_result['error']}"
+                    final_signal_str = 'none'
+                else:
+                    calculated_sl = dynamic_sl_tp_result['sl_price']
+                    calculated_tp = dynamic_sl_tp_result['tp_price']
 
-            if dynamic_sl_tp_result['error']:
-                base_return['error'] = f"S2 Dyn.SL/TP Error ({symbol}, {final_signal_str}): {dynamic_sl_tp_result['error']}"
-                final_signal_str = 'none' # Invalidate signal
-            else:
-                calculated_sl = dynamic_sl_tp_result['sl_price']
-                calculated_tp = dynamic_sl_tp_result['tp_price']
-
-                if calculated_sl is None or calculated_tp is None:
-                    base_return['error'] = f"S2 Dyn.SL/TP calc ({symbol}, {final_signal_str}) returned None for SL ({calculated_sl}) or TP ({calculated_tp}). Orig. err: {dynamic_sl_tp_result.get('error', 'N/A')}"
-                    final_signal_str = 'none' # Invalidate signal
-                elif final_signal_str == 'up':
-                    if calculated_sl >= entry_price:
-                        base_return['error'] = f"S2 SL price {calculated_sl} not below entry {entry_price} for LONG on {symbol}."
+                    if calculated_sl is None or calculated_tp is None:
+                        base_return['error'] = f"S2 Dyn.SL/TP calc ({symbol}, {final_signal_str}) returned None. Orig. err: {dynamic_sl_tp_result.get('error', 'N/A')}"
                         final_signal_str = 'none'
-                    elif calculated_tp <= entry_price:
-                        base_return['error'] = f"S2 TP price {calculated_tp} not above entry {entry_price} for LONG on {symbol}."
-                        final_signal_str = 'none'
-                elif final_signal_str == 'down':
-                    if calculated_sl <= entry_price:
-                        base_return['error'] = f"S2 SL price {calculated_sl} not above entry {entry_price} for SHORT on {symbol}."
-                        final_signal_str = 'none'
-                    elif calculated_tp >= entry_price:
-                        base_return['error'] = f"S2 TP price {calculated_tp} not below entry {entry_price} for SHORT on {symbol}."
-                        final_signal_str = 'none'
-            
-            if final_signal_str != 'none':
-                base_return['sl_price'] = calculated_sl
-                base_return['tp_price'] = calculated_tp
-            else:
+                    elif final_signal_str == 'up':
+                        if calculated_sl >= entry_price: final_signal_str = 'none'; base_return['error'] = f"S2 SL {calculated_sl} not < entry {entry_price}."
+                        elif calculated_tp <= entry_price: final_signal_str = 'none'; base_return['error'] = f"S2 TP {calculated_tp} not > entry {entry_price}."
+                    elif final_signal_str == 'down':
+                        if calculated_sl <= entry_price: final_signal_str = 'none'; base_return['error'] = f"S2 SL {calculated_sl} not > entry {entry_price}."
+                        elif calculated_tp >= entry_price: final_signal_str = 'none'; base_return['error'] = f"S2 TP {calculated_tp} not < entry {entry_price}."
+                
+                if final_signal_str != 'none':
+                    base_return['sl_price'] = calculated_sl
+                    base_return['tp_price'] = calculated_tp
+                else: # Signal invalidated
+                    base_return['sl_price'] = None
+                    base_return['tp_price'] = None
+                    if not base_return['error']: base_return['error'] = "S2 signal invalidated during ATR SL/TP processing."
+                    print(f"Strategy {STRATEGIES.get(2, 'S2')} for {symbol} (ATR Mode): Signal invalidated. Error: {base_return['error']}")
+            else: # "Percentage" or "Fixed PnL"
                 base_return['sl_price'] = None
                 base_return['tp_price'] = None
-                if not base_return['error']: 
-                     base_return['error'] = f"S2 signal for {symbol} ({'up' if met_buy_conditions >=2 else 'down'}) invalidated during dynamic SL/TP processing."
-                print(f"Strategy {STRATEGIES.get(2, 'S2')} for {symbol}: Signal invalidated. Error: {base_return['error']}")
+                print(f"Strategy {STRATEGIES.get(2, 'S2')} for {symbol}: SL/TP calculation deferred to open_order (Mode: {SL_TP_MODE}).")
         
         base_return['signal'] = final_signal_str
         return base_return
@@ -1719,46 +1937,41 @@ def strategy_vwap_breakout_momentum(symbol):
             base_return['signal'] = 'none' # Ensure signal is none
             return base_return # Exit early if no initial signal
 
-        # If a signal ('up' or 'down') is determined, proceed to calculate dynamic SL/TP
+        # If a signal ('up' or 'down') is determined, proceed to calculate SL/TP based on mode
         if final_signal_str != 'none':
-            entry_price = current_price # current_price is already available (kl_day_df['Close'].iloc[-1])
+            if SL_TP_MODE == "ATR/Dynamic":
+                entry_price = current_price
+                dynamic_sl_tp_result = calculate_dynamic_sl_tp(symbol, entry_price, final_signal_str)
 
-            dynamic_sl_tp_result = calculate_dynamic_sl_tp(symbol, entry_price, final_signal_str)
+                if dynamic_sl_tp_result['error']:
+                    base_return['error'] = f"S3 Dyn.SL/TP Error ({symbol}, {final_signal_str}): {dynamic_sl_tp_result['error']}"
+                    final_signal_str = 'none'
+                else:
+                    calculated_sl = dynamic_sl_tp_result['sl_price']
+                    calculated_tp = dynamic_sl_tp_result['tp_price']
 
-            if dynamic_sl_tp_result['error']:
-                base_return['error'] = f"S3 Dyn.SL/TP Error ({symbol}, {final_signal_str}): {dynamic_sl_tp_result['error']}"
-                final_signal_str = 'none' # Invalidate signal
-            else:
-                calculated_sl = dynamic_sl_tp_result['sl_price']
-                calculated_tp = dynamic_sl_tp_result['tp_price']
-
-                if calculated_sl is None or calculated_tp is None:
-                    base_return['error'] = f"S3 Dyn.SL/TP calc ({symbol}, {final_signal_str}) returned None for SL ({calculated_sl}) or TP ({calculated_tp}). Orig. err: {dynamic_sl_tp_result.get('error', 'N/A')}"
-                    final_signal_str = 'none' # Invalidate signal
-                elif final_signal_str == 'up':
-                    if calculated_sl >= entry_price:
-                        base_return['error'] = f"S3 SL price {calculated_sl} not below entry {entry_price} for LONG on {symbol}."
+                    if calculated_sl is None or calculated_tp is None:
+                        base_return['error'] = f"S3 Dyn.SL/TP calc ({symbol}, {final_signal_str}) returned None. Orig. err: {dynamic_sl_tp_result.get('error', 'N/A')}"
                         final_signal_str = 'none'
-                    elif calculated_tp <= entry_price:
-                        base_return['error'] = f"S3 TP price {calculated_tp} not above entry {entry_price} for LONG on {symbol}."
-                        final_signal_str = 'none'
-                elif final_signal_str == 'down':
-                    if calculated_sl <= entry_price:
-                        base_return['error'] = f"S3 SL price {calculated_sl} not above entry {entry_price} for SHORT on {symbol}."
-                        final_signal_str = 'none'
-                    elif calculated_tp >= entry_price:
-                        base_return['error'] = f"S3 TP price {calculated_tp} not below entry {entry_price} for SHORT on {symbol}."
-                        final_signal_str = 'none'
-            
-            if final_signal_str != 'none':
-                base_return['sl_price'] = calculated_sl
-                base_return['tp_price'] = calculated_tp
-            else:
+                    elif final_signal_str == 'up':
+                        if calculated_sl >= entry_price: final_signal_str = 'none'; base_return['error'] = f"S3 SL {calculated_sl} not < entry {entry_price}."
+                        elif calculated_tp <= entry_price: final_signal_str = 'none'; base_return['error'] = f"S3 TP {calculated_tp} not > entry {entry_price}."
+                    elif final_signal_str == 'down':
+                        if calculated_sl <= entry_price: final_signal_str = 'none'; base_return['error'] = f"S3 SL {calculated_sl} not > entry {entry_price}."
+                        elif calculated_tp >= entry_price: final_signal_str = 'none'; base_return['error'] = f"S3 TP {calculated_tp} not < entry {entry_price}."
+                
+                if final_signal_str != 'none':
+                    base_return['sl_price'] = calculated_sl
+                    base_return['tp_price'] = calculated_tp
+                else: # Signal invalidated
+                    base_return['sl_price'] = None
+                    base_return['tp_price'] = None
+                    if not base_return['error']: base_return['error'] = "S3 signal invalidated during ATR SL/TP processing."
+                    print(f"Strategy {STRATEGIES.get(3, 'S3')} for {symbol} (ATR Mode): Signal invalidated. Error: {base_return['error']}")
+            else: # "Percentage" or "Fixed PnL"
                 base_return['sl_price'] = None
                 base_return['tp_price'] = None
-                if not base_return['error']: 
-                     base_return['error'] = f"S3 signal for {symbol} ({'up' if met_buy_conditions >=2 else 'down'}) invalidated during dynamic SL/TP processing."
-                print(f"Strategy {STRATEGIES.get(3, 'S3')} for {symbol}: Signal invalidated. Error: {base_return['error']}")
+                print(f"Strategy {STRATEGIES.get(3, 'S3')} for {symbol}: SL/TP calculation deferred to open_order (Mode: {SL_TP_MODE}).")
         
         base_return['signal'] = final_signal_str
         return base_return
@@ -1943,52 +2156,45 @@ def strategy_macd_divergence_pivot(symbol):
             if price_at_resistance: # Removed stoch_overbought_turning_down
                 final_signal = 'down'
         
-        # SL/TP Calculation
+        # SL/TP Calculation based on SL_TP_MODE
         if final_signal != 'none':
-            entry_price = current_price # current_price is the entry price for dynamic calculation
-            
-            dynamic_sl_tp_result = calculate_dynamic_sl_tp(symbol, entry_price, final_signal)
-            calculated_sl = None
-            calculated_tp = None
+            if SL_TP_MODE == "ATR/Dynamic":
+                entry_price = current_price
+                dynamic_sl_tp_result = calculate_dynamic_sl_tp(symbol, entry_price, final_signal)
+                calculated_sl = None
+                calculated_tp = None
 
-            if dynamic_sl_tp_result['error']:
-                base_return['error'] = f"S4 Dyn.SL/TP Error ({symbol}, {final_signal}): {dynamic_sl_tp_result['error']}"
-                final_signal = 'none' # Invalidate the signal
-            else:
-                calculated_sl = dynamic_sl_tp_result['sl_price']
-                calculated_tp = dynamic_sl_tp_result['tp_price']
-
-                if calculated_sl is None or calculated_tp is None:
-                    base_return['error'] = f"S4 Dyn.SL/TP calc ({symbol}, {final_signal}) returned None for SL ({calculated_sl}) or TP ({calculated_tp}). Orig. err: {dynamic_sl_tp_result.get('error', 'N/A')}"
+                if dynamic_sl_tp_result['error']:
+                    base_return['error'] = f"S4 Dyn.SL/TP Error ({symbol}, {final_signal}): {dynamic_sl_tp_result['error']}"
                     final_signal = 'none'
-                elif final_signal == 'up': # Validation for 'up'
-                    if calculated_sl >= entry_price:
-                        base_return['error'] = f"S4 SL {calculated_sl} not below entry {entry_price} for LONG on {symbol}."
-                        final_signal = 'none'
-                    elif calculated_tp <= entry_price:
-                        base_return['error'] = f"S4 TP {calculated_tp} not above entry {entry_price} for LONG on {symbol}."
-                        final_signal = 'none'
-                elif final_signal == 'down': # Validation for 'down'
-                    if calculated_sl <= entry_price:
-                        base_return['error'] = f"S4 SL {calculated_sl} not above entry {entry_price} for SHORT on {symbol}."
-                        final_signal = 'none'
-                    elif calculated_tp >= entry_price:
-                        base_return['error'] = f"S4 TP {calculated_tp} not below entry {entry_price} for SHORT on {symbol}."
-                        final_signal = 'none'
+                else:
+                    calculated_sl = dynamic_sl_tp_result['sl_price']
+                    calculated_tp = dynamic_sl_tp_result['tp_price']
 
-            if final_signal != 'none':
-                base_return['sl_price'] = calculated_sl
-                base_return['tp_price'] = calculated_tp
-            else:
+                    if calculated_sl is None or calculated_tp is None:
+                        base_return['error'] = f"S4 Dyn.SL/TP calc ({symbol}, {final_signal}) returned None. Orig. err: {dynamic_sl_tp_result.get('error', 'N/A')}"
+                        final_signal = 'none'
+                    elif final_signal == 'up':
+                        if calculated_sl >= entry_price: final_signal = 'none'; base_return['error'] = f"S4 SL {calculated_sl} not < entry {entry_price}."
+                        elif calculated_tp <= entry_price: final_signal = 'none'; base_return['error'] = f"S4 TP {calculated_tp} not > entry {entry_price}."
+                    elif final_signal == 'down':
+                        if calculated_sl <= entry_price: final_signal = 'none'; base_return['error'] = f"S4 SL {calculated_sl} not > entry {entry_price}."
+                        elif calculated_tp >= entry_price: final_signal = 'none'; base_return['error'] = f"S4 TP {calculated_tp} not < entry {entry_price}."
+                
+                if final_signal != 'none':
+                    base_return['sl_price'] = calculated_sl
+                    base_return['tp_price'] = calculated_tp
+                else: # Signal invalidated
+                    base_return['sl_price'] = None
+                    base_return['tp_price'] = None
+                    if not base_return['error']: base_return['error'] = "S4 signal invalidated during ATR SL/TP processing."
+                    print(f"Strategy {STRATEGIES.get(4, 'S4')} for {symbol} (ATR Mode): Signal invalidated. Error: {base_return['error']}")
+            else: # "Percentage" or "Fixed PnL"
                 base_return['sl_price'] = None
                 base_return['tp_price'] = None
-                if not base_return['error']: # Ensure an error is logged if signal invalidated
-                     base_return['error'] = f"S4 signal for {symbol} invalidated during dynamic SL/TP processing."
-                # This print will catch these dynamic SL/TP related invalidations too.
-                print(f"Strategy {STRATEGIES.get(4, 'S4')} for {symbol}: Signal invalidated. Error: {base_return['error']}")
-        
+                print(f"Strategy {STRATEGIES.get(4, 'S4')} for {symbol}: SL/TP calculation deferred to open_order (Mode: {SL_TP_MODE}).")
+
         base_return['signal'] = final_signal
-        # sl_price and tp_price are set above based on final_signal status
         # divergence_price_point already set when divergence found
         
         return base_return
@@ -2128,59 +2334,43 @@ def strategy_rsi_enhanced(symbol):
             base_return['conditions_met_count'] = max(num_core_buy_conditions_met, num_core_sell_conditions_met)
             base_return['signal'] = 'none'
 
-        # If a signal is determined, calculate and validate dynamic SL/TP
+        # If a signal is determined, calculate SL/TP based on mode
         if base_return['signal'] != 'none':
-            entry_price = current_price # current_price is the entry price
+            if SL_TP_MODE == "ATR/Dynamic":
+                entry_price = current_price
+                dynamic_sl_tp_result = calculate_dynamic_sl_tp(symbol, entry_price, base_return['signal'])
 
-            dynamic_sl_tp_result = calculate_dynamic_sl_tp(symbol, entry_price, base_return['signal'])
-
-            if dynamic_sl_tp_result['error']:
-                base_return['error'] = f"S5 Dyn.SL/TP Error ({symbol}, {base_return['signal']}): {dynamic_sl_tp_result['error']}"
-                base_return['signal'] = 'none' # Invalidate the signal
-            else:
-                calculated_sl = dynamic_sl_tp_result['sl_price']
-                calculated_tp = dynamic_sl_tp_result['tp_price']
-
-                if calculated_sl is None or calculated_tp is None:
-                    # Append error if one already exists from condition checks, otherwise set it.
-                    err_msg = f"S5 Dyn.SL/TP calc ({symbol}, {base_return['signal']}) returned None for SL ({calculated_sl}) or TP ({calculated_tp}). Orig. err: {dynamic_sl_tp_result.get('error', 'N/A')}"
-                    if base_return['error']: base_return['error'] += "; " + err_msg
-                    else: base_return['error'] = err_msg
+                if dynamic_sl_tp_result['error']:
+                    base_return['error'] = f"S5 Dyn.SL/TP Error ({symbol}, {base_return['signal']}): {dynamic_sl_tp_result['error']}"
                     base_return['signal'] = 'none'
-                # Ensure base_return['signal'] hasn't been changed to 'none' before this validation
-                elif base_return['signal'] == 'up': 
-                    if calculated_sl >= entry_price:
-                        err_msg = f"S5 SL {calculated_sl} not below entry {entry_price} for LONG on {symbol}."
-                        if base_return['error']: base_return['error'] += "; " + err_msg
-                        else: base_return['error'] = err_msg
-                        base_return['signal'] = 'none'
-                    elif calculated_tp <= entry_price:
-                        err_msg = f"S5 TP {calculated_tp} not above entry {entry_price} for LONG on {symbol}."
-                        if base_return['error']: base_return['error'] += "; " + err_msg
-                        else: base_return['error'] = err_msg
-                        base_return['signal'] = 'none'
-                elif base_return['signal'] == 'down': 
-                    if calculated_sl <= entry_price:
-                        err_msg = f"S5 SL {calculated_sl} not above entry {entry_price} for SHORT on {symbol}."
-                        if base_return['error']: base_return['error'] += "; " + err_msg
-                        else: base_return['error'] = err_msg
-                        base_return['signal'] = 'none'
-                    elif calculated_tp >= entry_price:
-                        err_msg = f"S5 TP {calculated_tp} not below entry {entry_price} for SHORT on {symbol}."
-                        if base_return['error']: base_return['error'] += "; " + err_msg
-                        else: base_return['error'] = err_msg
-                        base_return['signal'] = 'none'
+                else:
+                    calculated_sl = dynamic_sl_tp_result['sl_price']
+                    calculated_tp = dynamic_sl_tp_result['tp_price']
 
-            # Update base_return SL/TP based on final signal state
-            if base_return['signal'] != 'none': # If signal is still valid
-                base_return['sl_price'] = calculated_sl
-                base_return['tp_price'] = calculated_tp
-            else: # Signal was invalidated during SL/TP calculation/validation
-                base_return['sl_price'] = None # Ensure they are None
+                    if calculated_sl is None or calculated_tp is None:
+                        err_msg = f"S5 Dyn.SL/TP calc ({symbol}, {base_return['signal']}) returned None. Orig. err: {dynamic_sl_tp_result.get('error', 'N/A')}"
+                        if base_return['error']: base_return['error'] += "; " + err_msg
+                        else: base_return['error'] = err_msg
+                        base_return['signal'] = 'none'
+                    elif base_return['signal'] == 'up':
+                        if calculated_sl >= entry_price: base_return['signal'] = 'none'; err_msg = f"S5 SL {calculated_sl} not < entry {entry_price}."; base_return['error'] = (base_return['error'] + "; " + err_msg) if base_return['error'] else err_msg
+                        elif calculated_tp <= entry_price: base_return['signal'] = 'none'; err_msg = f"S5 TP {calculated_tp} not > entry {entry_price}."; base_return['error'] = (base_return['error'] + "; " + err_msg) if base_return['error'] else err_msg
+                    elif base_return['signal'] == 'down':
+                        if calculated_sl <= entry_price: base_return['signal'] = 'none'; err_msg = f"S5 SL {calculated_sl} not > entry {entry_price}."; base_return['error'] = (base_return['error'] + "; " + err_msg) if base_return['error'] else err_msg
+                        elif calculated_tp >= entry_price: base_return['signal'] = 'none'; err_msg = f"S5 TP {calculated_tp} not < entry {entry_price}."; base_return['error'] = (base_return['error'] + "; " + err_msg) if base_return['error'] else err_msg
+                
+                if base_return['signal'] != 'none':
+                    base_return['sl_price'] = calculated_sl
+                    base_return['tp_price'] = calculated_tp
+                else: # Signal invalidated
+                    base_return['sl_price'] = None
+                    base_return['tp_price'] = None
+                    if not base_return['error']: base_return['error'] = "S5 signal invalidated during ATR SL/TP processing."
+                    # Error already logged by print below if signal is none and error exists
+            else: # "Percentage" or "Fixed PnL"
+                base_return['sl_price'] = None
                 base_return['tp_price'] = None
-                if not base_return['error']: # Ensure an error is logged if not already set
-                     base_return['error'] = f"S5 signal for {symbol} invalidated during dynamic SL/TP processing."
-                # The print below will catch this state.
+                print(f"Strategy {STRATEGIES.get(5, 'S5')} for {symbol}: SL/TP calculation deferred to open_order (Mode: {SL_TP_MODE}).")
 
         if base_return['error'] and base_return['signal'] == 'none': 
              print(f"Strategy {STRATEGIES.get(5, 'S5')} for {symbol}: Signal invalidated or error occurred: {base_return['error']}")
@@ -2239,7 +2429,10 @@ def get_qty_precision(symbol):
     return 0
 
 def open_order(symbol, side, strategy_sl=None, strategy_tp=None, strategy_account_risk_percent=None):
-    global client, ACCOUNT_RISK_PERCENT, SL_PERCENT, TP_PERCENT # SL_PERCENT, TP_PERCENT used if strategy_sl/tp are None
+    global client, ACCOUNT_RISK_PERCENT, SL_PERCENT, TP_PERCENT
+    # Add new globals for PnL based SL/TP and mode
+    global SL_TP_MODE, SL_PNL_AMOUNT, TP_PNL_AMOUNT
+    
     if not client: return
 
     original_side_param = side # Store original for logging
@@ -2265,84 +2458,104 @@ def open_order(symbol, side, strategy_sl=None, strategy_tp=None, strategy_accoun
         account_balance = get_balance_usdt()
         if account_balance is None or account_balance <= 0: return
 
-        current_account_risk = ACCOUNT_RISK_PERCENT # Global default
-        if strategy_account_risk_percent is not None and 0 < strategy_account_risk_percent < 1:
-            current_account_risk = strategy_account_risk_percent
-            print(f"Using strategy-defined account risk: {current_account_risk*100:.2f}% for {symbol}")
-        else:
-            print(f"Using global account risk: {current_account_risk*100:.2f}% for {symbol}")
+        capital_to_risk_usdt = 0.0
+        sl_for_sizing_percentage = 0.0
 
-        capital_to_risk_usdt = account_balance * current_account_risk
+        print(f"INFO: Current SL/TP Mode: {SL_TP_MODE} for {symbol}")
+
+        if SL_TP_MODE == "Fixed PnL":
+            if SL_PNL_AMOUNT <= 0:
+                print(f"Warning: SL PnL Amount ($ {SL_PNL_AMOUNT}) must be positive for 'Fixed PnL' mode. Aborting order for {symbol}.")
+                return
+            capital_to_risk_usdt = SL_PNL_AMOUNT  # The fixed $ amount to risk
+            sl_for_sizing_percentage = SL_PERCENT # Use global SL_PERCENT as a reference for notional sizing
+            print(f"Using Fixed PnL mode: Capital to Risk = ${capital_to_risk_usdt:.2f}, SL_PERCENT for sizing ref = {sl_for_sizing_percentage*100:.2f}%")
+        else: # Percentage or ATR/Dynamic mode
+            current_account_risk = ACCOUNT_RISK_PERCENT # Global default
+            if strategy_account_risk_percent is not None and 0 < strategy_account_risk_percent < 1:
+                current_account_risk = strategy_account_risk_percent
+                print(f"Using strategy-defined account risk: {current_account_risk*100:.2f}% for {symbol}")
+            else:
+                print(f"Using global account risk: {current_account_risk*100:.2f}% for {symbol}")
+            capital_to_risk_usdt = account_balance * current_account_risk
+
+            if SL_TP_MODE == "ATR/Dynamic" and strategy_sl is not None:
+                if side == 'buy' and strategy_sl < price :
+                    sl_for_sizing_percentage = (price - strategy_sl) / price
+                elif side == 'sell' and strategy_sl > price:
+                    sl_for_sizing_percentage = (strategy_sl - price) / price
+                else:
+                    print(f"Warning: Invalid strategy_sl ({strategy_sl}) for ATR/Dynamic sizing on {symbol} {side} at price {price}. Defaulting to global SL_PERCENT.")
+                    sl_for_sizing_percentage = SL_PERCENT
+                print(f"Using ATR/Dynamic mode: SL for sizing derived from strategy_sl ({strategy_sl}), effective SL % for sizing: {sl_for_sizing_percentage*100:.2f}%")
+            else: # Percentage mode (or ATR/Dynamic without strategy_sl, fallback to Percentage)
+                sl_for_sizing_percentage = SL_PERCENT
+                if SL_TP_MODE != "Percentage": # Log if falling back
+                     print(f"INFO: SL_TP_MODE is '{SL_TP_MODE}' but falling back to SL_PERCENT for sizing reference.")
+                print(f"Using Percentage mode (or fallback): SL_PERCENT for sizing = {sl_for_sizing_percentage*100:.2f}%")
+
         if capital_to_risk_usdt <= 0:
             print(f"Warning: Capital to risk is {capital_to_risk_usdt:.2f} for {symbol}. Aborting order.")
             return
-        
-        # Ensure SL_PERCENT is used here for position sizing calculation,
-        # as it represents the distance to SL, not the total risk capital for the account.
-        # The strategy-specific SL price (strategy_sl) will define this distance.
-        # If strategy_sl is None, then global SL_PERCENT is used to calculate sl_actual later.
-        # The risk amount (current_account_risk) determines the capital, the SL distance (derived from strategy_sl or SL_PERCENT) determines the quantity.
-
-        sl_for_sizing = SL_PERCENT # Default global SL percent for sizing if strategy SL not provided or invalid
-        if strategy_sl is not None:
-            if side == 'buy' and strategy_sl < price :
-                sl_for_sizing = (price - strategy_sl) / price
-            elif side == 'sell' and strategy_sl > price:
-                sl_for_sizing = (strategy_sl - price) / price
-            else: # Strategy SL is invalid (e.g. on wrong side of price or zero)
-                print(f"Warning: Invalid strategy_sl ({strategy_sl}) for sizing on {symbol} {side} at price {price}. Defaulting to global SL_PERCENT for sizing.")
-                # sl_for_sizing remains global SL_PERCENT
-        
-        if sl_for_sizing <= 0:
-            print(f"Warning: Stop loss for sizing is {sl_for_sizing*100:.2f}% for {symbol}. Aborting order.")
+        if sl_for_sizing_percentage <= 0:
+            print(f"Warning: SL for sizing percentage is {sl_for_sizing_percentage*100:.2f}%. Aborting order for {symbol}.")
             return
 
-        position_size_usdt = capital_to_risk_usdt / sl_for_sizing
-        # Define a cap for notional position size based on a fraction of available balance
+        position_size_usdt_notional = capital_to_risk_usdt / sl_for_sizing_percentage
+        
         CAP_FRACTION_OF_BALANCE = 0.50 
         max_permissible_notional_value = account_balance * CAP_FRACTION_OF_BALANCE
-
-        original_calculated_pos_size_usdt = position_size_usdt # For logging
-
-        if position_size_usdt > max_permissible_notional_value:
-            position_size_usdt = max_permissible_notional_value
-            print(f"INFO: Position size capped for {symbol}. Original calc: {original_calculated_pos_size_usdt:.2f} USDT, Capped to: {position_size_usdt:.2f} USDT (max {CAP_FRACTION_OF_BALANCE*100}% of available balance).")
-        calculated_qty_asset = round(position_size_usdt / price, qty_precision)
-        if calculated_qty_asset <= 0: # Re-check qty after potential capping
-            print(f"Warning: Calculated quantity is {calculated_qty_asset} for {symbol} after potential capping. Aborting order.")
+        if position_size_usdt_notional > max_permissible_notional_value:
+            original_calculated_pos_size_usdt = position_size_usdt_notional
+            position_size_usdt_notional = max_permissible_notional_value
+            print(f"INFO: Position size capped for {symbol}. Original calc: {original_calculated_pos_size_usdt:.2f} USDT, Capped to: {position_size_usdt_notional:.2f} USDT.")
+        
+        calculated_qty_asset = round(position_size_usdt_notional / price, qty_precision)
+        if calculated_qty_asset <= 0:
+            print(f"Warning: Calculated quantity is {calculated_qty_asset} for {symbol}. Aborting order.")
             return
 
-        print(f"Order Details ({symbol}): AvailableBal={account_balance:.2f}, RiskCap={capital_to_risk_usdt:.2f} (using {current_account_risk*100:.2f}% risk), SL_Dist_for_Sizing={sl_for_sizing*100:.2f}%, PosSizeUSD={position_size_usdt:.2f}, Qty={calculated_qty_asset}")
+        print(f"Order Details ({symbol}): SL/TP Mode='{SL_TP_MODE}', Bal={account_balance:.2f}, RiskCap=${capital_to_risk_usdt:.2f}, SL_Sizing%={sl_for_sizing_percentage*100:.2f}%, NotionalPosUSD={position_size_usdt_notional:.2f}, Qty={calculated_qty_asset}")
 
         sl_actual, tp_actual = None, None
 
-        if strategy_sl is not None and strategy_tp is not None:
+        if SL_TP_MODE == "Fixed PnL":
+            if TP_PNL_AMOUNT <= 0: # TP PnL must also be positive
+                print(f"Warning: TP PnL Amount ($ {TP_PNL_AMOUNT}) must be positive for 'Fixed PnL' mode. Aborting order for {symbol}.")
+                return
+            if calculated_qty_asset == 0: # Should have been caught earlier, but as a safeguard
+                print(f"Error: Calculated quantity is zero, cannot determine PnL-based SL/TP for {symbol}. Aborting.")
+                return
+
+            if side == 'buy':
+                sl_actual = round(price - (SL_PNL_AMOUNT / calculated_qty_asset), price_precision)
+                tp_actual = round(price + (TP_PNL_AMOUNT / calculated_qty_asset), price_precision)
+            elif side == 'sell':
+                sl_actual = round(price + (SL_PNL_AMOUNT / calculated_qty_asset), price_precision)
+                tp_actual = round(price - (TP_PNL_AMOUNT / calculated_qty_asset), price_precision)
+            print(f"Using Fixed PnL SL: {sl_actual}, TP: {tp_actual} for {symbol} {side} (Qty: {calculated_qty_asset})")
+
+        elif SL_TP_MODE == "ATR/Dynamic" and strategy_sl is not None and strategy_tp is not None:
             sl_actual = strategy_sl
             tp_actual = strategy_tp
-            print(f"Using strategy-defined SL: {sl_actual}, TP: {tp_actual} for {symbol} {side}")
-        else:
-            print(f"DEBUG: Calculating percentage-based SL/TP for {symbol} {side}: price={price}, SL_PERCENT={SL_PERCENT}, TP_PERCENT={TP_PERCENT}, price_precision={price_precision}")
+            print(f"Using ATR/Dynamic (strategy-defined) SL: {sl_actual}, TP: {tp_actual} for {symbol} {side}")
+        
+        else: # Percentage Mode (or fallback for ATR/Dynamic if strategy_sl/tp not provided)
+            if SL_TP_MODE != "Percentage":
+                print(f"INFO: SL_TP_MODE is '{SL_TP_MODE}', but falling back to Percentage SL/TP calculation as other conditions not met.")
             if side == 'buy':
                 sl_actual = round(price - price * SL_PERCENT, price_precision)
                 tp_actual = round(price + price * TP_PERCENT, price_precision)
-                print(f"DEBUG BUY: sl_actual={sl_actual}, tp_actual={tp_actual}")
-                if sl_actual is None:
-                    print(f"ERROR: sl_actual became None after round() for {symbol} {side}. Inputs: price={price}, SL_PERCENT={SL_PERCENT}, precision={price_precision}")
-                if tp_actual is None:
-                    print(f"ERROR: tp_actual became None after round() for {symbol} {side}. Inputs: price={price}, TP_PERCENT={TP_PERCENT}, precision={price_precision}")
             elif side == 'sell':
                 sl_actual = round(price + price * SL_PERCENT, price_precision)
                 tp_actual = round(price - price * TP_PERCENT, price_precision)
-                print(f"DEBUG SELL: sl_actual={sl_actual}, tp_actual={tp_actual}")
-                if sl_actual is None:
-                    print(f"ERROR: sl_actual became None after round() for {symbol} {side}. Inputs: price={price}, SL_PERCENT={SL_PERCENT}, precision={price_precision}")
-                if tp_actual is None:
-                    print(f"ERROR: tp_actual became None after round() for {symbol} {side}. Inputs: price={price}, TP_PERCENT={TP_PERCENT}, precision={price_precision}")
-            print(f"Using percentage-based SL: {sl_actual} (from {SL_PERCENT*100}%), TP: {tp_actual} (from {TP_PERCENT*100}%) for {symbol} {side}")
+            print(f"Using Percentage-based SL: {sl_actual} (from {SL_PERCENT*100}%), TP: {tp_actual} (from {TP_PERCENT*100}%) for {symbol} {side}")
 
-        if sl_actual is None or tp_actual is None :
-            print(f"Error: SL or TP price could not be determined for {symbol} {side}. Aborting order.")
+        if sl_actual is None or tp_actual is None:
+            print(f"Error: SL or TP price could not be determined for {symbol} {side} with mode {SL_TP_MODE}. Aborting order.")
             return
+        
+        # Final validation of SL/TP prices (moved down to apply to all modes)
 
         # Validate that SL and TP are not impossible (e.g. SL same as entry for a buy)
         if side == 'buy':
@@ -3543,9 +3756,39 @@ def run_bot_logic():
             widget.config(state=tk.NORMAL)
 
 def apply_settings():
-    global ACCOUNT_RISK_PERCENT, TP_PERCENT, SL_PERCENT, leverage, qty_concurrent_positions, LOCAL_HIGH_LOW_LOOKBACK_PERIOD, margin_type_setting, TARGET_SYMBOLS, ACTIVE_STRATEGY_ID # 'margin_type_setting' is for margin type
+    global ACCOUNT_RISK_PERCENT, TP_PERCENT, SL_PERCENT, leverage, qty_concurrent_positions, LOCAL_HIGH_LOW_LOOKBACK_PERIOD, margin_type_setting, TARGET_SYMBOLS, ACTIVE_STRATEGY_ID
+    # Add new globals for PnL SL/TP settings
+    global SL_TP_MODE, SL_PNL_AMOUNT, TP_PNL_AMOUNT 
+    # And their corresponding tk StringVars
+    global sl_tp_mode_var, sl_pnl_amount_var, tp_pnl_amount_var
 
     try:
+        # SL/TP Mode
+        selected_mode = sl_tp_mode_var.get()
+        if selected_mode not in ["Percentage", "ATR/Dynamic", "Fixed PnL"]:
+            messagebox.showerror("Settings Error", "Invalid SL/TP Mode selected.")
+            return False
+        SL_TP_MODE = selected_mode
+
+        # PnL Amounts (only validate if mode is Fixed PnL, but read them anyway)
+        try:
+            sl_pnl = float(sl_pnl_amount_var.get())
+            tp_pnl = float(tp_pnl_amount_var.get())
+            if SL_TP_MODE == "Fixed PnL":
+                if not (sl_pnl > 0 and tp_pnl > 0):
+                    messagebox.showerror("Settings Error", "For 'Fixed PnL' mode, SL and TP PnL amounts must be positive values.")
+                    return False
+            SL_PNL_AMOUNT = sl_pnl
+            TP_PNL_AMOUNT = tp_pnl
+        except ValueError:
+            if SL_TP_MODE == "Fixed PnL": # Only critical if this mode is selected
+                messagebox.showerror("Settings Error", "Invalid number format for SL/TP PnL Amounts.")
+                return False
+            # If not Fixed PnL mode, we can ignore non-float values for PnL amounts for now, or default them
+            SL_PNL_AMOUNT = 0.0 # Default if not applicable or invalid and mode is not PnL
+            TP_PNL_AMOUNT = 0.0 # Default if not applicable or invalid and mode is not PnL
+
+
         # Strategy Selection
         selected_id = selected_strategy_var.get()
         if selected_id in STRATEGIES:
@@ -3615,12 +3858,17 @@ def apply_settings():
              messagebox.showerror("Settings Error", "Invalid Margin Type selected.")
              return False
 
-        print(f"Applied settings: Strategy='{STRATEGIES[ACTIVE_STRATEGY_ID]}', Risk={ACCOUNT_RISK_PERCENT}, TP={TP_PERCENT}, SL={SL_PERCENT}, Lev={leverage}, MaxPos={qty_concurrent_positions}, Lookback={LOCAL_HIGH_LOW_LOOKBACK_PERIOD}, Margin={margin_type_setting}, Symbols={TARGET_SYMBOLS}")
+        print(f"Applied settings: Strategy='{STRATEGIES[ACTIVE_STRATEGY_ID]}', Risk={ACCOUNT_RISK_PERCENT*100:.2f}%, SL/TP Mode='{SL_TP_MODE}'")
+        if SL_TP_MODE == "Percentage":
+            print(f"  SL={SL_PERCENT*100:.2f}%, TP={TP_PERCENT*100:.2f}%")
+        elif SL_TP_MODE == "Fixed PnL":
+            print(f"  SL PnL=${SL_PNL_AMOUNT:.2f}, TP PnL=${TP_PNL_AMOUNT:.2f}")
+        print(f"  Lev={leverage}, MaxPos={qty_concurrent_positions}, Lookback={LOCAL_HIGH_LOW_LOOKBACK_PERIOD}, Margin={margin_type_setting}, Symbols={TARGET_SYMBOLS}")
         messagebox.showinfo("Settings", "Settings applied successfully!")
         return True
 
-    except ValueError as ve:
-        messagebox.showerror("Settings Error", f"Invalid input. Please ensure all parameters are numbers. Error: {ve}")
+    except ValueError as ve: # This will catch float/int conversion errors for non-PnL fields
+        messagebox.showerror("Settings Error", f"Invalid input for non-PnL parameters. Please ensure they are numbers. Error: {ve}")
         return False
     except Exception as e:
         messagebox.showerror("Settings Error", f"An unexpected error occurred while applying settings: {e}")
@@ -3730,8 +3978,14 @@ if __name__ == "__main__":
     backtest_symbol_var = tk.StringVar(value="XRPUSDT")
     backtest_timeframe_var = tk.StringVar(value="5m")
     backtest_interval_var = tk.StringVar(value="30")
-    backtest_tp_var = tk.StringVar(value="3.0")
-    backtest_sl_var = tk.StringVar(value="2.0")
+    # SL/TP Percentage Vars for Backtesting (still needed for "Percentage" mode)
+    backtest_tp_var = tk.StringVar(value="3.0") # Represents percentage if mode is Percentage
+    backtest_sl_var = tk.StringVar(value="2.0") # Represents percentage if mode is Percentage
+    # New PnL and Mode Vars for Backtesting
+    backtest_sl_pnl_amount_var = tk.StringVar(value="10") # Default $10 SL PnL
+    backtest_tp_pnl_amount_var = tk.StringVar(value="20") # Default $20 TP PnL
+    backtest_sl_tp_mode_var = tk.StringVar(value="ATR/Dynamic") # Default mode
+
     backtest_selected_strategy_var = tk.StringVar()
 
 
@@ -3745,65 +3999,85 @@ if __name__ == "__main__":
     params_input_frame = ttk.LabelFrame(controls_frame, text="Trading Parameters")
     params_input_frame.pack(fill="x", padx=5, pady=5)
 
-    # ACCOUNT_RISK_PERCENT
+    # Row 0: Account Risk %, SL/TP Mode
     ttk.Label(params_input_frame, text="Account Risk %:").grid(row=0, column=0, padx=2, pady=2, sticky='w')
     account_risk_percent_var = tk.StringVar(value=str(ACCOUNT_RISK_PERCENT * 100))
     account_risk_percent_entry = ttk.Entry(params_input_frame, textvariable=account_risk_percent_var, width=10)
     account_risk_percent_entry.grid(row=0, column=1, padx=2, pady=2, sticky='w')
 
-    # TP_PERCENT
-    ttk.Label(params_input_frame, text="Take Profit %:").grid(row=0, column=2, padx=2, pady=2, sticky='w') # Next column
-    tp_percent_var = tk.StringVar(value=str(TP_PERCENT * 100))
-    tp_percent_entry = ttk.Entry(params_input_frame, textvariable=tp_percent_var, width=10)
-    tp_percent_entry.grid(row=0, column=3, padx=2, pady=2, sticky='w')
+    ttk.Label(params_input_frame, text="SL/TP Mode:").grid(row=0, column=2, padx=2, pady=2, sticky='w')
+    sl_tp_modes = ["Percentage", "ATR/Dynamic", "Fixed PnL"]
+    sl_tp_mode_var = tk.StringVar(value=sl_tp_modes[1]) # Default to ATR/Dynamic
+    sl_tp_mode_combobox = ttk.Combobox(params_input_frame, textvariable=sl_tp_mode_var, values=sl_tp_modes, width=12, state="readonly")
+    sl_tp_mode_combobox.grid(row=0, column=3, padx=2, pady=2, sticky='w')
 
-    # SL_PERCENT
+    # Row 1: SL Percent, TP Percent (for Percentage mode)
     ttk.Label(params_input_frame, text="Stop Loss %:").grid(row=1, column=0, padx=2, pady=2, sticky='w')
     sl_percent_var = tk.StringVar(value=str(SL_PERCENT * 100))
     sl_percent_entry = ttk.Entry(params_input_frame, textvariable=sl_percent_var, width=10)
     sl_percent_entry.grid(row=1, column=1, padx=2, pady=2, sticky='w')
 
-    # leverage
-    ttk.Label(params_input_frame, text="Leverage:").grid(row=1, column=2, padx=2, pady=2, sticky='w') # Next column
+    ttk.Label(params_input_frame, text="Take Profit %:").grid(row=1, column=2, padx=2, pady=2, sticky='w')
+    tp_percent_var = tk.StringVar(value=str(TP_PERCENT * 100))
+    tp_percent_entry = ttk.Entry(params_input_frame, textvariable=tp_percent_var, width=10)
+    tp_percent_entry.grid(row=1, column=3, padx=2, pady=2, sticky='w')
+
+    # Row 2: SL PnL Amount ($), TP PnL Amount ($) (for Fixed PnL mode)
+    ttk.Label(params_input_frame, text="SL PnL Amount ($):").grid(row=2, column=0, padx=2, pady=2, sticky='w')
+    sl_pnl_amount_var = tk.StringVar(value="10") # Default $10
+    sl_pnl_amount_entry = ttk.Entry(params_input_frame, textvariable=sl_pnl_amount_var, width=10)
+    sl_pnl_amount_entry.grid(row=2, column=1, padx=2, pady=2, sticky='w')
+
+    ttk.Label(params_input_frame, text="TP PnL Amount ($):").grid(row=2, column=2, padx=2, pady=2, sticky='w')
+    tp_pnl_amount_var = tk.StringVar(value="20") # Default $20
+    tp_pnl_amount_entry = ttk.Entry(params_input_frame, textvariable=tp_pnl_amount_var, width=10)
+    tp_pnl_amount_entry.grid(row=2, column=3, padx=2, pady=2, sticky='w')
+    
+    # Row 3: Leverage, Max Open Pos
+    ttk.Label(params_input_frame, text="Leverage:").grid(row=3, column=0, padx=2, pady=2, sticky='w')
     leverage_var = tk.StringVar(value=str(leverage))
     leverage_entry = ttk.Entry(params_input_frame, textvariable=leverage_var, width=10)
-    leverage_entry.grid(row=1, column=3, padx=2, pady=2, sticky='w')
+    leverage_entry.grid(row=3, column=1, padx=2, pady=2, sticky='w')
 
-    # qty_concurrent_positions
-    ttk.Label(params_input_frame, text="Max Open Pos:").grid(row=2, column=0, padx=2, pady=2, sticky='w')
+    ttk.Label(params_input_frame, text="Max Open Pos:").grid(row=3, column=2, padx=2, pady=2, sticky='w')
     qty_concurrent_positions_var = tk.StringVar(value=str(qty_concurrent_positions))
     qty_concurrent_positions_entry = ttk.Entry(params_input_frame, textvariable=qty_concurrent_positions_var, width=10)
-    qty_concurrent_positions_entry.grid(row=2, column=1, padx=2, pady=2, sticky='w')
+    qty_concurrent_positions_entry.grid(row=3, column=3, padx=2, pady=2, sticky='w')
 
-    # LOCAL_HIGH_LOW_LOOKBACK_PERIOD
-    ttk.Label(params_input_frame, text="Lookback (Breakout):").grid(row=2, column=2, padx=2, pady=2, sticky='w') # Next column
+    # Row 4: Lookback, Margin Type
+    ttk.Label(params_input_frame, text="Lookback (Breakout):").grid(row=4, column=0, padx=2, pady=2, sticky='w')
     local_high_low_lookback_var = tk.StringVar(value=str(LOCAL_HIGH_LOW_LOOKBACK_PERIOD))
     local_high_low_lookback_entry = ttk.Entry(params_input_frame, textvariable=local_high_low_lookback_var, width=10)
-    local_high_low_lookback_entry.grid(row=2, column=3, padx=2, pady=2, sticky='w')
+    local_high_low_lookback_entry.grid(row=4, column=1, padx=2, pady=2, sticky='w')
 
-    # Margin Type
-    ttk.Label(params_input_frame, text="Margin Type:").grid(row=3, column=0, padx=2, pady=2, sticky='w')
-    margin_type_var = tk.StringVar(value=margin_type_setting) # Initialize with global 'margin_type_setting'
-    margin_type_isolated_radio = ttk.Radiobutton(params_input_frame, text="ISOLATED", variable=margin_type_var, value="ISOLATED")
-    margin_type_isolated_radio.grid(row=3, column=1, padx=2, pady=2, sticky='w')
-    margin_type_cross_radio = ttk.Radiobutton(params_input_frame, text="CROSS", variable=margin_type_var, value="CROSS")
-    margin_type_cross_radio.grid(row=3, column=2, padx=2, pady=2, sticky='w')
+    ttk.Label(params_input_frame, text="Margin Type:").grid(row=4, column=2, padx=2, pady=2, sticky='w')
+    margin_type_var = tk.StringVar(value=margin_type_setting)
+    margin_type_frame = ttk.Frame(params_input_frame) # Frame to hold radio buttons side-by-side
+    margin_type_frame.grid(row=4, column=3, padx=2, pady=2, sticky='w')
+    margin_type_isolated_radio = ttk.Radiobutton(margin_type_frame, text="ISOLATED", variable=margin_type_var, value="ISOLATED")
+    margin_type_isolated_radio.pack(side=tk.LEFT)
+    margin_type_cross_radio = ttk.Radiobutton(margin_type_frame, text="CROSS", variable=margin_type_var, value="CROSS")
+    margin_type_cross_radio.pack(side=tk.LEFT, padx=(5,0))
 
-    # Target Symbols Entry
-    ttk.Label(params_input_frame, text="Target Symbols (CSV):").grid(row=4, column=0, padx=2, pady=2, sticky='w')
+
+    # Row 5: Target Symbols Entry
+    ttk.Label(params_input_frame, text="Target Symbols (CSV):").grid(row=5, column=0, padx=2, pady=2, sticky='w')
     target_symbols_var = tk.StringVar(value=",".join(TARGET_SYMBOLS))
-    target_symbols_entry = ttk.Entry(params_input_frame, textvariable=target_symbols_var, width=40) # Wider entry
-    target_symbols_entry.grid(row=4, column=1, columnspan=3, padx=2, pady=2, sticky='we') # Span across 3 columns
+    target_symbols_entry = ttk.Entry(params_input_frame, textvariable=target_symbols_var, width=40)
+    target_symbols_entry.grid(row=5, column=1, columnspan=3, padx=2, pady=2, sticky='we')
 
     # Populate params_widgets list
     params_widgets = [
-        account_risk_percent_entry, tp_percent_entry, sl_percent_entry,
-        leverage_entry, qty_concurrent_positions_entry, local_high_low_lookback_entry,
-        margin_type_isolated_radio, margin_type_cross_radio, target_symbols_entry
+        account_risk_percent_entry, sl_tp_mode_combobox,
+        sl_percent_entry, tp_percent_entry,
+        sl_pnl_amount_entry, tp_pnl_amount_entry,
+        leverage_entry, qty_concurrent_positions_entry,
+        local_high_low_lookback_entry, margin_type_isolated_radio, margin_type_cross_radio,
+        target_symbols_entry
     ]
-    # Configure column weights for params_input_frame to make target_symbols_entry expand
-    params_input_frame.columnconfigure(1, weight=1)
-    params_input_frame.columnconfigure(3, weight=1)
+    # Configure column weights for params_input_frame
+    params_input_frame.columnconfigure(1, weight=1) # Give weight to entry columns
+    params_input_frame.columnconfigure(3, weight=1) # Give weight to entry columns
 
     # Strategy Selection Frame
     strategy_frame = ttk.LabelFrame(controls_frame, text="Strategy Selection")
@@ -3873,6 +4147,7 @@ if __name__ == "__main__":
     backtest_params_grid.pack(fill="x", padx=5, pady=5)
 
     # Child UI elements of backtest_params_grid are now defined here:
+    # Row 0: Symbol, Timeframe
     ttk.Label(backtest_params_grid, text="Symbol:").grid(row=0, column=0, padx=2, pady=2, sticky='w')
     backtest_symbol_entry = ttk.Entry(backtest_params_grid, textvariable=backtest_symbol_var, width=12)
     backtest_symbol_entry.grid(row=0, column=1, padx=2, pady=2, sticky='w')
@@ -3881,22 +4156,39 @@ if __name__ == "__main__":
     backtest_timeframe_entry = ttk.Entry(backtest_params_grid, textvariable=backtest_timeframe_var, width=7)
     backtest_timeframe_entry.grid(row=0, column=3, padx=2, pady=2, sticky='w')
 
+    # Row 1: Interval (days), SL/TP Mode
     ttk.Label(backtest_params_grid, text="Interval (days):").grid(row=1, column=0, padx=2, pady=2, sticky='w')
     backtest_interval_entry = ttk.Entry(backtest_params_grid, textvariable=backtest_interval_var, width=7)
     backtest_interval_entry.grid(row=1, column=1, padx=2, pady=2, sticky='w')
     
-    ttk.Label(backtest_params_grid, text="Take Profit %:").grid(row=1, column=2, padx=2, pady=2, sticky='w')
-    backtest_tp_entry = ttk.Entry(backtest_params_grid, textvariable=backtest_tp_var, width=7)
-    backtest_tp_entry.grid(row=1, column=3, padx=2, pady=2, sticky='w')
+    ttk.Label(backtest_params_grid, text="SL/TP Mode:").grid(row=1, column=2, padx=2, pady=2, sticky='w')
+    # backtest_sl_tp_modes is same as sl_tp_modes defined earlier
+    backtest_sl_tp_mode_combobox = ttk.Combobox(backtest_params_grid, textvariable=backtest_sl_tp_mode_var, values=sl_tp_modes, width=12, state="readonly")
+    backtest_sl_tp_mode_combobox.grid(row=1, column=3, padx=2, pady=2, sticky='w')
 
+    # Row 2: SL Percent, TP Percent
     ttk.Label(backtest_params_grid, text="Stop Loss %:").grid(row=2, column=0, padx=2, pady=2, sticky='w')
-    backtest_sl_entry = ttk.Entry(backtest_params_grid, textvariable=backtest_sl_var, width=7)
+    backtest_sl_entry = ttk.Entry(backtest_params_grid, textvariable=backtest_sl_var, width=7) # SL %
     backtest_sl_entry.grid(row=2, column=1, padx=2, pady=2, sticky='w')
 
-    ttk.Label(backtest_params_grid, text="Backtest Strategy:").grid(row=2, column=2, padx=2, pady=2, sticky='w')
-    backtest_strategy_combobox = ttk.Combobox(backtest_params_grid, textvariable=backtest_selected_strategy_var, values=list(STRATEGIES.values()), width=25)
+    ttk.Label(backtest_params_grid, text="Take Profit %:").grid(row=2, column=2, padx=2, pady=2, sticky='w')
+    backtest_tp_entry = ttk.Entry(backtest_params_grid, textvariable=backtest_tp_var, width=7) # TP %
+    backtest_tp_entry.grid(row=2, column=3, padx=2, pady=2, sticky='w')
+
+    # Row 3: SL PnL Amount, TP PnL Amount
+    ttk.Label(backtest_params_grid, text="SL PnL Amt ($):").grid(row=3, column=0, padx=2, pady=2, sticky='w')
+    backtest_sl_pnl_amount_entry = ttk.Entry(backtest_params_grid, textvariable=backtest_sl_pnl_amount_var, width=7)
+    backtest_sl_pnl_amount_entry.grid(row=3, column=1, padx=2, pady=2, sticky='w')
+
+    ttk.Label(backtest_params_grid, text="TP PnL Amt ($):").grid(row=3, column=2, padx=2, pady=2, sticky='w')
+    backtest_tp_pnl_amount_entry = ttk.Entry(backtest_params_grid, textvariable=backtest_tp_pnl_amount_var, width=7)
+    backtest_tp_pnl_amount_entry.grid(row=3, column=3, padx=2, pady=2, sticky='w')
+    
+    # Row 4: Backtest Strategy
+    ttk.Label(backtest_params_grid, text="Backtest Strategy:").grid(row=4, column=0, padx=2, pady=2, sticky='w')
+    backtest_strategy_combobox = ttk.Combobox(backtest_params_grid, textvariable=backtest_selected_strategy_var, values=list(STRATEGIES.values()), width=25, state="readonly")
     if STRATEGIES: backtest_strategy_combobox.current(0) # Set default selection
-    backtest_strategy_combobox.grid(row=2, column=3, padx=2, pady=2, sticky='w')
+    backtest_strategy_combobox.grid(row=4, column=1, columnspan=3, padx=2, pady=2, sticky='w')
     
     # backtest_run_button is defined after its parent backtesting_frame is fully configured.
     # It's not a child of backtest_params_grid, so its definition remains separate but after backtesting_frame.
