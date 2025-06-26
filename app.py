@@ -356,13 +356,30 @@ class BacktestStrategyWrapper(Strategy):
             self.volume_ma10_s0 = self.I(lambda series, window: pd.Series(series).rolling(window).mean(), self.data.Volume, 10, name='VolumeMA10_S0', overlay=False) 
             self.st_s0 = self.I(supertrend_numerical_bt, self.data.High, self.data.Low, self.data.Close, self.ST_ATR_PERIOD_S0, self.ST_MULTIPLIER_S0, name='Supertrend_S0', overlay=True) 
             self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, self.ATR_PERIOD, name='ATR_dynSLTP_S0')
+        elif self.current_strategy_id == 6: # Market Structure S/D Strategy
+            print(f"DEBUG BacktestStrategyWrapper.init: Initializing for Strategy ID 6 (Market Structure S/D)")
+            # For backtesting, pre-calculate swing points and S/D zones on the entire dataset once.
+            # Market structure itself will be evaluated dynamically in next() or based on these points.
+            try:
+                self.bt_swing_highs_bool, self.bt_swing_lows_bool = find_swing_points(self.data.df, order=5)
+                # S/D zones also depend on the whole dataset for accurate historical identification
+                self.bt_sd_zones = identify_supply_demand_zones(self.data.df, atr_period=14, lookback_candles=10) 
+                print(f"DEBUG BT S6: Pre-calculated {len(self.bt_sd_zones)} S/D zones.")
+                # ATR is useful for some dynamic calculations or fallbacks, ensure it's available.
+                self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, self.ATR_PERIOD, name='ATR_S6')
+            except Exception as e:
+                print(f"ERROR BT S6 init: Failed to pre-calculate swings or S/D zones: {e}")
+                # Potentially raise this or handle it to prevent backtest from running with faulty setup
+                self.bt_swing_highs_bool = pd.Series([False]*len(self.data.df), index=self.data.df.index)
+                self.bt_swing_lows_bool = pd.Series([False]*len(self.data.df), index=self.data.df.index)
+                self.bt_sd_zones = []
+                self.atr = None # Invalidate ATR if setup fails critically
         else: # Default for any other strategy ID, ensure ATR is available
             print(f"DEBUG BacktestStrategyWrapper.init: Strategy ID {self.current_strategy_id} - Defaulting to RSI and ATR.")
             self.rsi_period_val = getattr(self, 'rsi_period', 14)
             self.rsi = self.I(rsi_bt, self.data.Close, self.rsi_period_val, name=f'RSI_default_{self.current_strategy_id}')
             self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, self.ATR_PERIOD, name=f'ATR_default_{self.current_strategy_id}')
             print(f"DEBUG BacktestStrategyWrapper.init: Defaulted ATR indicator for strategy ID {self.current_strategy_id}.")
-
 
     def next(self):
         # print(f"DEBUG BacktestStrategyWrapper.next: Executing for strategy ID {self.current_strategy_id}, Mode: {self.sl_tp_mode_bt}") # DEBUG
@@ -697,6 +714,96 @@ class BacktestStrategyWrapper(Strategy):
             # else:
                 # print(f"{log_prefix_bt_next} S5: No trade signal this bar.")
         
+        elif self.current_strategy_id == 6: # Market Structure S/D Strategy
+            if self.position:
+                # print(f"{log_prefix_bt_next} S6: Already in position. Skipping.")
+                return
+
+            if not hasattr(self, 'bt_swing_highs_bool') or not hasattr(self, 'bt_sd_zones') or self.atr is None:
+                # print(f"{log_prefix_bt_next} S6: Required attributes (swings, zones, atr) not initialized. Skipping.")
+                return
+            
+            current_data_slice_df = self.data.df.iloc[:len(self.data.Close)] # Data up to current bar
+            if len(current_data_slice_df) < 20: # Min length for market structure, can be tuned
+                # print(f"{log_prefix_bt_next} S6: Insufficient data for S6 logic ({len(current_data_slice_df)} bars).")
+                return
+
+            # Filter pre-calculated swing points for the current data slice
+            current_swing_highs = self.bt_swing_highs_bool[self.bt_swing_highs_bool.index.isin(current_data_slice_df.index)]
+            current_swing_lows = self.bt_swing_lows_bool[self.bt_swing_lows_bool.index.isin(current_data_slice_df.index)]
+            
+            try:
+                market_structure = identify_market_structure(current_data_slice_df, current_swing_highs, current_swing_lows)
+            except Exception as e_ms:
+                # print(f"{log_prefix_bt_next} S6: Error in identify_market_structure: {e_ms}")
+                return
+
+            # Filter S/D zones that are historical relative to the current bar
+            # self.data.index[-1] is the timestamp of the current candle's close
+            current_bar_timestamp = self.data.index[-1]
+            historical_sd_zones = [
+                zone for zone in self.bt_sd_zones 
+                if zone['timestamp_end'] < current_bar_timestamp 
+            ]
+            
+            if not historical_sd_zones:
+                # print(f"{log_prefix_bt_next} S6: No historical S/D zones found relative to current bar.")
+                return
+
+            potential_trade_s6 = None
+            entry_price_s6 = price # Current closing price as potential entry
+
+            if market_structure['trend_bias'] == 'bullish':
+                demand_zones = [z for z in historical_sd_zones if z['type'] == 'demand']
+                demand_zones.sort(key=lambda z: z['timestamp_end'], reverse=True) # Most recent first
+                if demand_zones:
+                    zone = demand_zones[0]
+                    if zone['price_start'] <= entry_price_s6 <= zone['price_end']: # Price in demand zone
+                        sl_s6_raw = zone['price_start'] - ((zone['price_end'] - zone['price_start']) * 0.10)
+                        sl_s6 = round(sl_s6_raw, self.PRICE_PRECISION_BT)
+                        
+                        tp_s6_raw = market_structure.get('last_valid_high_price') or market_structure.get('current_swing_high_price')
+                        if tp_s6_raw is None: return # No valid TP
+                        tp_s6 = round(tp_s6_raw, self.PRICE_PRECISION_BT)
+
+                        if tp_s6 > entry_price_s6 and sl_s6 < entry_price_s6:
+                            reward = tp_s6 - entry_price_s6
+                            risk = entry_price_s6 - sl_s6
+                            if risk > 0 and (reward / risk) >= 2.5:
+                                potential_trade_s6 = {'signal': 'buy', 'sl': sl_s6, 'tp': tp_s6}
+                            # else: print(f"{log_prefix_bt_next} S6 Bullish: R:R too low or invalid. R={reward}, Risk={risk}")
+                        # else: print(f"{log_prefix_bt_next} S6 Bullish: SL/TP invalid relation to entry. SL={sl_s6}, TP={tp_s6}, Entry={entry_price_s6}")
+            
+            elif market_structure['trend_bias'] == 'bearish':
+                supply_zones = [z for z in historical_sd_zones if z['type'] == 'supply']
+                supply_zones.sort(key=lambda z: z['timestamp_end'], reverse=True)
+                if supply_zones:
+                    zone = supply_zones[0]
+                    if zone['price_start'] <= entry_price_s6 <= zone['price_end']: # Price in supply zone
+                        sl_s6_raw = zone['price_end'] + ((zone['price_end'] - zone['price_start']) * 0.10)
+                        sl_s6 = round(sl_s6_raw, self.PRICE_PRECISION_BT)
+
+                        tp_s6_raw = market_structure.get('last_valid_low_price') or market_structure.get('current_swing_low_price')
+                        if tp_s6_raw is None: return # No valid TP
+                        tp_s6 = round(tp_s6_raw, self.PRICE_PRECISION_BT)
+
+                        if tp_s6 < entry_price_s6 and sl_s6 > entry_price_s6:
+                            reward = entry_price_s6 - tp_s6
+                            risk = sl_s6 - entry_price_s6
+                            if risk > 0 and (reward / risk) >= 2.5:
+                                potential_trade_s6 = {'signal': 'sell', 'sl': sl_s6, 'tp': tp_s6}
+                            # else: print(f"{log_prefix_bt_next} S6 Bearish: R:R too low or invalid. R={reward}, Risk={risk}")
+                        # else: print(f"{log_prefix_bt_next} S6 Bearish: SL/TP invalid relation to entry. SL={sl_s6}, TP={tp_s6}, Entry={entry_price_s6}")
+            
+            if potential_trade_s6:
+                # print(f"{log_prefix_bt_next} S6 Placing Trade: Side={potential_trade_s6['signal']}, Entry={entry_price_s6:.2f}, SL={potential_trade_s6['sl']:.2f}, TP={potential_trade_s6['tp']:.2f}, Size={trade_size_to_use_in_order}")
+                if potential_trade_s6['signal'] == 'buy':
+                    self.buy(sl=potential_trade_s6['sl'], tp=potential_trade_s6['tp'], size=trade_size_to_use_in_order)
+                else: # sell
+                    self.sell(sl=potential_trade_s6['sl'], tp=potential_trade_s6['tp'], size=trade_size_to_use_in_order)
+            # else:
+                # print(f"{log_prefix_bt_next} S6: No valid trade signal this bar.")
+
         # else: # Other strategies not yet updated for this new SL/TP structure
             # print(f"{log_prefix_bt_next} Strategy ID {self.current_strategy_id} not fully updated for new SL/TP modes in next().")
             # Basic RSI logic as a placeholder if other strategies are selected without full logic
@@ -1256,7 +1363,8 @@ STRATEGIES = {
     2: "Bollinger Band Mean-Reversion",
     3: "VWAP Breakout Momentum",
     4: "MACD Divergence + Pivot-Point",
-    5: "New RSI-Based Strategy" # New strategy added
+    5: "New RSI-Based Strategy", # New strategy added
+    6: "Market Structure S/D" # New strategy for market structure and supply/demand
 }
 ACTIVE_STRATEGY_ID = 0 # Default to original
 
@@ -1419,6 +1527,345 @@ def calculate_supertrend_manual(kl_df, atr_period=10, multiplier=1.5):
                 kl_df_temp.loc[idx, 'supertrend_signal'] = 'red' # Continue downtrend
 
     return kl_df_temp['supertrend_signal'].fillna('red')
+
+
+# --- Market Structure and S/D Zone Helper Functions ---
+def find_swing_points(data: pd.DataFrame, order: int = 5) -> tuple[pd.Series, pd.Series]:
+    """
+    Identifies swing highs and lows in the price data.
+    A swing high is a price peak higher than 'order' bars on each side.
+    A swing low is a price trough lower than 'order' bars on each side.
+    
+    Args:
+        data: Pandas DataFrame with 'High' and 'Low' columns.
+        order: Number of bars on each side to check for a peak/trough.
+        
+    Returns:
+        A tuple of two boolean Pandas Series: (is_swing_high, is_swing_low)
+    """
+    if 'High' not in data.columns or 'Low' not in data.columns:
+        raise ValueError("Dataframe must contain 'High' and 'Low' columns.")
+    if not isinstance(order, int) or order <= 0:
+        raise ValueError("'order' must be a positive integer.")
+    if len(data) < (2 * order + 1):
+        # Not enough data to find swings with the given order, return empty/false series
+        false_series = pd.Series([False] * len(data), index=data.index)
+        return false_series, false_series
+
+    # Using scipy.signal.find_peaks
+    try:
+        from scipy.signal import find_peaks
+    except ImportError:
+        raise ImportError("scipy library is required for find_swing_points. Please install it.")
+
+    high_peaks_indices, _ = find_peaks(data['High'], distance=order, width=order) # distance & width can help refine
+    low_peaks_indices, _ = find_peaks(-data['Low'], distance=order, width=order) # Find peaks in negative Lows for troughs
+
+    is_swing_high = pd.Series(False, index=data.index)
+    is_swing_low = pd.Series(False, index=data.index)
+
+    is_swing_high.iloc[high_peaks_indices] = True
+    is_swing_low.iloc[low_peaks_indices] = True
+    
+    # Alternative/Refinement: Manual check if find_peaks is too aggressive or not quite right.
+    # For now, relying on find_peaks with appropriate parameters.
+    # A common manual approach:
+    # is_swing_high = pd.Series(False, index=data.index)
+    # is_swing_low = pd.Series(False, index=data.index)
+    # for i in range(order, len(data) - order):
+    #     is_high = True
+    #     for j in range(1, order + 1):
+    #         if data['High'].iloc[i] <= data['High'].iloc[i-j] or \
+    #            data['High'].iloc[i] <= data['High'].iloc[i+j]:
+    #             is_high = False
+    #             break
+    #     if is_high:
+    #         is_swing_high.iloc[i] = True
+
+    #     is_low = True
+    #     for j in range(1, order + 1):
+    #         if data['Low'].iloc[i] >= data['Low'].iloc[i-j] or \
+    #            data['Low'].iloc[i] >= data['Low'].iloc[i+j]:
+    #             is_low = False
+    #             break
+    #     if is_low:
+    #         is_swing_low.iloc[i] = True
+            
+    return is_swing_high, is_swing_low
+
+
+def identify_market_structure(data: pd.DataFrame, swing_highs_bool: pd.Series, swing_lows_bool: pd.Series) -> dict:
+    """
+    Identifies market structure: trend bias, valid swing highs/lows.
+    
+    Args:
+        data: Pandas DataFrame with 'High', 'Low', 'Close' columns.
+        swing_highs_bool: Boolean series indicating swing high points.
+        swing_lows_bool: Boolean series indicating swing low points.
+        
+    Returns:
+        A dictionary containing market structure information:
+        {
+            'trend_bias': 'bullish'/'bearish'/'ranging',
+            'last_valid_high_price': float or None,
+            'last_valid_low_price': float or None,
+            'current_swing_high_price': float or None,
+            'current_swing_low_price': float or None,
+            'break_of_structure_event': 'bos_high'/'bos_low'/'none' # Indicates if the most recent event was a BoS
+        }
+    """
+    if not all(col in data.columns for col in ['High', 'Low', 'Close']):
+        raise ValueError("Dataframe must contain 'High', 'Low', 'Close' columns.")
+
+    swing_high_prices = data['High'][swing_highs_bool]
+    swing_low_prices = data['Low'][swing_lows_bool]
+
+    # Combine and sort all swing points by time
+    all_swings = []
+    for idx, price in swing_high_prices.items():
+        all_swings.append({'time': idx, 'type': 'high', 'price': price})
+    for idx, price in swing_low_prices.items():
+        all_swings.append({'time': idx, 'type': 'low', 'price': price})
+    
+    all_swings.sort(key=lambda x: x['time'])
+
+    if not all_swings:
+        return {
+            'trend_bias': 'ranging', 'last_valid_high_price': None, 'last_valid_low_price': None,
+            'current_swing_high_price': None, 'current_swing_low_price': None, 'break_of_structure_event': 'none'
+        }
+
+    trend_bias = 'ranging' # Initial assumption
+    last_confirmed_high = None
+    last_confirmed_low = None
+    
+    # These will store the price of the latest confirmed valid swing points
+    last_valid_high_price = None
+    last_valid_low_price = None
+
+    # These track the most recent swing points, regardless of validity for trend change
+    current_swing_high_price = swing_high_prices.iloc[-1] if not swing_high_prices.empty else None
+    current_swing_low_price = swing_low_prices.iloc[-1] if not swing_low_prices.empty else None
+    
+    break_of_structure_event = 'none' # Tracks the most recent BoS event
+
+    # Simplified logic: Iterate through swings to determine current state.
+    # A more robust implementation might need to track sequences of HH/HL or LL/LH.
+    # This version focuses on the "valid swing break" rule.
+
+    # Initialize with the first two swings to establish an initial context if possible
+    if len(all_swings) >= 2:
+        if all_swings[0]['type'] == 'low' and all_swings[1]['type'] == 'high':
+            last_confirmed_low = all_swings[0]
+            last_confirmed_high = all_swings[1]
+            if last_confirmed_high['price'] > last_confirmed_low['price']: # Basic check
+                # Potentially start bullish if high is higher than low.
+                # For trend bias, we need a break. Let's assume ranging until a valid break.
+                 pass # last_valid_low_price = last_confirmed_low['price']
+        elif all_swings[0]['type'] == 'high' and all_swings[1]['type'] == 'low':
+            last_confirmed_high = all_swings[0]
+            last_confirmed_low = all_swings[1]
+            if last_confirmed_low['price'] < last_confirmed_high['price']:
+                # Potentially start bearish.
+                pass # last_valid_high_price = last_confirmed_high['price']
+    elif len(all_swings) == 1: # Only one swing point
+        if all_swings[0]['type'] == 'high': last_confirmed_high = all_swings[0]
+        else: last_confirmed_low = all_swings[0]
+
+
+    # Iterate through swings to establish current state based on breaks
+    # This loop sets the *initial* valid high/low and trend based on historical breaks.
+    temp_last_valid_high = None
+    temp_last_valid_low = None
+    
+    # Pass 1: Establish initial valid swings and trend bias from history
+    # This part needs careful state management.
+    # Let's simplify: the "last_valid_high/low" are the PIVOTAL swings.
+    # An UPTREND is HH and HL. A DOWNTREND is LL and LH.
+    # A swing low becomes "valid" (part of uptrend confirmation) when price breaks the PREVIOUS swing high.
+    # A swing high becomes "valid" (part of downtrend confirmation) when price breaks the PREVIOUS swing low.
+    
+    # The user's rule: "Only switch trend bias when a valid swing is broken."
+    # This means we need to identify the "valid swing" that, if broken, changes the trend.
+    # In an uptrend, the "last valid swing" to watch is the last Higher Low (HL). If broken -> trend change.
+    # In a downtrend, the "last valid swing" to watch is the last Lower High (LH). If broken -> trend change.
+
+    # Simplified approach for current state:
+    # Iterate backwards from the most recent swings to find the last confirmed structure.
+    
+    idx = len(all_swings) - 1
+    # Initialize last_valid_high/low_price from the latest swings if available
+    if current_swing_high_price: temp_last_valid_high = {'price': current_swing_high_price, 'time': swing_high_prices.index[-1]}
+    if current_swing_low_price: temp_last_valid_low = {'price': current_swing_low_price, 'time': swing_low_prices.index[-1]}
+
+    # Backwards iteration to find the most recent structure
+    # This part is complex due to needing to track sequences (HH/HL, LL/LH)
+    # Let's use a more direct approach based on the last few swings
+    
+    # Simplified logic: Find last two highs and last two lows
+    sh_prices = swing_high_prices.sort_index(ascending=False)
+    sl_prices = swing_low_prices.sort_index(ascending=False)
+
+    if len(sh_prices) >= 2 and len(sl_prices) >= 2:
+        # Most recent swings
+        h1 = sh_prices.index[0]; h1_price = sh_prices.iloc[0]
+        h0 = sh_prices.index[1]; h0_price = sh_prices.iloc[1] # Previous high
+        l1 = sl_prices.index[0]; l1_price = sl_prices.iloc[0]
+        l0 = sl_prices.index[1]; l0_price = sl_prices.iloc[1] # Previous low
+
+        # Ensure alternation: h1 > l1 > h0 > l0 (uptrend) or l1 < h1 < l0 < h0 (downtrend)
+        # This checks for a basic sequence.
+        
+        # Uptrend: latest high (h1) is > previous high (h0), AND latest low (l1) is > previous low (l0)
+        # AND the swings are ordered correctly in time (e.g., l0 -> h0 -> l1 -> h1)
+        if h1_price > h0_price and l1_price > l0_price and h1 > l1 and l1 > h0 and h0 > l0 : # Time check
+            trend_bias = 'bullish'
+            last_valid_low_price = l1_price # The last HL is the crucial point for uptrend continuation
+            last_valid_high_price = h1_price # The last HH
+            if data['Close'].iloc[-1] > h0_price and not (data['Close'].iloc[-1] < l1_price): # Confirmed break of h0, and l1 not broken
+                 break_of_structure_event = 'bos_high'
+        # Downtrend: latest low (l1) is < previous low (l0), AND latest high (h1) is < previous high (h0)
+        # AND the swings are ordered correctly in time (e.g., h0 -> l0 -> h1 -> l1)
+        elif l1_price < l0_price and h1_price < h0_price and l1 > h1 and h1 > l0 and l0 > h0: # Time check
+            trend_bias = 'bearish'
+            last_valid_high_price = h1_price # The last LH is crucial
+            last_valid_low_price = l1_price # The last LL
+            if data['Close'].iloc[-1] < l0_price and not (data['Close'].iloc[-1] > h1_price): # Confirmed break of l0, and h1 not broken
+                 break_of_structure_event = 'bos_low'
+        else: # Otherwise ranging or more complex pattern
+            trend_bias = 'ranging'
+            # Attempt to set valid high/low based on latest major swings if ranging
+            if not sh_prices.empty: last_valid_high_price = sh_prices.iloc[0]
+            if not sl_prices.empty: last_valid_low_price = sl_prices.iloc[0]
+
+
+    elif len(sh_prices) >= 1 and len(sl_prices) >= 1: # Only one high and one low identified
+        last_valid_high_price = sh_prices.iloc[0]
+        last_valid_low_price = sl_prices.iloc[0]
+        if sh_prices.index[0] > sl_prices.index[0]: # High is more recent
+            if sh_prices.iloc[0] > sl_prices.iloc[0]: trend_bias = 'bullish' # Tentative if high > low
+        else: # Low is more recent
+            if sl_prices.iloc[0] < sh_prices.iloc[0]: trend_bias = 'bearish' # Tentative if low < high
+    
+    # Final check on BoS based on current price vs last valid points
+    # This simplified logic might not fully capture the "valid swing broken" rule for trend CHANGE,
+    # but helps identify if current price is breaking recent structure.
+    if trend_bias == 'bullish' and last_valid_high_price and data['Close'].iloc[-1] > last_valid_high_price:
+        break_of_structure_event = 'bos_high'
+    elif trend_bias == 'bearish' and last_valid_low_price and data['Close'].iloc[-1] < last_valid_low_price:
+        break_of_structure_event = 'bos_low'
+    
+    # If trend is ranging, use the latest swing high/low as "valid" for S/D context
+    if trend_bias == 'ranging':
+        if not sh_prices.empty: last_valid_high_price = sh_prices.iloc[0]
+        else: last_valid_high_price = data['High'].iloc[-1] # Fallback to current high
+
+        if not sl_prices.empty: last_valid_low_price = sl_prices.iloc[0]
+        else: last_valid_low_price = data['Low'].iloc[-1] # Fallback to current low
+
+
+    # The "valid swing broken" rule for *switching* trend bias is the most complex part.
+    # E.g., in an uptrend (sequence of HH, HL), the trend bias only switches to bearish
+    # if a "valid" HL is broken. A HL is "valid" if it led to a HH.
+    # This simplified version determines current trend based on recent HH/HL or LL/LH patterns
+    # and notes if the most recent swing high/low was broken.
+    # A full state machine tracking valid points for trend change is more involved.
+    # For now, `last_valid_high_price` and `last_valid_low_price` will serve as reference points
+    # for TP targets in the strategy.
+
+    return {
+        'trend_bias': trend_bias,
+        'last_valid_high_price': last_valid_high_price,
+        'last_valid_low_price': last_valid_low_price,
+        'current_swing_high_price': current_swing_high_price, # Latest actual swing high
+        'current_swing_low_price': current_swing_low_price,   # Latest actual swing low
+        'break_of_structure_event': break_of_structure_event
+    }
+
+def identify_supply_demand_zones(data: pd.DataFrame, atr_period: int = 14, lookback_candles: int = 10, consolidation_atr_factor: float = 0.7, sharp_move_atr_factor: float = 1.5) -> list[dict]:
+    """
+    Identifies potential Supply and Demand zones.
+    Looks for consolidation (low volatility) followed by a sharp price move.
+
+    Args:
+        data: Pandas DataFrame with 'High', 'Low', 'Close', 'Open' columns.
+        atr_period: Period for ATR calculation.
+        lookback_candles: Number of candles to check for consolidation before a sharp move.
+        consolidation_atr_factor: A factor of ATR. If avg range of 'lookback_candles' < this*ATR, it's consolidation.
+        sharp_move_atr_factor: A factor of ATR. If a candle's range > this*ATR, it's a sharp move.
+
+    Returns:
+        A list of dictionaries, each representing a zone:
+        {'type': 'demand'/'supply', 'price_start': float, 'price_end': float, 
+         'timestamp_start': pd.Timestamp, 'timestamp_end': pd.Timestamp, 'trigger_candle_timestamp': pd.Timestamp}
+    """
+    if not all(col in data.columns for col in ['High', 'Low', 'Close', 'Open']):
+        raise ValueError("Dataframe must contain 'High', 'Low', 'Close', 'Open' columns.")
+    if len(data) < atr_period + lookback_candles + 1:
+        return [] # Not enough data
+
+    try:
+        from talib import ATR as talib_ATR # Using talib for ATR if available
+        atr = talib_ATR(data['High'], data['Low'], data['Close'], timeperiod=atr_period)
+    except ImportError:
+        # Fallback to pandas_ta or manual calculation if TA-Lib not available
+        try:
+            if 'pta' not in globals(): import pandas_ta as pta # Ensure pta is imported
+            atr_series_pta = pta.atr(high=data['High'], low=data['Low'], close=data['Close'], length=atr_period)
+            if atr_series_pta is None: raise ValueError("pandas_ta.atr returned None")
+            atr = atr_series_pta
+        except Exception as e_pta:
+            print(f"TA-Lib not found, pandas_ta ATR failed ({e_pta}). S/D zones might be less accurate. Manual ATR fallback not implemented here for brevity.")
+            return []
+
+
+    zones = []
+    # Iterate from (atr_period + lookback_candles) up to the second to last candle (to have a candle after the zone)
+    for i in range(atr_period + lookback_candles, len(data) - 1):
+        current_atr = atr.iloc[i-1] # ATR of the candle just before the potential sharp move
+        if pd.isna(current_atr) or current_atr == 0:
+            continue
+
+        # 1. Check for consolidation in the 'lookback_candles' period BEFORE the current candle 'i'
+        consolidation_data = data.iloc[i - lookback_candles : i]
+        avg_candle_range_consolidation = (consolidation_data['High'] - consolidation_data['Low']).mean()
+
+        if avg_candle_range_consolidation < (consolidation_atr_factor * current_atr):
+            # Consolidation detected. Now check for a sharp move at candle 'i'
+            sharp_move_candle = data.iloc[i]
+            sharp_move_range = sharp_move_candle['High'] - sharp_move_candle['Low']
+            sharp_move_body = abs(sharp_move_candle['Close'] - sharp_move_candle['Open'])
+
+            if sharp_move_range > (sharp_move_atr_factor * current_atr) or \
+               sharp_move_body > (sharp_move_atr_factor * current_atr * 0.7): # Consider body too
+
+                zone_start_price = consolidation_data['Low'].min()
+                zone_end_price = consolidation_data['High'].max()
+                zone_type = None
+
+                if sharp_move_candle['Close'] > sharp_move_candle['Open']: # Bullish sharp move
+                    zone_type = 'demand'
+                    # For demand, the zone is the consolidation area prices *before* the up-move.
+                    # Prices: low of consolidation to high of consolidation.
+                elif sharp_move_candle['Close'] < sharp_move_candle['Open']: # Bearish sharp move
+                    zone_type = 'supply'
+                    # For supply, similar concept.
+                
+                if zone_type:
+                    # Ensure zone has some height
+                    if zone_end_price > zone_start_price:
+                        zones.append({
+                            'type': zone_type,
+                            'price_start': zone_start_price, # Bottom of the zone
+                            'price_end': zone_end_price,     # Top of the zone
+                            'timestamp_start': consolidation_data.index[0],
+                            'timestamp_end': consolidation_data.index[-1],
+                            'trigger_candle_timestamp': sharp_move_candle.name 
+                        })
+    
+    # Optional: Merge overlapping zones of the same type
+    # This is a simplified version and does not merge.
+    return zones
 
 
 def calculate_supertrend_pta(kl_df, atr_period=10, multiplier=1.5):
@@ -2571,6 +3018,201 @@ def strategy_rsi_enhanced(symbol):
             if isinstance(base_return['all_conditions_status'][key_cond], bool):
                  base_return['all_conditions_status'][key_cond] = False
     
+    return base_return
+
+# --- Strategy 6: Market Structure S/D ---
+def strategy_market_structure_sd(symbol: str) -> dict:
+    """
+    Strategy based on Market Structure (HH, HL, LL, LH), Supply/Demand zones,
+    and a minimum Risk-Reward ratio of 2.5:1.
+    """
+    base_return = {
+        'signal': 'none', # 'up', 'down', or 'none'
+        'conditions_met_count': 0, 
+        'conditions_to_start_wait_threshold': 1, 
+        'conditions_for_full_signal_threshold': 1, 
+        'all_conditions_status': { 
+            'trend_bias': 'N/A',
+            'zone_type_found': 'N/A', 
+            'price_in_zone': False,
+            'rr_ok': False,
+            'last_valid_low': None,
+            'last_valid_high': None,
+            'current_sd_zone_start': None,
+            'current_sd_zone_end': None,
+        },
+        'sl_price': None,
+        'tp_price': None,
+        'entry_price_estimate': None, 
+        'error': None,
+        'account_risk_percent': 0.01 
+    }
+
+    min_klines_needed = 60 
+    kl_df = klines(symbol)
+
+    if kl_df is None or len(kl_df) < min_klines_needed:
+        base_return['error'] = f"Insufficient kline data for {symbol} (need {min_klines_needed}, got {len(kl_df) if kl_df is not None else 0})"
+        return base_return
+
+    try:
+        # Ensure necessary imports are available or handled within functions
+        # For example, find_swing_points might raise ImportError if scipy is missing.
+        # identify_supply_demand_zones handles TA-Lib/pandas-ta import itself.
+
+        # 1. Market Structure Analysis
+        swing_highs_bool, swing_lows_bool = find_swing_points(kl_df, order=5) 
+        market_structure = identify_market_structure(kl_df, swing_highs_bool, swing_lows_bool)
+
+        base_return['all_conditions_status']['trend_bias'] = market_structure['trend_bias']
+        base_return['all_conditions_status']['last_valid_low'] = market_structure['last_valid_low_price']
+        base_return['all_conditions_status']['last_valid_high'] = market_structure['last_valid_high_price']
+
+        # 2. Identify Supply & Demand Zones
+        sd_zones = identify_supply_demand_zones(kl_df, atr_period=14, lookback_candles=10, consolidation_atr_factor=0.7, sharp_move_atr_factor=1.5)
+
+        if not sd_zones:
+            # This is not an error, just no zones found. Strategy waits.
+            base_return['all_conditions_status']['zone_type_found'] = 'None'
+            return base_return # Return with 'none' signal
+
+        current_price = kl_df['Close'].iloc[-1]
+        potential_trade = None
+        
+        # Use last ATR for SL adjustment if needed (though current SL is zone-based)
+        # atr_val = ta.volatility.AverageTrueRange(kl_df['High'], kl_df['Low'], kl_df['Close'], window=14).average_true_range().iloc[-1]
+        # if pd.isna(atr_val): atr_val = 0.0001 # Avoid division by zero if ATR is somehow NaN
+
+        # 3. Strategy Logic
+        if market_structure['trend_bias'] == 'bullish':
+            relevant_zones = [z for z in sd_zones if z['type'] == 'demand' and z['timestamp_end'] < kl_df.index[-1]] # Ensure zone is historical
+            relevant_zones.sort(key=lambda z: z['timestamp_end'], reverse=True) # Most recent first
+
+            if relevant_zones:
+                zone = relevant_zones[0] # Consider the most recent valid demand zone
+                base_return['all_conditions_status']['zone_type_found'] = 'demand'
+                base_return['all_conditions_status']['current_sd_zone_start'] = zone['price_start']
+                base_return['all_conditions_status']['current_sd_zone_end'] = zone['price_end']
+                
+                if zone['price_start'] <= current_price <= zone['price_end']:
+                    base_return['all_conditions_status']['price_in_zone'] = True
+                    entry_price = current_price 
+                    
+                    sl_price = zone['price_start'] # SL at the bottom of the demand zone
+                    # Add a small buffer to SL, e.g., 0.1 * zone height or small fraction of ATR
+                    sl_buffer = (zone['price_end'] - zone['price_start']) * 0.10 # 10% of zone height as buffer
+                    sl_price -= sl_buffer
+                    sl_price = round(sl_price, get_price_precision(symbol))
+
+
+                    tp_price = market_structure.get('last_valid_high_price')
+                    if tp_price is None: tp_price = market_structure.get('current_swing_high_price')
+
+
+                    if tp_price is None or tp_price <= entry_price:
+                        base_return['error'] = "Invalid TP for bullish (TP <= entry or None)."
+                    elif sl_price >= entry_price:
+                        base_return['error'] = "Invalid SL for bullish (SL >= entry)."
+                    else:
+                        reward_potential = tp_price - entry_price
+                        risk_potential = entry_price - sl_price
+                        if risk_potential <= 0:
+                            base_return['error'] = "Risk potential <= 0 for bullish."
+                        else:
+                            rr_ratio = reward_potential / risk_potential
+                            if rr_ratio >= 2.5:
+                                base_return['all_conditions_status']['rr_ok'] = True
+                                potential_trade = {'signal': 'up', 'sl': sl_price, 'tp': tp_price, 'entry': entry_price}
+                            else:
+                                base_return['error'] = f"R:R too low ({rr_ratio:.2f}) for demand."
+        
+        elif market_structure['trend_bias'] == 'bearish':
+            relevant_zones = [z for z in sd_zones if z['type'] == 'supply' and z['timestamp_end'] < kl_df.index[-1]]
+            relevant_zones.sort(key=lambda z: z['timestamp_end'], reverse=True)
+
+            if relevant_zones:
+                zone = relevant_zones[0] # Most recent valid supply zone
+                base_return['all_conditions_status']['zone_type_found'] = 'supply'
+                base_return['all_conditions_status']['current_sd_zone_start'] = zone['price_start']
+                base_return['all_conditions_status']['current_sd_zone_end'] = zone['price_end']
+
+                if zone['price_start'] <= current_price <= zone['price_end']:
+                    base_return['all_conditions_status']['price_in_zone'] = True
+                    entry_price = current_price
+                    
+                    sl_price = zone['price_end'] # SL at the top of the supply zone
+                    sl_buffer = (zone['price_end'] - zone['price_start']) * 0.10
+                    sl_price += sl_buffer
+                    sl_price = round(sl_price, get_price_precision(symbol))
+
+                    tp_price = market_structure.get('last_valid_low_price')
+                    if tp_price is None: tp_price = market_structure.get('current_swing_low_price')
+
+                    if tp_price is None or tp_price >= entry_price:
+                        base_return['error'] = "Invalid TP for bearish (TP >= entry or None)."
+                    elif sl_price <= entry_price:
+                         base_return['error'] = "Invalid SL for bearish (SL <= entry)."
+                    else:
+                        reward_potential = entry_price - tp_price
+                        risk_potential = sl_price - entry_price
+                        if risk_potential <= 0:
+                            base_return['error'] = "Risk potential <= 0 for bearish."
+                        else:
+                            rr_ratio = reward_potential / risk_potential
+                            if rr_ratio >= 2.5:
+                                base_return['all_conditions_status']['rr_ok'] = True
+                                potential_trade = {'signal': 'down', 'sl': sl_price, 'tp': tp_price, 'entry': entry_price}
+                            else:
+                                base_return['error'] = f"R:R too low ({rr_ratio:.2f}) for supply."
+
+        if potential_trade:
+            base_return['signal'] = potential_trade['signal']
+            # Rounding already done for SL, ensure TP is also rounded if not already
+            base_return['sl_price'] = potential_trade['sl'] 
+            base_return['tp_price'] = round(potential_trade['tp'], get_price_precision(symbol)) if potential_trade['tp'] else None
+            base_return['entry_price_estimate'] = round(potential_trade['entry'], get_price_precision(symbol))
+            base_return['conditions_met_count'] = 1 
+            if base_return['error'] and base_return['all_conditions_status']['rr_ok']: # Clear error if RR was ok and trade found
+                base_return['error'] = None 
+        else:
+            base_return['signal'] = 'none'
+            base_return['sl_price'] = None
+            base_return['tp_price'] = None
+            # Keep error if one was set and no trade found, or set a generic one if applicable
+            if not base_return['error'] and base_return['all_conditions_status']['zone_type_found'] not in ['N/A', 'None'] :
+                if not base_return['all_conditions_status']['price_in_zone']:
+                     base_return['error'] = "Price not in S/D zone."
+                elif not base_return['all_conditions_status']['rr_ok'] and base_return['all_conditions_status']['price_in_zone']:
+                     # Error for low R:R should be set if a zone was processed and R:R failed
+                     if not base_return['error']: base_return['error'] = "R:R check failed or TP/SL invalid."
+
+
+    except ImportError as e_imp: 
+        base_return['error'] = f"ImportError S6 {symbol}: {e_imp}. Check scipy/talib/pandas_ta."
+    except ValueError as ve: 
+        base_return['error'] = f"ValueError S6 {symbol}: {ve}"
+    except Exception as e:
+        import traceback
+        base_return['error'] = f"Unexpected error S6 {symbol}: {str(e)}"
+        print(f"Full Traceback for S6 error on {symbol}: {traceback.format_exc()}")
+
+    # Final check on SL/TP validity if a signal was generated
+    if base_return['signal'] != 'none':
+        if base_return['sl_price'] is None or base_return['tp_price'] is None:
+            base_return['error'] = (base_return['error'] or "") + " SL/TP is None post-processing."
+            base_return['signal'] = 'none' # Invalidate signal
+        elif base_return['signal'] == 'up' and (base_return['sl_price'] >= base_return['entry_price_estimate'] or base_return['tp_price'] <= base_return['entry_price_estimate']):
+            base_return['error'] = (base_return['error'] or "") + " Invalid SL/TP relation to entry for UP signal."
+            base_return['signal'] = 'none'
+        elif base_return['signal'] == 'down' and (base_return['sl_price'] <= base_return['entry_price_estimate'] or base_return['tp_price'] >= base_return['entry_price_estimate']):
+            base_return['error'] = (base_return['error'] or "") + " Invalid SL/TP relation to entry for DOWN signal."
+            base_return['signal'] = 'none'
+            
+    if base_return['error']:
+        print(f"Strategy Market Structure S/D ({symbol}) final state: Signal={base_return['signal']}, Error='{base_return['error']}'")
+        # Potentially clear sensitive info from all_conditions_status if error is severe, or leave for debugging
+        # base_return['all_conditions_status']['current_sd_zone_start'] = None # etc.
+
     return base_return
 
 def set_leverage(symbol, level):
@@ -3735,6 +4377,39 @@ def run_bot_logic():
                             sleep(1) # Small delay after placing order
                         else:
                             _activity_set(f"S5: No signal for {sym_to_check}. Next..."); sleep(0.1)
+                    
+                    elif current_active_strategy_id == 6: # Market Structure S/D Strategy
+                        print(f"DEBUG: S6: Active for symbol: {sym_to_check}")
+                        _activity_set(f"S6: Scanning {sym_to_check}...")
+                        signal_data_s6 = strategy_market_structure_sd(sym_to_check) # Call the new strategy function
+                        print(f"DEBUG: S6: Data for {sym_to_check}: {signal_data_s6}")
+
+                        if root and root.winfo_exists(): # Update UI with conditions
+                            root.after(0, update_conditions_display_content, sym_to_check, signal_data_s6.get('all_conditions_status'), signal_data_s6.get('error'))
+                        
+                        if signal_data_s6.get('error'):
+                            # Error message already printed by strategy_market_structure_sd if it's significant
+                            # print(f"S6 Error ({sym_to_check}): {signal_data_s6['error']}") 
+                            sleep(0.1); continue # Move to next symbol
+                        
+                        current_signal_s6 = signal_data_s6.get('signal', 'none')
+                        if current_signal_s6 in ['up', 'down']:
+                            print(f"S6: {current_signal_s6.upper()} signal for {sym_to_check}. Ordering...")
+                            _status_set(f"S6: Ordering {sym_to_check} ({current_signal_s6.upper()})...")
+                            set_mode(sym_to_check, margin_type_setting); sleep(0.1)
+                            set_leverage(sym_to_check, leverage); sleep(0.1)
+                            
+                            # Pass SL, TP, and risk from strategy directly
+                            open_order(sym_to_check, current_signal_s6, 
+                                       strategy_sl=signal_data_s6.get('sl_price'), 
+                                       strategy_tp=signal_data_s6.get('tp_price'), 
+                                       strategy_account_risk_percent=signal_data_s6.get('account_risk_percent'))
+                            
+                            _activity_set(f"S6: Trade initiated for {sym_to_check}.")
+                            # S6 might also allow multiple trades across symbols unless a specific tracker is added.
+                            sleep(1) 
+                        else:
+                            _activity_set(f"S6: No signal for {sym_to_check}. Next..."); sleep(0.1)
 
 
                     elif current_active_strategy_id == 4:
