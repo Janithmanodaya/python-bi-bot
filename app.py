@@ -181,6 +181,7 @@ def klines_extended(symbol, timeframe, interval_days):
     current_start_time = start_time_ms
 
     print(f"Fetching klines for {symbol} from {pd.to_datetime(start_time_ms, unit='ms')} to {pd.to_datetime(end_time, unit='ms')}")
+    log_msg_klines_extended = [f"[klines_extended LOG for {symbol}] Fetch range: {pd.to_datetime(start_time_ms, unit='ms')} to {pd.to_datetime(end_time, unit='ms')}"]
 
     while True:
         # Check if the bot is stopped (if running live) or if UI is closed (if running from UI but bot not started)
@@ -215,9 +216,11 @@ def klines_extended(symbol, timeframe, interval_days):
             print(f"Generic error in klines_extended for {symbol}: {e}")
             return pd.DataFrame(columns=['Open', 'High', 'Low', 'Close', 'Volume']), f"Generic error: {e}"
     
+    log_msg_klines_extended.append(f"Raw klines fetched: {len(all_klines_raw)}")
     if not all_klines_raw:
         error_msg = f"No kline data fetched for {symbol} with timeframe {timeframe} for {interval_days} days."
-        print(error_msg)
+        log_msg_klines_extended.append(error_msg)
+        print("\n".join(log_msg_klines_extended))
         return pd.DataFrame(columns=['Open', 'High', 'Low', 'Close', 'Volume']), error_msg
 
     df = pd.DataFrame(all_klines_raw)
@@ -229,16 +232,18 @@ def klines_extended(symbol, timeframe, interval_days):
     
     df = df[~df.index.duplicated(keep='first')]
     df = df.sort_index()
+    log_msg_klines_extended.append(f"Processed klines (after deduplication & sort): {len(df)}")
+    log_msg_klines_extended.append(f"Fetched {len(df)} klines for {symbol} ({timeframe}, {interval_days} days). From {df.index.min()} to {df.index.max()}")
 
-    print(f"Fetched {len(df)} klines for {symbol} ({timeframe}, {interval_days} days). From {df.index.min()} to {df.index.max()}")
     # --- BEGIN DEBUG PRINTS ---
-    print("DEBUG klines_extended: DataFrame head:\n", df.head())
-    print("DEBUG klines_extended: DataFrame dtypes:\n", df.dtypes)
-    print("DEBUG klines_extended: DataFrame index:\n", df.index)
-    print(f"DEBUG klines_extended: DataFrame shape: {df.shape}")
-    print(f"DEBUG klines_extended: Any NaNs in DataFrame: {df.isnull().values.any()}")
-    print(f"DEBUG klines_extended: Sum of NaNs per column:\n{df.isnull().sum()}")
+    log_msg_klines_extended.append(f"DEBUG klines_extended: DataFrame head:\n{df.head()}")
+    log_msg_klines_extended.append(f"DEBUG klines_extended: DataFrame dtypes:\n{df.dtypes}")
+    log_msg_klines_extended.append(f"DEBUG klines_extended: DataFrame index:\n{df.index}")
+    log_msg_klines_extended.append(f"DEBUG klines_extended: DataFrame shape: {df.shape}")
+    log_msg_klines_extended.append(f"DEBUG klines_extended: Any NaNs in DataFrame: {df.isnull().values.any()}")
+    log_msg_klines_extended.append(f"DEBUG klines_extended: Sum of NaNs per column:\n{df.isnull().sum()}")
     # --- END DEBUG PRINTS ---
+    print("\n".join(log_msg_klines_extended))
     return df, None
 
 # Indicator helper functions for backtesting
@@ -324,6 +329,13 @@ class BacktestStrategyWrapper(Strategy):
     def init(self):
         # Use self.sl_tp_mode_bt (or whatever name is chosen for the class attribute)
         print(f"DEBUG BacktestStrategyWrapper.init: Initializing for strategy ID {self.current_strategy_id}, SL/TP Mode: {getattr(self, 'sl_tp_mode_bt', 'N/A')}, Leverage: {self.leverage}")
+        # --- Jules's Logging ---
+        print(f"[BT Strategy LOG for {self.data.symbol if hasattr(self.data, 'symbol') else 'N/A'}] init() called.")
+        print(f"[BT Strategy LOG for {self.data.symbol if hasattr(self.data, 'symbol') else 'N/A'}] Data received by strategy: self.data.df shape: {self.data.df.shape}")
+        print(f"[BT Strategy LOG for {self.data.symbol if hasattr(self.data, 'symbol') else 'N/A'}] Data head:\n{self.data.df.head()}")
+        print(f"[BT Strategy LOG for {self.data.symbol if hasattr(self.data, 'symbol') else 'N/A'}] Data tail:\n{self.data.df.tail()}")
+        print(f"[BT Strategy LOG for {self.data.symbol if hasattr(self.data, 'symbol') else 'N/A'}] Data NaN sum:\n{self.data.df.isnull().sum()}")
+        # --- End Jules's Logging ---
         if self.current_strategy_id == 5:
             self.rsi_period_val = getattr(self, 'rsi_period', 14) 
             self.rsi = self.I(rsi_bt, self.data.Close, self.rsi_period_val, name='RSI_S5')
@@ -356,6 +368,7 @@ class BacktestStrategyWrapper(Strategy):
         # print(f"DEBUG BacktestStrategyWrapper.next: Executing for strategy ID {self.current_strategy_id}, Mode: {self.sl_tp_mode_bt}") # DEBUG
         price = float(self.data.Close[-1]) 
         trade_symbol = self.data.symbol if hasattr(self.data, 'symbol') else 'N/A'
+        log_prefix_bt_next = f"[BT Strategy LOG {trade_symbol} - Bar {len(self.data.Close)-1} - Price {price:.4f}]" # Adjusted precision
         
         # --- SL/TP Price Calculation Block (Common for all strategies) ---
         sl_final_price = None
@@ -418,28 +431,44 @@ class BacktestStrategyWrapper(Strategy):
 
         # --- Strategy Specific Logic ---
         if self.current_strategy_id == 0: # Original Scalping Strategy
-            if self.position: return
-            # ... (S0 indicator calculations and condition checks as before) ...
-            last_ema9 = self.ema9_s0[-1]; prev_ema9 = self.ema9_s0[-2] if len(self.ema9_s0) >= 2 else last_ema9
-            last_ema21 = self.ema21_s0[-1]; prev_ema21 = self.ema21_s0[-2] if len(self.ema21_s0) >= 2 else last_ema21
+            if self.position:
+                # print(f"{log_prefix_bt_next} S0: Already in position. Skipping.") # Basic log, can be expanded
+                return
+
+            # Indicator calculations
+            # Ensure enough data for all indicators and lookbacks
+            min_len_s0 = max(21, LOCAL_HIGH_LOW_LOOKBACK_PERIOD + 2, 10) # Max of EMA21, lookback+prev, VolumeMA10
+            if len(self.data.Close) < min_len_s0:
+                # print(f"{log_prefix_bt_next} S0: Insufficient data length ({len(self.data.Close)} < {min_len_s0}). Skipping.")
+                return
+
+            last_ema9 = self.ema9_s0[-1]; prev_ema9 = self.ema9_s0[-2]
+            last_ema21 = self.ema21_s0[-1]; prev_ema21 = self.ema21_s0[-2]
             last_rsi = self.rsi_s0[-1]; last_st = self.st_s0[-1]
             last_vol = self.data.Volume[-1]; last_vol_ma10 = self.volume_ma10_s0[-1]
-            lookback = LOCAL_HIGH_LOW_LOOKBACK_PERIOD
-            if len(self.data.High) < lookback + 2: return
-            recent_high = self.data.High[-lookback-1:-1].max(); recent_low = self.data.Low[-lookback-1:-1].min()
             
+            lookback = LOCAL_HIGH_LOW_LOOKBACK_PERIOD
+            recent_high = self.data.High[-lookback-1:-1].max(); recent_low = self.data.Low[-lookback-1:-1].min()
+
+            # Log indicator values
+            # print(f"{log_prefix_bt_next} S0 Indicators: EMA9={last_ema9:.2f}, EMA21={last_ema21:.2f}, RSI={last_rsi:.2f}, ST={last_st}, VOL={last_vol}, VOL_MA10={last_vol_ma10:.2f}, RecentHigh={recent_high:.2f}, RecentLow={recent_low:.2f}")
+
+            # Conditions
             ema_up = prev_ema9 < prev_ema21 and last_ema9 > last_ema21
             rsi_long = 50 <= last_rsi <= 70; st_green = (last_st == 1)
             vol_strong = last_vol > last_vol_ma10 if not pd.isna(last_vol_ma10) and last_vol_ma10 != 0 else False
             price_break_high = price > recent_high
-            buy_conds = [ema_up, rsi_long, st_green, vol_strong, price_break_high]
-            num_buy = sum(buy_conds)
+            buy_conds_met_list = [ema_up, rsi_long, st_green, vol_strong, price_break_high]
+            num_buy = sum(buy_conds_met_list)
+            # print(f"{log_prefix_bt_next} S0 Buy Conditions: EMA_UP={ema_up}, RSI_LONG={rsi_long}, ST_GREEN={st_green}, VOL_STRONG={vol_strong}, PRICE_BREAK_H={price_break_high} -> Met: {num_buy}")
+
 
             ema_down = prev_ema9 > prev_ema21 and last_ema9 < last_ema21
-            rsi_short = 30 <= last_rsi <= 50; st_red = (last_st == -1)
+            rsi_short = 30 <= last_rsi <= 50; st_red = (last_st == -1) # ST is -1 for red
             price_break_low = price < recent_low
-            sell_conds = [ema_down, rsi_short, st_red, vol_strong, price_break_low]
-            num_sell = sum(sell_conds)
+            sell_conds_met_list = [ema_down, rsi_short, st_red, vol_strong, price_break_low]
+            num_sell = sum(sell_conds_met_list)
+            # print(f"{log_prefix_bt_next} S0 Sell Conditions: EMA_DOWN={ema_down}, RSI_SHORT={rsi_short}, ST_RED={st_red}, VOL_STRONG={vol_strong}, PRICE_BREAK_L={price_break_low} -> Met: {num_sell}")
 
             trade_side_s0 = None
             if num_buy >= SCALPING_REQUIRED_BUY_CONDITIONS: trade_side_s0 = 'buy'
@@ -447,51 +476,86 @@ class BacktestStrategyWrapper(Strategy):
 
             if trade_side_s0:
                 entry_price_s0 = price
+                sl_price, tp_price = None, None # Initialize
+                # print(f"{log_prefix_bt_next} S0 Signal: {trade_side_s0.upper()}. Entry: {entry_price_s0:.2f}, SL/TP Mode: {self.sl_tp_mode_bt}")
                 if self.sl_tp_mode_bt == "ATR/Dynamic":
+                    if self.atr is None or len(self.atr) < 1 or pd.isna(self.atr[-1]) or self.atr[-1] == 0:
+                        # print(f"{log_prefix_bt_next} S0: ATR invalid for dynamic SL/TP (ATR: {self.atr[-1] if self.atr and len(self.atr)>0 else 'N/A'}). Skipping trade.")
+                        return 
                     current_atr_s0 = self.atr[-1]
-                    if pd.isna(current_atr_s0) or current_atr_s0 == 0: return # Skip if ATR invalid
                     if trade_side_s0 == 'buy':
                         sl_price = round(entry_price_s0 - (current_atr_s0 * self.SL_ATR_MULTI), self.PRICE_PRECISION_BT)
                         tp_price = round(entry_price_s0 + ((entry_price_s0 - sl_price) * self.RR), self.PRICE_PRECISION_BT)
-                        if sl_price >= entry_price_s0 or tp_price <= entry_price_s0: return
+                        if sl_price >= entry_price_s0 or tp_price <= entry_price_s0: 
+                            # print(f"{log_prefix_bt_next} S0 ATR Buy: Invalid SL/TP. SL={sl_price}, TP={tp_price}. Skipping."); 
+                            return
                     else: # sell
                         sl_price = round(entry_price_s0 + (current_atr_s0 * self.SL_ATR_MULTI), self.PRICE_PRECISION_BT)
                         tp_price = round(entry_price_s0 - ((sl_price - entry_price_s0) * self.RR), self.PRICE_PRECISION_BT)
-                        if sl_price <= entry_price_s0 or tp_price >= entry_price_s0: return
+                        if sl_price <= entry_price_s0 or tp_price >= entry_price_s0: 
+                            # print(f"{log_prefix_bt_next} S0 ATR Sell: Invalid SL/TP. SL={sl_price}, TP={tp_price}. Skipping."); 
+                            return
                 elif self.sl_tp_mode_bt == "Percentage":
                     sl_price = sl_long if trade_side_s0 == 'buy' else sl_short
                     tp_price = tp_long if trade_side_s0 == 'buy' else tp_short
-                    if sl_price is None or tp_price is None or sl_price <=0 or tp_price <=0: return # Could not calculate or invalid
-                    if trade_side_s0 == 'buy' and (sl_price >= entry_price_s0 or tp_price <= entry_price_s0): return # Validate logic
-                    if trade_side_s0 == 'sell' and (sl_price <= entry_price_s0 or tp_price >= entry_price_s0): return # Validate logic
+                    if sl_price is None or tp_price is None or sl_price <=0 or tp_price <=0: 
+                        # print(f"{log_prefix_bt_next} S0 Percentage: SL/TP calculation failed or invalid. SL={sl_price}, TP={tp_price}. Skipping."); 
+                        return
+                    if trade_side_s0 == 'buy' and (sl_price >= entry_price_s0 or tp_price <= entry_price_s0): 
+                        # print(f"{log_prefix_bt_next} S0 Percentage Buy: Invalid SL/TP. SL={sl_price}, TP={tp_price}. Skipping."); 
+                        return
+                    if trade_side_s0 == 'sell' and (sl_price <= entry_price_s0 or tp_price >= entry_price_s0): 
+                        # print(f"{log_prefix_bt_next} S0 Percentage Sell: Invalid SL/TP. SL={sl_price}, TP={tp_price}. Skipping."); 
+                        return
                 elif self.sl_tp_mode_bt == "Fixed PnL":
                     sl_price = sl_long if trade_side_s0 == 'buy' else sl_short
                     tp_price = tp_long if trade_side_s0 == 'buy' else tp_short
-                    if sl_price is None or tp_price is None or sl_price <=0 or tp_price <=0: return # Could not calculate or invalid
-                    if trade_side_s0 == 'buy' and (sl_price >= entry_price_s0 or tp_price <= entry_price_s0): return # Validate logic
-                    if trade_side_s0 == 'sell' and (sl_price <= entry_price_s0 or tp_price >= entry_price_s0): return # Validate logic
-                else: return # Unknown mode
+                    if sl_price is None or tp_price is None or sl_price <=0 or tp_price <=0: 
+                        # print(f"{log_prefix_bt_next} S0 Fixed PnL: SL/TP calculation failed or invalid. SL={sl_price}, TP={tp_price}. Skipping."); 
+                        return
+                    if trade_side_s0 == 'buy' and (sl_price >= entry_price_s0 or tp_price <= entry_price_s0): 
+                        # print(f"{log_prefix_bt_next} S0 Fixed PnL Buy: Invalid SL/TP. SL={sl_price}, TP={tp_price}. Skipping."); 
+                        return
+                    if trade_side_s0 == 'sell' and (sl_price <= entry_price_s0 or tp_price >= entry_price_s0): 
+                        # print(f"{log_prefix_bt_next} S0 Fixed PnL Sell: Invalid SL/TP. SL={sl_price}, TP={tp_price}. Skipping."); 
+                        return
+                else: 
+                    # print(f"{log_prefix_bt_next} S0: Unknown SL/TP mode '{self.sl_tp_mode_bt}'. Skipping."); 
+                    return
 
+                # print(f"{log_prefix_bt_next} S0 Placing Trade: Side={trade_side_s0}, Entry={entry_price_s0:.2f}, SL={sl_price:.2f}, TP={tp_price:.2f}, Size={trade_size_to_use_in_order}")
                 if trade_side_s0 == 'buy': self.buy(sl=sl_price, tp=tp_price, size=trade_size_to_use_in_order)
                 else: self.sell(sl=sl_price, tp=tp_price, size=trade_size_to_use_in_order)
+            # else:
+                # print(f"{log_prefix_bt_next} S0: No trade signal this bar.")
+
 
         elif self.current_strategy_id == 1: # EMA Cross + SuperTrend
-            if self.position: return
-            if len(self.ema_short_s1) < 2 or len(self.ema_long_s1) < 2 or len(self.rsi_s1) < 1 or len(self.st_s1) < 1: return
+            if self.position: 
+                # print(f"{log_prefix_bt_next} S1: Already in position. Skipping."); 
+                return
+            if len(self.ema_short_s1) < 2 or len(self.ema_long_s1) < 2 or len(self.rsi_s1) < 1 or len(self.st_s1) < 1: 
+                # print(f"{log_prefix_bt_next} S1: Insufficient indicator length. EMA_S={len(self.ema_short_s1)}, EMA_L={len(self.ema_long_s1)}, RSI={len(self.rsi_s1)}, ST={len(self.st_s1)}. Skipping."); 
+                return
 
             last_ema_short = self.ema_short_s1[-1]; prev_ema_short = self.ema_short_s1[-2]
             last_ema_long = self.ema_long_s1[-1]; prev_ema_long = self.ema_long_s1[-2]
-            last_rsi_s1 = self.rsi_s1[-1]; last_st_s1 = self.st_s1[-1]
+            last_rsi_s1 = self.rsi_s1[-1]; last_st_s1 = self.st_s1[-1] # ST is numerical: 1 green, -1 red
+
+            # print(f"{log_prefix_bt_next} S1 Indicators: EMA_S={last_ema_short:.2f} (Prev:{prev_ema_short:.2f}), EMA_L={last_ema_long:.2f} (Prev:{prev_ema_long:.2f}), RSI={last_rsi_s1:.2f}, ST={last_st_s1}")
 
             ema_crossed_up_s1 = prev_ema_short < prev_ema_long and last_ema_short > last_ema_long
             st_green_s1 = (last_st_s1 == 1); rsi_long_ok_s1 = 40 <= last_rsi_s1 <= 70
-            buy_conds_s1 = [ema_crossed_up_s1, st_green_s1, rsi_long_ok_s1]
-            num_buy_s1 = sum(buy_conds_s1)
+            buy_conds_s1_met_list = [ema_crossed_up_s1, st_green_s1, rsi_long_ok_s1]
+            num_buy_s1 = sum(buy_conds_s1_met_list)
+            # print(f"{log_prefix_bt_next} S1 Buy Conditions: EMA_X_UP={ema_crossed_up_s1}, ST_GREEN={st_green_s1}, RSI_OK={rsi_long_ok_s1} -> Met: {num_buy_s1}")
+
 
             ema_crossed_down_s1 = prev_ema_short > prev_ema_long and last_ema_short < last_ema_long
             st_red_s1 = (last_st_s1 == -1); rsi_short_ok_s1 = 30 <= last_rsi_s1 <= 60
-            sell_conds_s1 = [ema_crossed_down_s1, st_red_s1, rsi_short_ok_s1]
-            num_sell_s1 = sum(sell_conds_s1)
+            sell_conds_s1_met_list = [ema_crossed_down_s1, st_red_s1, rsi_short_ok_s1]
+            num_sell_s1 = sum(sell_conds_s1_met_list)
+            # print(f"{log_prefix_bt_next} S1 Sell Conditions: EMA_X_DOWN={ema_crossed_down_s1}, ST_RED={st_red_s1}, RSI_OK={rsi_short_ok_s1} -> Met: {num_sell_s1}")
             
             REQUIRED_S1 = 2; trade_side_s1 = None
             if num_buy_s1 >= REQUIRED_S1: trade_side_s1 = 'buy'
@@ -500,42 +564,78 @@ class BacktestStrategyWrapper(Strategy):
             if trade_side_s1:
                 entry_price_s1 = price
                 sl_to_use_s1, tp_to_use_s1 = None, None
+                # print(f"{log_prefix_bt_next} S1 Signal: {trade_side_s1.upper()}. Entry: {entry_price_s1:.2f}, SL/TP Mode: {self.sl_tp_mode_bt}")
                 if self.sl_tp_mode_bt == "ATR/Dynamic":
+                    if self.atr is None or len(self.atr) < 1 or pd.isna(self.atr[-1]) or self.atr[-1] == 0:
+                        # print(f"{log_prefix_bt_next} S1: ATR invalid for dynamic SL/TP (ATR: {self.atr[-1] if self.atr and len(self.atr)>0 else 'N/A'}). Skipping trade.")
+                        return
                     current_atr_s1 = self.atr[-1]
-                    if pd.isna(current_atr_s1) or current_atr_s1 == 0: return
                     if trade_side_s1 == 'buy':
                         sl_to_use_s1 = round(entry_price_s1 - (current_atr_s1 * self.SL_ATR_MULTI), self.PRICE_PRECISION_BT)
                         tp_to_use_s1 = round(entry_price_s1 + ((entry_price_s1 - sl_to_use_s1) * self.RR), self.PRICE_PRECISION_BT)
-                        if sl_to_use_s1 >= entry_price_s1 or tp_to_use_s1 <= entry_price_s1: return
+                        if sl_to_use_s1 >= entry_price_s1 or tp_to_use_s1 <= entry_price_s1: 
+                            # print(f"{log_prefix_bt_next} S1 ATR Buy: Invalid SL/TP. SL={sl_to_use_s1}, TP={tp_to_use_s1}. Skipping."); 
+                            return
                     else: # sell
                         sl_to_use_s1 = round(entry_price_s1 + (current_atr_s1 * self.SL_ATR_MULTI), self.PRICE_PRECISION_BT)
                         tp_to_use_s1 = round(entry_price_s1 - ((sl_to_use_s1 - entry_price_s1) * self.RR), self.PRICE_PRECISION_BT)
-                        if sl_to_use_s1 <= entry_price_s1 or tp_to_use_s1 >= entry_price_s1: return
+                        if sl_to_use_s1 <= entry_price_s1 or tp_to_use_s1 >= entry_price_s1: 
+                            # print(f"{log_prefix_bt_next} S1 ATR Sell: Invalid SL/TP. SL={sl_to_use_s1}, TP={tp_to_use_s1}. Skipping."); 
+                            return
                 elif self.sl_tp_mode_bt == "Percentage":
                     sl_to_use_s1 = sl_long if trade_side_s1 == 'buy' else sl_short
                     tp_to_use_s1 = tp_long if trade_side_s1 == 'buy' else tp_short
-                    if sl_to_use_s1 is None or tp_to_use_s1 is None or sl_to_use_s1 <= 0 or tp_to_use_s1 <= 0: return
-                    if trade_side_s1 == 'buy' and (sl_to_use_s1 >= entry_price_s1 or tp_to_use_s1 <= entry_price_s1): return
-                    if trade_side_s1 == 'sell' and (sl_to_use_s1 <= entry_price_s1 or tp_to_use_s1 >= entry_price_s1): return
+                    if sl_to_use_s1 is None or tp_to_use_s1 is None or sl_to_use_s1 <= 0 or tp_to_use_s1 <= 0: 
+                        # print(f"{log_prefix_bt_next} S1 Percentage: SL/TP calc failed. SL={sl_to_use_s1}, TP={tp_to_use_s1}. Skipping."); 
+                        return
+                    if trade_side_s1 == 'buy' and (sl_to_use_s1 >= entry_price_s1 or tp_to_use_s1 <= entry_price_s1): 
+                        # print(f"{log_prefix_bt_next} S1 Percentage Buy: Invalid SL/TP. SL={sl_to_use_s1}, TP={tp_to_use_s1}. Skipping."); 
+                        return
+                    if trade_side_s1 == 'sell' and (sl_to_use_s1 <= entry_price_s1 or tp_to_use_s1 >= entry_price_s1): 
+                        # print(f"{log_prefix_bt_next} S1 Percentage Sell: Invalid SL/TP. SL={sl_to_use_s1}, TP={tp_to_use_s1}. Skipping."); 
+                        return
                 elif self.sl_tp_mode_bt == "Fixed PnL":
                     sl_to_use_s1 = sl_long if trade_side_s1 == 'buy' else sl_short
                     tp_to_use_s1 = tp_long if trade_side_s1 == 'buy' else tp_short
-                    if sl_to_use_s1 is None or tp_to_use_s1 is None or sl_to_use_s1 <= 0 or tp_to_use_s1 <= 0: return
-                    if trade_side_s1 == 'buy' and (sl_to_use_s1 >= entry_price_s1 or tp_to_use_s1 <= entry_price_s1): return
-                    if trade_side_s1 == 'sell' and (sl_to_use_s1 <= entry_price_s1 or tp_to_use_s1 >= entry_price_s1): return
+                    if sl_to_use_s1 is None or tp_to_use_s1 is None or sl_to_use_s1 <= 0 or tp_to_use_s1 <= 0: 
+                        # print(f"{log_prefix_bt_next} S1 Fixed PnL: SL/TP calc failed. SL={sl_to_use_s1}, TP={tp_to_use_s1}. Skipping."); 
+                        return
+                    if trade_side_s1 == 'buy' and (sl_to_use_s1 >= entry_price_s1 or tp_to_use_s1 <= entry_price_s1): 
+                        # print(f"{log_prefix_bt_next} S1 Fixed PnL Buy: Invalid SL/TP. SL={sl_to_use_s1}, TP={tp_to_use_s1}. Skipping."); 
+                        return
+                    if trade_side_s1 == 'sell' and (sl_to_use_s1 <= entry_price_s1 or tp_to_use_s1 >= entry_price_s1): 
+                        # print(f"{log_prefix_bt_next} S1 Fixed PnL Sell: Invalid SL/TP. SL={sl_to_use_s1}, TP={tp_to_use_s1}. Skipping."); 
+                        return
                 
-                if sl_to_use_s1 is None or tp_to_use_s1 is None: return # This check is somewhat redundant now but harmless
+                if sl_to_use_s1 is None or tp_to_use_s1 is None: 
+                    # print(f"{log_prefix_bt_next} S1: Final SL/TP check failed. SL={sl_to_use_s1}, TP={tp_to_use_s1}. Skipping."); 
+                    return
 
+                # print(f"{log_prefix_bt_next} S1 Placing Trade: Side={trade_side_s1}, Entry={entry_price_s1:.2f}, SL={sl_to_use_s1:.2f}, TP={tp_to_use_s1:.2f}, Size={trade_size_to_use_in_order}")
                 if trade_side_s1 == 'buy': self.buy(sl=sl_to_use_s1, tp=tp_to_use_s1, size=trade_size_to_use_in_order)
                 else: self.sell(sl=sl_to_use_s1, tp=tp_to_use_s1, size=trade_size_to_use_in_order)
+            # else:
+                # print(f"{log_prefix_bt_next} S1: No trade signal this bar.")
 
         elif self.current_strategy_id == 5: # New RSI-Based Strategy
-            if self.position: return
+            if self.position: 
+                # print(f"{log_prefix_bt_next} S5: Already in position. Skipping."); 
+                return
+
             # S5 uses self.rsi and self.atr (ATR for dynamic SL/TP)
-            if len(self.rsi) < 1 or (self.sl_tp_mode_bt == "ATR/Dynamic" and (self.atr is None or len(self.atr) < 1)): return
+            if len(self.rsi) < 1: 
+                # print(f"{log_prefix_bt_next} S5: Insufficient RSI length ({len(self.rsi)}). Skipping."); 
+                return
+            if self.sl_tp_mode_bt == "ATR/Dynamic" and (self.atr is None or len(self.atr) < 1):
+                # print(f"{log_prefix_bt_next} S5: ATR/Dynamic mode but ATR not available or too short ({len(self.atr) if self.atr else 'None'}). Skipping."); 
+                return
+
+            # print(f"{log_prefix_bt_next} S5 Indicators: RSI={self.rsi[-1]:.2f}" + (f", ATR={self.atr[-1]:.4f}" if self.sl_tp_mode_bt == "ATR/Dynamic" and self.atr and len(self.atr)>0 else ""))
 
             take_long_s5 = self.rsi[-1] < 30
             take_short_s5 = self.rsi[-1] > 70
+            # print(f"{log_prefix_bt_next} S5 Conditions: RSI<30={take_long_s5}, RSI>70={take_short_s5}")
+
             trade_side_s5 = None
             if take_long_s5: trade_side_s5 = 'buy'
             elif take_short_s5: trade_side_s5 = 'sell'
@@ -543,37 +643,62 @@ class BacktestStrategyWrapper(Strategy):
             if trade_side_s5:
                 entry_price_s5 = price
                 sl_to_use_s5, tp_to_use_s5 = None, None
+                # print(f"{log_prefix_bt_next} S5 Signal: {trade_side_s5.upper()}. Entry: {entry_price_s5:.2f}, SL/TP Mode: {self.sl_tp_mode_bt}")
+
                 if self.sl_tp_mode_bt == "ATR/Dynamic":
+                    if pd.isna(self.atr[-1]) or self.atr[-1] == 0: 
+                        # print(f"{log_prefix_bt_next} S5: ATR invalid for dynamic SL/TP (ATR: {self.atr[-1]}). Skipping."); 
+                        return
                     current_atr_s5 = self.atr[-1]
-                    if pd.isna(current_atr_s5) or current_atr_s5 == 0: return
                     if trade_side_s5 == 'buy':
                         sl_to_use_s5 = round(entry_price_s5 - (current_atr_s5 * self.SL_ATR_MULTI), self.PRICE_PRECISION_BT)
                         tp_to_use_s5 = round(entry_price_s5 + ((entry_price_s5 - sl_to_use_s5) * self.RR), self.PRICE_PRECISION_BT)
-                        if sl_to_use_s5 >= entry_price_s5 or tp_to_use_s5 <= entry_price_s5: return
+                        if sl_to_use_s5 >= entry_price_s5 or tp_to_use_s5 <= entry_price_s5: 
+                            # print(f"{log_prefix_bt_next} S5 ATR Buy: Invalid SL/TP. SL={sl_to_use_s5}, TP={tp_to_use_s5}. Skipping."); 
+                            return
                     else: # sell
                         sl_to_use_s5 = round(entry_price_s5 + (current_atr_s5 * self.SL_ATR_MULTI), self.PRICE_PRECISION_BT)
                         tp_to_use_s5 = round(entry_price_s5 - ((sl_to_use_s5 - entry_price_s5) * self.RR), self.PRICE_PRECISION_BT)
-                        if sl_to_use_s5 <= entry_price_s5 or tp_to_use_s5 >= entry_price_s5: return
+                        if sl_to_use_s5 <= entry_price_s5 or tp_to_use_s5 >= entry_price_s5: 
+                            # print(f"{log_prefix_bt_next} S5 ATR Sell: Invalid SL/TP. SL={sl_to_use_s5}, TP={tp_to_use_s5}. Skipping."); 
+                            return
                 elif self.sl_tp_mode_bt == "Percentage":
                     sl_to_use_s5 = sl_long if trade_side_s5 == 'buy' else sl_short
                     tp_to_use_s5 = tp_long if trade_side_s5 == 'buy' else tp_short
-                    if sl_to_use_s5 is None or tp_to_use_s5 is None or sl_to_use_s5 <= 0 or tp_to_use_s5 <= 0: return
-                    if trade_side_s5 == 'buy' and (sl_to_use_s5 >= entry_price_s5 or tp_to_use_s5 <= entry_price_s5): return
-                    if trade_side_s5 == 'sell' and (sl_to_use_s5 <= entry_price_s5 or tp_to_use_s5 >= entry_price_s5): return
+                    if sl_to_use_s5 is None or tp_to_use_s5 is None or sl_to_use_s5 <= 0 or tp_to_use_s5 <= 0: 
+                        # print(f"{log_prefix_bt_next} S5 Percentage: SL/TP calc failed. SL={sl_to_use_s5}, TP={tp_to_use_s5}. Skipping."); 
+                        return
+                    if trade_side_s5 == 'buy' and (sl_to_use_s5 >= entry_price_s5 or tp_to_use_s5 <= entry_price_s5): 
+                        # print(f"{log_prefix_bt_next} S5 Percentage Buy: Invalid SL/TP. SL={sl_to_use_s5}, TP={tp_to_use_s5}. Skipping."); 
+                        return
+                    if trade_side_s5 == 'sell' and (sl_to_use_s5 <= entry_price_s5 or tp_to_use_s5 >= entry_price_s5): 
+                        # print(f"{log_prefix_bt_next} S5 Percentage Sell: Invalid SL/TP. SL={sl_to_use_s5}, TP={tp_to_use_s5}. Skipping."); 
+                        return
                 elif self.sl_tp_mode_bt == "Fixed PnL":
                     sl_to_use_s5 = sl_long if trade_side_s5 == 'buy' else sl_short
                     tp_to_use_s5 = tp_long if trade_side_s5 == 'buy' else tp_short
-                    if sl_to_use_s5 is None or tp_to_use_s5 is None or sl_to_use_s5 <= 0 or tp_to_use_s5 <= 0: return
-                    if trade_side_s5 == 'buy' and (sl_to_use_s5 >= entry_price_s5 or tp_to_use_s5 <= entry_price_s5): return
-                    if trade_side_s5 == 'sell' and (sl_to_use_s5 <= entry_price_s5 or tp_to_use_s5 >= entry_price_s5): return
+                    if sl_to_use_s5 is None or tp_to_use_s5 is None or sl_to_use_s5 <= 0 or tp_to_use_s5 <= 0: 
+                        # print(f"{log_prefix_bt_next} S5 Fixed PnL: SL/TP calc failed. SL={sl_to_use_s5}, TP={tp_to_use_s5}. Skipping."); 
+                        return
+                    if trade_side_s5 == 'buy' and (sl_to_use_s5 >= entry_price_s5 or tp_to_use_s5 <= entry_price_s5): 
+                        # print(f"{log_prefix_bt_next} S5 Fixed PnL Buy: Invalid SL/TP. SL={sl_to_use_s5}, TP={tp_to_use_s5}. Skipping."); 
+                        return
+                    if trade_side_s5 == 'sell' and (sl_to_use_s5 <= entry_price_s5 or tp_to_use_s5 >= entry_price_s5): 
+                        # print(f"{log_prefix_bt_next} S5 Fixed PnL Sell: Invalid SL/TP. SL={sl_to_use_s5}, TP={tp_to_use_s5}. Skipping."); 
+                        return
 
-                if sl_to_use_s5 is None or tp_to_use_s5 is None: return # Redundant but safe
+                if sl_to_use_s5 is None or tp_to_use_s5 is None: 
+                    # print(f"{log_prefix_bt_next} S5: Final SL/TP check failed. SL={sl_to_use_s5}, TP={tp_to_use_s5}. Skipping."); 
+                    return # Redundant but safe
                 
+                # print(f"{log_prefix_bt_next} S5 Placing Trade: Side={trade_side_s5}, Entry={entry_price_s5:.2f}, SL={sl_to_use_s5:.2f}, TP={tp_to_use_s5:.2f}, Size={trade_size_to_use_in_order}")
                 if trade_side_s5 == 'buy': self.buy(sl=sl_to_use_s5, tp=tp_to_use_s5, size=trade_size_to_use_in_order)
                 else: self.sell(sl=sl_to_use_s5, tp=tp_to_use_s5, size=trade_size_to_use_in_order)
+            # else:
+                # print(f"{log_prefix_bt_next} S5: No trade signal this bar.")
         
         # else: # Other strategies not yet updated for this new SL/TP structure
-            # print(f"DEBUG Backtest: Strategy ID {self.current_strategy_id} not fully updated for new SL/TP modes in next().")
+            # print(f"{log_prefix_bt_next} Strategy ID {self.current_strategy_id} not fully updated for new SL/TP modes in next().")
             # Basic RSI logic as a placeholder if other strategies are selected without full logic
             # This part should be removed or adapted as each strategy is fully integrated
             # if not self.position and hasattr(self, 'rsi') and len(self.rsi) > 0:
