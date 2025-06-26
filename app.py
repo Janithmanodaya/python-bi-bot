@@ -5081,6 +5081,43 @@ def handle_strategy_checkbox_select(selected_id):
 if __name__ == "__main__":
     root = tk.Tk(); root.title("Binance Scalping Bot")
 
+    # --- Scrollable Main Container Setup ---
+    # Create a main frame that will hold the canvas and scrollbars
+    scrollable_canvas_frame = ttk.Frame(root)
+    scrollable_canvas_frame.pack(fill=tk.BOTH, expand=True)
+
+    canvas = tk.Canvas(scrollable_canvas_frame)
+    canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+    v_scrollbar = ttk.Scrollbar(scrollable_canvas_frame, orient=tk.VERTICAL, command=canvas.yview)
+    v_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+    h_scrollbar = ttk.Scrollbar(root, orient=tk.HORIZONTAL, command=canvas.xview) # Place h_scrollbar in root to be below canvas
+    h_scrollbar.pack(fill=tk.X, side=tk.BOTTOM)
+
+
+    canvas.configure(yscrollcommand=v_scrollbar.set, xscrollcommand=h_scrollbar.set)
+    
+    # This frame will contain all the application's content and be placed inside the canvas
+    main_content_frame = ttk.Frame(canvas)
+    canvas.create_window((0, 0), window=main_content_frame, anchor="nw")
+
+    def on_main_content_configure(event):
+        canvas.configure(scrollregion=canvas.bbox("all"))
+
+    def on_canvas_configure(event):
+        # Adjust the width of the main_content_frame to the canvas width for horizontal scrolling
+        canvas.itemconfig(main_content_window_id, width=event.width)
+
+
+    main_content_frame.bind("<Configure>", on_main_content_configure)
+    # Store the window ID for later use in on_canvas_configure
+    main_content_window_id = canvas.create_window((0,0), window=main_content_frame, anchor='nw')
+    canvas.bind('<Configure>', on_canvas_configure)
+
+
+    # --- End Scrollable Main Container Setup ---
+
+
     current_price_var = None # Will be initialized after root Tk()
 
     status_var = tk.StringVar(value="Welcome! Select environment."); current_env_var = tk.StringVar(value=current_env); balance_var = tk.StringVar(value="N/A")
@@ -5109,8 +5146,8 @@ if __name__ == "__main__":
 
     backtest_selected_strategy_var = tk.StringVar()
 
-
-    controls_frame = ttk.LabelFrame(root, text="Controls"); controls_frame.pack(padx=10, pady=(5,0), fill="x")
+    # --- All main UI elements will be children of main_content_frame ---
+    controls_frame = ttk.LabelFrame(main_content_frame, text="Controls"); controls_frame.pack(padx=10, pady=(5,0), fill="x") # Changed parent
     env_frame = ttk.Frame(controls_frame); env_frame.pack(pady=2, fill="x")
     ttk.Label(env_frame, text="Env:").pack(side=tk.LEFT, padx=(5,2))
     testnet_radio = ttk.Radiobutton(env_frame, text="Testnet", variable=current_env_var, value="testnet", command=toggle_environment); testnet_radio.pack(side=tk.LEFT, padx=2)
@@ -5128,7 +5165,6 @@ if __name__ == "__main__":
 
     ttk.Label(params_input_frame, text="SL/TP Mode:").grid(row=0, column=2, padx=2, pady=2, sticky='w')
     sl_tp_modes = ["Percentage", "ATR/Dynamic", "Fixed PnL", "StrategyDefined_SD"] # Added new mode
-    # Ensure sl_tp_mode_var is initialized here before use, using the global SL_TP_MODE
     sl_tp_mode_var = tk.StringVar(value=SL_TP_MODE) 
     sl_tp_mode_combobox = ttk.Combobox(params_input_frame, textvariable=sl_tp_mode_var, values=sl_tp_modes, width=17, state="readonly") # Increased width
     sl_tp_mode_combobox.grid(row=0, column=3, padx=2, pady=2, sticky='w')
@@ -5146,13 +5182,11 @@ if __name__ == "__main__":
 
     # Row 2: SL PnL Amount ($), TP PnL Amount ($) (for Fixed PnL mode)
     ttk.Label(params_input_frame, text="SL PnL Amount ($):").grid(row=2, column=0, padx=2, pady=2, sticky='w')
-    # Ensure sl_pnl_amount_var is initialized here before use, using the global SL_PNL_AMOUNT
     sl_pnl_amount_var = tk.StringVar(value=str(SL_PNL_AMOUNT)) 
     sl_pnl_amount_entry = ttk.Entry(params_input_frame, textvariable=sl_pnl_amount_var, width=10)
     sl_pnl_amount_entry.grid(row=2, column=1, padx=2, pady=2, sticky='w')
 
     ttk.Label(params_input_frame, text="TP PnL Amount ($):").grid(row=2, column=2, padx=2, pady=2, sticky='w')
-    # Ensure tp_pnl_amount_var is initialized here before use, using the global TP_PNL_AMOUNT
     tp_pnl_amount_var = tk.StringVar(value=str(TP_PNL_AMOUNT)) 
     tp_pnl_amount_entry = ttk.Entry(params_input_frame, textvariable=tp_pnl_amount_var, width=10)
     tp_pnl_amount_entry.grid(row=2, column=3, padx=2, pady=2, sticky='w')
@@ -5190,7 +5224,6 @@ if __name__ == "__main__":
     target_symbols_entry = ttk.Entry(params_input_frame, textvariable=target_symbols_var, width=40) 
     target_symbols_entry.grid(row=5, column=1, columnspan=3, padx=2, pady=2, sticky='we')
 
-    # Populate params_widgets list
     params_widgets = [
         account_risk_percent_entry, sl_tp_mode_combobox,
         sl_percent_entry, tp_percent_entry,
@@ -5199,30 +5232,15 @@ if __name__ == "__main__":
         local_high_low_lookback_entry, margin_type_isolated_radio, margin_type_cross_radio,
         target_symbols_entry
     ]
-    # Configure column weights for params_input_frame
-    params_input_frame.columnconfigure(1, weight=1) # Give weight to entry columns
-    params_input_frame.columnconfigure(3, weight=1) # Give weight to entry columns
+    params_input_frame.columnconfigure(1, weight=1) 
+    params_input_frame.columnconfigure(3, weight=1) 
 
-    # Strategy Selection Frame
     strategy_frame = ttk.LabelFrame(controls_frame, text="Strategy Selection")
     strategy_frame.pack(fill="x", padx=5, pady=5)
     
-    # Clear strategy_radio_buttons if it was used for old radio buttons,
-    # or ensure it doesn't conflict if it's used for other parameter types.
-    # For this refactor, we assume strategy_radio_buttons is exclusively for these strategy selectors.
-    # We will now add checkboxes to params_widgets directly.
-    
-    # Remove old radio buttons from params_widgets if they were added by reference
-    # This is tricky if params_widgets holds mixed types. Assuming it's safe to rebuild part of it.
-    # A safer approach is to filter out the old radio buttons if they had a specific type/name.
-    # For now, let's clear strategy_radio_buttons and rebuild the strategy part of params_widgets.
-    
-    # Filter out previous strategy radio buttons from params_widgets
-    # This assumes they were all Radiobuttons and part of strategy_radio_buttons list previously
-    # A more robust way would be to tag them or manage them in a dedicated list.
-    if strategy_radio_buttons: # If it was populated before
+    if strategy_radio_buttons: 
         params_widgets = [widget for widget in params_widgets if widget not in strategy_radio_buttons]
-        strategy_radio_buttons.clear() # Clear the old list
+        strategy_radio_buttons.clear() 
 
     for strategy_id, strategy_name in STRATEGIES.items():
         var = tk.BooleanVar(value=(strategy_id == selected_strategy_var.get()))
@@ -5232,46 +5250,26 @@ if __name__ == "__main__":
                              variable=var, 
                              command=lambda sid=strategy_id: handle_strategy_checkbox_select(sid))
         cb.pack(anchor='w', padx=5)
-        params_widgets.append(cb) # Add the new checkbox to params_widgets
+        params_widgets.append(cb) 
     
-    # Note: The global 'strategy_radio_buttons' list is no longer used for these strategy selectors.
-    # If it was used for other parameter types, that logic needs to be preserved or adapted.
-    # For this subtask, we assume it was primarily for strategy selection widgets.
-
     api_key_info_label = ttk.Label(controls_frame, text="API Keys from keys.py"); api_key_info_label.pack(pady=2)
     timeframe_label = ttk.Label(controls_frame, text="Timeframe: 5m (fixed)"); timeframe_label.pack(pady=2)
-
-    # Backtesting Engine Frame
-    # backtesting_frame = ttk.LabelFrame(controls_frame, text="Backtesting Engine") # MOVED
-    # backtesting_frame.pack(fill="x", padx=5, pady=5) # MOVED
-
-    # Backtest Parameters Grid
-    # backtest_params_grid = ttk.Frame(backtesting_frame); backtest_params_grid.pack(fill="x", padx=5, pady=5) # MOVED
-    # Definitions of child widgets for backtest_params_grid are moved down, after its re-instantiation.
-    
-    # backtest_run_button = ttk.Button(backtesting_frame, text="Run Backtest", command=run_backtest_command) # MOVED with its parent frame logic
-    # backtest_run_button.pack(pady=5) # MOVED
-
 
     buttons_frame = ttk.Frame(controls_frame); buttons_frame.pack(pady=2)
     start_button = ttk.Button(buttons_frame, text="Start Bot", command=start_bot); start_button.pack(side=tk.LEFT, padx=5)
     stop_button = ttk.Button(buttons_frame, text="Stop Bot", command=stop_bot, state=tk.DISABLED); stop_button.pack(side=tk.LEFT, padx=5)
-    data_frame = ttk.LabelFrame(root, text="Live Data & History"); data_frame.pack(padx=10, pady=5, fill="both", expand=True)
+    
+    data_frame = ttk.LabelFrame(main_content_frame, text="Live Data & History"); data_frame.pack(padx=10, pady=5, fill="both", expand=True) # Changed parent
 
-    # New side-by-side frame for Backtesting and Account Summary
     side_by_side_frame = ttk.Frame(data_frame)
     side_by_side_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-    # Backtesting Engine Frame (moved into side_by_side_frame)
     backtesting_frame = ttk.LabelFrame(side_by_side_frame, text="Backtesting Engine")
     backtesting_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 5), expand=False) 
 
-    # Backtest Parameters Grid (inside the moved backtesting_frame)
     backtest_params_grid = ttk.Frame(backtesting_frame)
     backtest_params_grid.pack(fill="x", padx=5, pady=5)
 
-    # Child UI elements of backtest_params_grid are now defined here:
-    # Row 0: Symbol, Timeframe
     ttk.Label(backtest_params_grid, text="Symbol:").grid(row=0, column=0, padx=2, pady=2, sticky='w')
     backtest_symbol_entry = ttk.Entry(backtest_params_grid, textvariable=backtest_symbol_var, width=12)
     backtest_symbol_entry.grid(row=0, column=1, padx=2, pady=2, sticky='w')
@@ -5280,17 +5278,14 @@ if __name__ == "__main__":
     backtest_timeframe_entry = ttk.Entry(backtest_params_grid, textvariable=backtest_timeframe_var, width=7)
     backtest_timeframe_entry.grid(row=0, column=3, padx=2, pady=2, sticky='w')
 
-    # Row 1: Interval (days), SL/TP Mode
     ttk.Label(backtest_params_grid, text="Interval (days):").grid(row=1, column=0, padx=2, pady=2, sticky='w')
     backtest_interval_entry = ttk.Entry(backtest_params_grid, textvariable=backtest_interval_var, width=7)
     backtest_interval_entry.grid(row=1, column=1, padx=2, pady=2, sticky='w')
     
     ttk.Label(backtest_params_grid, text="SL/TP Mode:").grid(row=1, column=2, padx=2, pady=2, sticky='w')
-    # backtest_sl_tp_modes is same as sl_tp_modes global list (which now includes "StrategyDefined_SD")
     backtest_sl_tp_mode_combobox = ttk.Combobox(backtest_params_grid, textvariable=backtest_sl_tp_mode_var, values=sl_tp_modes, width=17, state="readonly") # Increased width
     backtest_sl_tp_mode_combobox.grid(row=1, column=3, padx=2, pady=2, sticky='w')
 
-    # Row 2: SL Percent, TP Percent (for "Percentage" mode)
     ttk.Label(backtest_params_grid, text="Stop Loss %:").grid(row=2, column=0, padx=2, pady=2, sticky='w')
     backtest_sl_entry = ttk.Entry(backtest_params_grid, textvariable=backtest_sl_var, width=7) 
     backtest_sl_entry.grid(row=2, column=1, padx=2, pady=2, sticky='w')
@@ -5299,7 +5294,6 @@ if __name__ == "__main__":
     backtest_tp_entry = ttk.Entry(backtest_params_grid, textvariable=backtest_tp_var, width=7) 
     backtest_tp_entry.grid(row=2, column=3, padx=2, pady=2, sticky='w')
 
-    # Row 3: SL PnL Amount ($), TP PnL Amount ($) (for "Fixed PnL" mode)
     ttk.Label(backtest_params_grid, text="SL PnL Amt ($):").grid(row=3, column=0, padx=2, pady=2, sticky='w')
     backtest_sl_pnl_amount_entry = ttk.Entry(backtest_params_grid, textvariable=backtest_sl_pnl_amount_var, width=7)
     backtest_sl_pnl_amount_entry.grid(row=3, column=1, padx=2, pady=2, sticky='w')
@@ -5308,34 +5302,22 @@ if __name__ == "__main__":
     backtest_tp_pnl_amount_entry = ttk.Entry(backtest_params_grid, textvariable=backtest_tp_pnl_amount_var, width=7)
     backtest_tp_pnl_amount_entry.grid(row=3, column=3, padx=2, pady=2, sticky='w')
 
-    # Row 4: Starting Capital
     ttk.Label(backtest_params_grid, text="Start Capital ($):").grid(row=4, column=0, padx=2, pady=2, sticky='w')
     backtest_starting_capital_entry = ttk.Entry(backtest_params_grid, textvariable=backtest_starting_capital_var, width=12)
     backtest_starting_capital_entry.grid(row=4, column=1, padx=2, pady=2, sticky='w')
 
-    # Row 5: Leverage for Backtesting
     ttk.Label(backtest_params_grid, text="Leverage (e.g., 10):").grid(row=5, column=0, padx=2, pady=2, sticky='w')
     backtest_leverage_entry = ttk.Entry(backtest_params_grid, textvariable=backtest_leverage_var, width=7)
     backtest_leverage_entry.grid(row=5, column=1, padx=2, pady=2, sticky='w')
     
-    # Row 6: Backtest Strategy (was Row 5)
     ttk.Label(backtest_params_grid, text="Backtest Strategy:").grid(row=6, column=0, padx=2, pady=2, sticky='w')
     backtest_strategy_combobox = ttk.Combobox(backtest_params_grid, textvariable=backtest_selected_strategy_var, values=list(STRATEGIES.values()), width=25, state="readonly")
-    if STRATEGIES: backtest_strategy_combobox.current(ACTIVE_STRATEGY_ID if ACTIVE_STRATEGY_ID in STRATEGIES else 0) # Default to current active or first
-    backtest_strategy_combobox.grid(row=6, column=1, columnspan=3, padx=2, pady=2, sticky='w') # Corrected row to 6
+    if STRATEGIES: backtest_strategy_combobox.current(ACTIVE_STRATEGY_ID if ACTIVE_STRATEGY_ID in STRATEGIES else 0) 
+    backtest_strategy_combobox.grid(row=6, column=1, columnspan=3, padx=2, pady=2, sticky='w') 
     
-    # backtest_run_button is defined after its parent backtesting_frame is fully configured.
-    # It's not a child of backtest_params_grid, so its definition remains separate but after backtesting_frame.
-    # The actual definition of backtest_run_button is handled where backtesting_frame's other direct children are defined.
-    # For this specific move, we ensure backtest_params_grid children are correct.
-    # The backtest_run_button's definition will be placed after backtesting_frame and its main children like backtest_params_grid and backtest_results_frame.
-
-    # Account Summary Frame (New)
     account_summary_frame = ttk.LabelFrame(side_by_side_frame, text="Account Summary")
     account_summary_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
-    # ttk.Label(account_summary_frame, text="Account summary data will appear here.").pack(padx=10, pady=10) # Remove placeholder
 
-    # Add new labels to account_summary_frame
     ttk.Label(account_summary_frame, text="Account Balance:").grid(row=0, column=0, sticky="w", padx=5, pady=2)
     ttk.Label(account_summary_frame, textvariable=account_summary_balance_var).grid(row=0, column=1, sticky="w", padx=5, pady=2)
 
@@ -5353,10 +5335,9 @@ if __name__ == "__main__":
     ttk.Label(activity_display_frame, text="Current Activity:").pack(side=tk.LEFT, padx=(0,5))
     ttk.Label(activity_display_frame, textvariable=activity_status_var).pack(side=tk.LEFT)
 
-    # Real-time Price Display Frame
     price_display_frame = ttk.Frame(data_frame)
     price_display_frame.pack(pady=(2,2), padx=5, fill="x")
-    current_price_var = tk.StringVar(value="Scanning: N/A - Price: N/A") # Initialize here
+    current_price_var = tk.StringVar(value="Scanning: N/A - Price: N/A") 
     price_label = ttk.Label(price_display_frame, textvariable=current_price_var)
     price_label.pack(side=tk.LEFT)
 
@@ -5374,18 +5355,17 @@ if __name__ == "__main__":
     conditions_text_widget = scrolledtext.ScrolledText(conditions_frame, height=8, width=70, state=tk.DISABLED, wrap=tk.WORD)
     conditions_text_widget.pack(pady=5, padx=5, fill="both", expand=True)
 
-    # Backtest Results Display Area (Now inside backtesting_frame)
-    backtest_results_frame = ttk.LabelFrame(backtesting_frame, text="Backtest Results") # Parent changed to backtesting_frame
-    backtest_results_frame.pack(pady=(2,5), padx=5, fill="both", expand=True) # This should be after backtesting_frame is defined
+    backtest_results_frame = ttk.LabelFrame(backtesting_frame, text="Backtest Results") 
+    backtest_results_frame.pack(pady=(2,5), padx=5, fill="both", expand=True) 
     backtest_results_text_widget = scrolledtext.ScrolledText(backtest_results_frame, height=10, width=70, state=tk.DISABLED, wrap=tk.WORD)
     backtest_results_text_widget.pack(pady=5, padx=5, fill="both", expand=True)
 
-    # backtest_run_button's definition needs to be here, after backtesting_frame is defined and configured.
     backtest_run_button = ttk.Button(backtesting_frame, text="Run Backtest", command=run_backtest_command) 
     backtest_run_button.pack(pady=5)
 
-
-    status_label = ttk.Label(root, textvariable=status_var, relief=tk.SUNKEN, anchor=tk.W); status_label.pack(padx=10, pady=(0,5), fill="x", side=tk.BOTTOM)
+    # Status label is now a child of root, packed after scrollable_canvas_frame and h_scrollbar
+    status_label = ttk.Label(root, textvariable=status_var, relief=tk.SUNKEN, anchor=tk.W)
+    status_label.pack(padx=10, pady=(0,5), fill="x", side=tk.BOTTOM) # Keep it at the very bottom
     root.update_idletasks(); status_label.config(wraplength=root.winfo_width() - 20)
     root.bind("<Configure>", lambda event, widget=status_label: widget.config(wraplength=root.winfo_width() - 20))
     
