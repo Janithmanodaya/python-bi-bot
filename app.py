@@ -715,117 +715,153 @@ class BacktestStrategyWrapper(Strategy):
                 # print(f"{log_prefix_bt_next} S5: No trade signal this bar.")
         
         elif self.current_strategy_id == 6: # Market Structure S/D Strategy
+            # Ensure log_prefix_bt_next uses a dynamic precision based on self.PRICE_PRECISION_BT
+            # However, price itself is already a float here. Formatting is for the print string.
+            # For consistency, let's define precision for logging here.
+            log_price_precision = getattr(self, 'PRICE_PRECISION_BT', 4) # Default to 4 if not set
+
             if self.position:
-                # print(f"{log_prefix_bt_next} S6: Already in position. Skipping.")
+                print(f"{log_prefix_bt_next} S6: Already in position. Skipping.")
                 return
 
             if not hasattr(self, 'bt_swing_highs_bool') or not hasattr(self, 'bt_sd_zones') or self.atr is None:
-                # print(f"{log_prefix_bt_next} S6: Required attributes (swings, zones, atr) not initialized. Skipping.")
+                print(f"{log_prefix_bt_next} S6: Required attributes (swings, zones, atr) not initialized. Skipping.")
                 return
             
-            current_data_slice_df = self.data.df.iloc[:len(self.data.Close)] # Data up to current bar
-            if len(current_data_slice_df) < 20: # Min length for market structure, can be tuned
-                # print(f"{log_prefix_bt_next} S6: Insufficient data for S6 logic ({len(current_data_slice_df)} bars).")
+            current_data_slice_df = self.data.df.iloc[:len(self.data.Close)] 
+            if len(current_data_slice_df) < 20: 
+                print(f"{log_prefix_bt_next} S6: Insufficient data for S6 logic ({len(current_data_slice_df)} bars).")
                 return
 
-            # Filter pre-calculated swing points for the current data slice
+            current_bar_timestamp = self.data.index[-1]
+            entry_price_s6 = price # Current closing price as potential entry
+
+            # --- DEBUG PRINT: Initial Info ---
+            print(f"{log_prefix_bt_next} S6 DEBUG: Bar Timestamp: {current_bar_timestamp}, Current Price: {entry_price_s6:.{log_price_precision}f}")
+
             current_swing_highs = self.bt_swing_highs_bool[self.bt_swing_highs_bool.index.isin(current_data_slice_df.index)]
             current_swing_lows = self.bt_swing_lows_bool[self.bt_swing_lows_bool.index.isin(current_data_slice_df.index)]
             
             try:
                 market_structure = identify_market_structure(current_data_slice_df, current_swing_highs, current_swing_lows)
+                # --- DEBUG PRINT: Market Structure ---
+                print(f"{log_prefix_bt_next} S6 DEBUG: Market Bias: {market_structure['trend_bias']}, Valid High: {market_structure.get('last_valid_high_price', 'N/A')}, Valid Low: {market_structure.get('last_valid_low_price', 'N/A')}")
             except Exception as e_ms:
-                # print(f"{log_prefix_bt_next} S6: Error in identify_market_structure: {e_ms}")
+                print(f"{log_prefix_bt_next} S6: Error in identify_market_structure: {e_ms}")
                 return
 
-            # Filter S/D zones that are historical relative to the current bar
-            # self.data.index[-1] is the timestamp of the current candle's close
-            current_bar_timestamp = self.data.index[-1]
             historical_sd_zones = [
                 zone for zone in self.bt_sd_zones 
                 if zone['timestamp_end'] < current_bar_timestamp 
             ]
             
             if not historical_sd_zones:
-                # print(f"{log_prefix_bt_next} S6: No historical S/D zones found relative to current bar.")
+                print(f"{log_prefix_bt_next} S6: No historical S/D zones found relative to current bar.")
                 return
 
             potential_trade_s6 = None
-            entry_price_s6 = price # Current closing price as potential entry
+            
+            # Check trend bias: if 'ranging', skip (as per problem description "skips only truly ranging markets")
+            # The identify_market_structure function should ideally handle this.
+            # If it returns 'ranging', we should not proceed to look for entries.
+            if market_structure['trend_bias'] == 'ranging':
+                print(f"{log_prefix_bt_next} S6: Market trend_bias is 'ranging'. Skipping S/D zone checks.")
+                return # Do not proceed if market is ranging
 
             if market_structure['trend_bias'] == 'bullish':
                 demand_zones = [z for z in historical_sd_zones if z['type'] == 'demand']
-                demand_zones.sort(key=lambda z: z['timestamp_end'], reverse=True) # Most recent first
+                demand_zones.sort(key=lambda z: z['timestamp_end'], reverse=True) 
                 if demand_zones:
-                    zone = demand_zones[0]
-                    if zone['price_start'] <= entry_price_s6 <= zone['price_end']: # Price in demand zone
-                        sl_s6_raw = zone['price_start'] - ((zone['price_end'] - zone['price_start']) * 0.10)
+                    zone = demand_zones[0] # Most recent historical demand zone
+                    
+                    # Add 0.5% buffer to zone edges for entry condition
+                    buffered_zone_start = zone['price_start'] * (1 - 0.005)
+                    buffered_zone_end = zone['price_end'] * (1 + 0.005)
+
+                    # --- DEBUG PRINT: Zone Info (Bullish) ---
+                    print(f"{log_prefix_bt_next} S6 DEBUG Bullish: Checking Demand Zone: Original Start={zone['price_start']:.{log_price_precision}f}, Original End={zone['price_end']:.{log_price_precision}f}. Buffered Entry Range: {buffered_zone_start:.{log_price_precision}f} - {buffered_zone_end:.{log_price_precision}f}")
+
+                    if buffered_zone_start <= entry_price_s6 <= buffered_zone_end: # Price in buffered demand zone
+                        # SL calculation uses original zone boundary + small percentage of zone height
+                        sl_s6_raw = zone['price_start'] - ((zone['price_end'] - zone['price_start']) * 0.10) # Example: 10% of zone height as SL distance from bottom
                         sl_s6 = round(sl_s6_raw, self.PRICE_PRECISION_BT)
-                        print(f"{log_prefix_bt_next} S6 BT Bullish: RawSL={sl_s6_raw:.{self.PRICE_PRECISION_BT}f}, SL={sl_s6:.{self.PRICE_PRECISION_BT}f}")
                         
                         tp_s6_raw = market_structure.get('last_valid_high_price') or market_structure.get('current_swing_high_price')
                         if tp_s6_raw is None: 
                             print(f"{log_prefix_bt_next} S6 BT Bullish: No valid TP target (swing high). Skipping."); return
                         tp_s6 = round(tp_s6_raw, self.PRICE_PRECISION_BT)
-                        print(f"{log_prefix_bt_next} S6 BT Bullish: RawTP={tp_s6_raw:.{self.PRICE_PRECISION_BT}f}, TP={tp_s6:.{self.PRICE_PRECISION_BT}f}")
 
-                        if tp_s6 > entry_price_s6 and sl_s6 < entry_price_s6:
+                        # --- DEBUG PRINT: SL/TP Info (Bullish) ---
+                        print(f"{log_prefix_bt_next} S6 DEBUG Bullish: Potential Entry: {entry_price_s6:.{log_price_precision}f}, SL: {sl_s6:.{log_price_precision}f} (RawSL based on original zone: {sl_s6_raw:.{log_price_precision}f}), TP: {tp_s6:.{log_price_precision}f} (RawTP: {tp_s6_raw:.{log_price_precision}f})")
+
+                        if tp_s6 > entry_price_s6 and sl_s6 < entry_price_s6: # Basic SL/TP validity
                             reward = tp_s6 - entry_price_s6
                             risk = entry_price_s6 - sl_s6
                             if risk > 0:
                                 rr_ratio_s6 = reward / risk
-                                print(f"{log_prefix_bt_next} S6 BT Bullish: Reward={reward:.{self.PRICE_PRECISION_BT}f}, Risk={risk:.{self.PRICE_PRECISION_BT}f}, R:R={rr_ratio_s6:.2f}")
-                                if rr_ratio_s6 >= 2.5:
+                                # --- DEBUG PRINT: R:R (Bullish) ---
+                                print(f"{log_prefix_bt_next} S6 DEBUG Bullish: Reward={reward:.{log_price_precision}f}, Risk={risk:.{log_price_precision}f}, R:R={rr_ratio_s6:.2f}")
+                                
+                                if rr_ratio_s6 >= 1.5: # Lowered R:R threshold
                                     potential_trade_s6 = {'signal': 'buy', 'sl': sl_s6, 'tp': tp_s6}
-                                else: print(f"{log_prefix_bt_next} S6 BT Bullish: R:R too low ({rr_ratio_s6:.2f}). Skipping.")
-                            else: print(f"{log_prefix_bt_next} S6 BT Bullish: Risk is not positive ({risk:.{self.PRICE_PRECISION_BT}f}). Skipping.")
-                        else: print(f"{log_prefix_bt_next} S6 BT Bullish: SL/TP invalid relation to entry. SL={sl_s6}, TP={tp_s6}, Entry={entry_price_s6}. Skipping.")
-                    else: print(f"{log_prefix_bt_next} S6 BT Bullish: Price {entry_price_s6} not in demand zone [{zone['price_start']}, {zone['price_end']}].")
-                else: print(f"{log_prefix_bt_next} S6 BT Bullish: No relevant demand zones found.")
+                                else: print(f"{log_prefix_bt_next} S6 BT Bullish: R:R too low ({rr_ratio_s6:.2f} < 1.5). Skipping.")
+                            else: print(f"{log_prefix_bt_next} S6 BT Bullish: Risk is not positive ({risk:.{log_price_precision}f}). Skipping.")
+                        else: print(f"{log_prefix_bt_next} S6 BT Bullish: SL/TP ({sl_s6}, {tp_s6}) invalid relative to entry ({entry_price_s6}). Skipping.")
+                    else: print(f"{log_prefix_bt_next} S6 BT Bullish: Price {entry_price_s6:.{log_price_precision}f} not in buffered demand zone [{buffered_zone_start:.{log_price_precision}f} - {buffered_zone_end:.{log_price_precision}f}]. Orig Zone: [{zone['price_start']:.{log_price_precision}f} - {zone['price_end']:.{log_price_precision}f}]")
+                else: print(f"{log_prefix_bt_next} S6 BT Bullish: No relevant historical demand zones found.")
             
             elif market_structure['trend_bias'] == 'bearish':
                 supply_zones = [z for z in historical_sd_zones if z['type'] == 'supply']
                 supply_zones.sort(key=lambda z: z['timestamp_end'], reverse=True)
-                print(f"{log_prefix_bt_next} S6 BT Bearish: Found {len(supply_zones)} historical supply zones. Considering most recent.")
                 if supply_zones:
-                    zone = supply_zones[0]
-                    print(f"{log_prefix_bt_next} S6 BT Bearish: Zone: Start={zone['price_start']:.{self.PRICE_PRECISION_BT}f}, End={zone['price_end']:.{self.PRICE_PRECISION_BT}f}")
-                    if zone['price_start'] <= entry_price_s6 <= zone['price_end']: # Price in supply zone
-                        sl_s6_raw = zone['price_end'] + ((zone['price_end'] - zone['price_start']) * 0.10)
-                        sl_s6 = round(sl_s6_raw, self.PRICE_PRECISION_BT)
-                        print(f"{log_prefix_bt_next} S6 BT Bearish: RawSL={sl_s6_raw:.{self.PRICE_PRECISION_BT}f}, SL={sl_s6:.{self.PRICE_PRECISION_BT}f}")
+                    zone = supply_zones[0] # Most recent historical supply zone
 
+                    buffered_zone_start = zone['price_start'] * (1 - 0.005)
+                    buffered_zone_end = zone['price_end'] * (1 + 0.005)
+
+                    # --- DEBUG PRINT: Zone Info (Bearish) ---
+                    print(f"{log_prefix_bt_next} S6 DEBUG Bearish: Checking Supply Zone: Original Start={zone['price_start']:.{log_price_precision}f}, Original End={zone['price_end']:.{log_price_precision}f}. Buffered Entry Range: {buffered_zone_start:.{log_price_precision}f} - {buffered_zone_end:.{log_price_precision}f}")
+
+                    if buffered_zone_start <= entry_price_s6 <= buffered_zone_end: # Price in buffered supply zone
+                        sl_s6_raw = zone['price_end'] + ((zone['price_end'] - zone['price_start']) * 0.10) # Example: 10% of zone height as SL distance from top
+                        sl_s6 = round(sl_s6_raw, self.PRICE_PRECISION_BT)
+                        
                         tp_s6_raw = market_structure.get('last_valid_low_price') or market_structure.get('current_swing_low_price')
                         if tp_s6_raw is None: 
                             print(f"{log_prefix_bt_next} S6 BT Bearish: No valid TP target (swing low). Skipping."); return
                         tp_s6 = round(tp_s6_raw, self.PRICE_PRECISION_BT)
-                        print(f"{log_prefix_bt_next} S6 BT Bearish: RawTP={tp_s6_raw:.{self.PRICE_PRECISION_BT}f}, TP={tp_s6:.{self.PRICE_PRECISION_BT}f}")
-                        
-                        if tp_s6 < entry_price_s6 and sl_s6 > entry_price_s6:
+
+                        # --- DEBUG PRINT: SL/TP Info (Bearish) ---
+                        print(f"{log_prefix_bt_next} S6 DEBUG Bearish: Potential Entry: {entry_price_s6:.{log_price_precision}f}, SL: {sl_s6:.{log_price_precision}f} (RawSL based on original zone: {sl_s6_raw:.{log_price_precision}f}), TP: {tp_s6:.{log_price_precision}f} (RawTP: {tp_s6_raw:.{log_price_precision}f})")
+
+                        if tp_s6 < entry_price_s6 and sl_s6 > entry_price_s6: # Basic SL/TP validity
                             reward = entry_price_s6 - tp_s6
                             risk = sl_s6 - entry_price_s6
                             if risk > 0:
                                 rr_ratio_s6 = reward / risk
-                                print(f"{log_prefix_bt_next} S6 BT Bearish: Reward={reward:.{self.PRICE_PRECISION_BT}f}, Risk={risk:.{self.PRICE_PRECISION_BT}f}, R:R={rr_ratio_s6:.2f}")
-                                if rr_ratio_s6 >= 2.5:
-                                    potential_trade_s6 = {'signal': 'sell', 'sl': sl_s6, 'tp': tp_s6}
-                                else: print(f"{log_prefix_bt_next} S6 BT Bearish: R:R too low ({rr_ratio_s6:.2f}). Skipping.")
-                            else: print(f"{log_prefix_bt_next} S6 BT Bearish: Risk is not positive ({risk:.{self.PRICE_PRECISION_BT}f}). Skipping.")
-                        else: print(f"{log_prefix_bt_next} S6 BT Bearish: SL/TP invalid relation to entry. SL={sl_s6}, TP={tp_s6}, Entry={entry_price_s6}. Skipping.")
-                    else: print(f"{log_prefix_bt_next} S6 BT Bearish: Price {entry_price_s6} not in supply zone [{zone['price_start']}, {zone['price_end']}].")
-                else: print(f"{log_prefix_bt_next} S6 BT Bearish: No relevant supply zones found.")
-            else: # Ranging or other
-                print(f"{log_prefix_bt_next} S6 BT: Trend is '{market_structure['trend_bias']}'. No S/D trades taken.")
+                                # --- DEBUG PRINT: R:R (Bearish) ---
+                                print(f"{log_prefix_bt_next} S6 DEBUG Bearish: Reward={reward:.{log_price_precision}f}, Risk={risk:.{log_price_precision}f}, R:R={rr_ratio_s6:.2f}")
 
-            
+                                if rr_ratio_s6 >= 1.5: # Lowered R:R threshold
+                                    potential_trade_s6 = {'signal': 'sell', 'sl': sl_s6, 'tp': tp_s6}
+                                else: print(f"{log_prefix_bt_next} S6 BT Bearish: R:R too low ({rr_ratio_s6:.2f} < 1.5). Skipping.")
+                            else: print(f"{log_prefix_bt_next} S6 BT Bearish: Risk is not positive ({risk:.{log_price_precision}f}). Skipping.")
+                        else: print(f"{log_prefix_bt_next} S6 BT Bearish: SL/TP ({sl_s6}, {tp_s6}) invalid relative to entry ({entry_price_s6}). Skipping.")
+                    else: print(f"{log_prefix_bt_next} S6 BT Bearish: Price {entry_price_s6:.{log_price_precision}f} not in buffered supply zone [{buffered_zone_start:.{log_price_precision}f} - {buffered_zone_end:.{log_price_precision}f}]. Orig Zone: [{zone['price_start']:.{log_price_precision}f} - {zone['price_end']:.{log_price_precision}f}]")
+                else: print(f"{log_prefix_bt_next} S6 BT Bearish: No relevant historical supply zones found.")
+            # Implicitly, if trend_bias is not 'bullish' or 'bearish' (e.g. 'ranging' or other), no action is taken here.
+            # The earlier check `if market_structure['trend_bias'] == 'ranging': return` handles explicit ranging.
+
             if potential_trade_s6:
-                print(f"{log_prefix_bt_next} S6 Placing Trade: Side={potential_trade_s6['signal']}, Entry={entry_price_s6:.{self.PRICE_PRECISION_BT}f}, SL={potential_trade_s6['sl']:.{self.PRICE_PRECISION_BT}f}, TP={potential_trade_s6['tp']:.{self.PRICE_PRECISION_BT}f}, Size={trade_size_to_use_in_order}")
+                print(f"{log_prefix_bt_next} S6 Placing Trade: Side={potential_trade_s6['signal']}, Entry={entry_price_s6:.{log_price_precision}f}, SL={potential_trade_s6['sl']:.{log_price_precision}f}, TP={potential_trade_s6['tp']:.{log_price_precision}f}, Size={trade_size_to_use_in_order}")
                 if potential_trade_s6['signal'] == 'buy':
                     self.buy(sl=potential_trade_s6['sl'], tp=potential_trade_s6['tp'], size=trade_size_to_use_in_order)
                 else: # sell
                     self.sell(sl=potential_trade_s6['sl'], tp=potential_trade_s6['tp'], size=trade_size_to_use_in_order)
-            # else:
-                # print(f"{log_prefix_bt_next} S6: No valid trade signal this bar.")
+            else:
+                 # This 'else' means no 'potential_trade_s6' was formed.
+                 # Debug prints within the logic above should indicate why (e.g., R:R too low, price not in zone, etc.)
+                 print(f"{log_prefix_bt_next} S6: No valid trade signal this bar based on refined conditions.")
 
         # else: # Other strategies not yet updated for this new SL/TP structure
             # print(f"{log_prefix_bt_next} Strategy ID {self.current_strategy_id} not fully updated for new SL/TP modes in next().")
