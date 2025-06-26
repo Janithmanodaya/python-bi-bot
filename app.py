@@ -761,42 +761,65 @@ class BacktestStrategyWrapper(Strategy):
                     if zone['price_start'] <= entry_price_s6 <= zone['price_end']: # Price in demand zone
                         sl_s6_raw = zone['price_start'] - ((zone['price_end'] - zone['price_start']) * 0.10)
                         sl_s6 = round(sl_s6_raw, self.PRICE_PRECISION_BT)
+                        print(f"{log_prefix_bt_next} S6 BT Bullish: RawSL={sl_s6_raw:.{self.PRICE_PRECISION_BT}f}, SL={sl_s6:.{self.PRICE_PRECISION_BT}f}")
                         
                         tp_s6_raw = market_structure.get('last_valid_high_price') or market_structure.get('current_swing_high_price')
-                        if tp_s6_raw is None: return # No valid TP
+                        if tp_s6_raw is None: 
+                            print(f"{log_prefix_bt_next} S6 BT Bullish: No valid TP target (swing high). Skipping."); return
                         tp_s6 = round(tp_s6_raw, self.PRICE_PRECISION_BT)
+                        print(f"{log_prefix_bt_next} S6 BT Bullish: RawTP={tp_s6_raw:.{self.PRICE_PRECISION_BT}f}, TP={tp_s6:.{self.PRICE_PRECISION_BT}f}")
 
                         if tp_s6 > entry_price_s6 and sl_s6 < entry_price_s6:
                             reward = tp_s6 - entry_price_s6
                             risk = entry_price_s6 - sl_s6
-                            if risk > 0 and (reward / risk) >= 2.5:
-                                potential_trade_s6 = {'signal': 'buy', 'sl': sl_s6, 'tp': tp_s6}
-                            # else: print(f"{log_prefix_bt_next} S6 Bullish: R:R too low or invalid. R={reward}, Risk={risk}")
-                        # else: print(f"{log_prefix_bt_next} S6 Bullish: SL/TP invalid relation to entry. SL={sl_s6}, TP={tp_s6}, Entry={entry_price_s6}")
+                            if risk > 0:
+                                rr_ratio_s6 = reward / risk
+                                print(f"{log_prefix_bt_next} S6 BT Bullish: Reward={reward:.{self.PRICE_PRECISION_BT}f}, Risk={risk:.{self.PRICE_PRECISION_BT}f}, R:R={rr_ratio_s6:.2f}")
+                                if rr_ratio_s6 >= 2.5:
+                                    potential_trade_s6 = {'signal': 'buy', 'sl': sl_s6, 'tp': tp_s6}
+                                else: print(f"{log_prefix_bt_next} S6 BT Bullish: R:R too low ({rr_ratio_s6:.2f}). Skipping.")
+                            else: print(f"{log_prefix_bt_next} S6 BT Bullish: Risk is not positive ({risk:.{self.PRICE_PRECISION_BT}f}). Skipping.")
+                        else: print(f"{log_prefix_bt_next} S6 BT Bullish: SL/TP invalid relation to entry. SL={sl_s6}, TP={tp_s6}, Entry={entry_price_s6}. Skipping.")
+                    else: print(f"{log_prefix_bt_next} S6 BT Bullish: Price {entry_price_s6} not in demand zone [{zone['price_start']}, {zone['price_end']}].")
+                else: print(f"{log_prefix_bt_next} S6 BT Bullish: No relevant demand zones found.")
             
             elif market_structure['trend_bias'] == 'bearish':
                 supply_zones = [z for z in historical_sd_zones if z['type'] == 'supply']
                 supply_zones.sort(key=lambda z: z['timestamp_end'], reverse=True)
+                print(f"{log_prefix_bt_next} S6 BT Bearish: Found {len(supply_zones)} historical supply zones. Considering most recent.")
                 if supply_zones:
                     zone = supply_zones[0]
+                    print(f"{log_prefix_bt_next} S6 BT Bearish: Zone: Start={zone['price_start']:.{self.PRICE_PRECISION_BT}f}, End={zone['price_end']:.{self.PRICE_PRECISION_BT}f}")
                     if zone['price_start'] <= entry_price_s6 <= zone['price_end']: # Price in supply zone
                         sl_s6_raw = zone['price_end'] + ((zone['price_end'] - zone['price_start']) * 0.10)
                         sl_s6 = round(sl_s6_raw, self.PRICE_PRECISION_BT)
+                        print(f"{log_prefix_bt_next} S6 BT Bearish: RawSL={sl_s6_raw:.{self.PRICE_PRECISION_BT}f}, SL={sl_s6:.{self.PRICE_PRECISION_BT}f}")
 
                         tp_s6_raw = market_structure.get('last_valid_low_price') or market_structure.get('current_swing_low_price')
-                        if tp_s6_raw is None: return # No valid TP
+                        if tp_s6_raw is None: 
+                            print(f"{log_prefix_bt_next} S6 BT Bearish: No valid TP target (swing low). Skipping."); return
                         tp_s6 = round(tp_s6_raw, self.PRICE_PRECISION_BT)
-
+                        print(f"{log_prefix_bt_next} S6 BT Bearish: RawTP={tp_s6_raw:.{self.PRICE_PRECISION_BT}f}, TP={tp_s6:.{self.PRICE_PRECISION_BT}f}")
+                        
                         if tp_s6 < entry_price_s6 and sl_s6 > entry_price_s6:
                             reward = entry_price_s6 - tp_s6
                             risk = sl_s6 - entry_price_s6
-                            if risk > 0 and (reward / risk) >= 2.5:
-                                potential_trade_s6 = {'signal': 'sell', 'sl': sl_s6, 'tp': tp_s6}
-                            # else: print(f"{log_prefix_bt_next} S6 Bearish: R:R too low or invalid. R={reward}, Risk={risk}")
-                        # else: print(f"{log_prefix_bt_next} S6 Bearish: SL/TP invalid relation to entry. SL={sl_s6}, TP={tp_s6}, Entry={entry_price_s6}")
+                            if risk > 0:
+                                rr_ratio_s6 = reward / risk
+                                print(f"{log_prefix_bt_next} S6 BT Bearish: Reward={reward:.{self.PRICE_PRECISION_BT}f}, Risk={risk:.{self.PRICE_PRECISION_BT}f}, R:R={rr_ratio_s6:.2f}")
+                                if rr_ratio_s6 >= 2.5:
+                                    potential_trade_s6 = {'signal': 'sell', 'sl': sl_s6, 'tp': tp_s6}
+                                else: print(f"{log_prefix_bt_next} S6 BT Bearish: R:R too low ({rr_ratio_s6:.2f}). Skipping.")
+                            else: print(f"{log_prefix_bt_next} S6 BT Bearish: Risk is not positive ({risk:.{self.PRICE_PRECISION_BT}f}). Skipping.")
+                        else: print(f"{log_prefix_bt_next} S6 BT Bearish: SL/TP invalid relation to entry. SL={sl_s6}, TP={tp_s6}, Entry={entry_price_s6}. Skipping.")
+                    else: print(f"{log_prefix_bt_next} S6 BT Bearish: Price {entry_price_s6} not in supply zone [{zone['price_start']}, {zone['price_end']}].")
+                else: print(f"{log_prefix_bt_next} S6 BT Bearish: No relevant supply zones found.")
+            else: # Ranging or other
+                print(f"{log_prefix_bt_next} S6 BT: Trend is '{market_structure['trend_bias']}'. No S/D trades taken.")
+
             
             if potential_trade_s6:
-                # print(f"{log_prefix_bt_next} S6 Placing Trade: Side={potential_trade_s6['signal']}, Entry={entry_price_s6:.2f}, SL={potential_trade_s6['sl']:.2f}, TP={potential_trade_s6['tp']:.2f}, Size={trade_size_to_use_in_order}")
+                print(f"{log_prefix_bt_next} S6 Placing Trade: Side={potential_trade_s6['signal']}, Entry={entry_price_s6:.{self.PRICE_PRECISION_BT}f}, SL={potential_trade_s6['sl']:.{self.PRICE_PRECISION_BT}f}, TP={potential_trade_s6['tp']:.{self.PRICE_PRECISION_BT}f}, Size={trade_size_to_use_in_order}")
                 if potential_trade_s6['signal'] == 'buy':
                     self.buy(sl=potential_trade_s6['sl'], tp=potential_trade_s6['tp'], size=trade_size_to_use_in_order)
                 else: # sell
@@ -868,13 +891,15 @@ def execute_backtest(strategy_id_for_backtest, symbol, timeframe, interval_days,
         BacktestStrategyWrapper.user_tp = 0 
         BacktestStrategyWrapper.user_sl = 0
         print(f"DEBUG execute_backtest: Using Fixed PnL SL/TP - SL PnL: ${BacktestStrategyWrapper.sl_pnl_amount_bt:.2f}, TP PnL: ${BacktestStrategyWrapper.tp_pnl_amount_bt:.2f}")
-    elif sl_tp_mode == "ATR/Dynamic":
+    elif sl_tp_mode == "ATR/Dynamic" or sl_tp_mode == "StrategyDefined_SD": # Added StrategyDefined_SD
         # Reset other modes' params for clarity
         BacktestStrategyWrapper.user_tp = 0 
         BacktestStrategyWrapper.user_sl = 0
         BacktestStrategyWrapper.sl_pnl_amount_bt = 0.0
         BacktestStrategyWrapper.tp_pnl_amount_bt = 0.0
-        print(f"DEBUG execute_backtest: Using ATR/Dynamic SL/TP. RR: {BacktestStrategyWrapper.RR}, SL_ATR_MULTI: {BacktestStrategyWrapper.SL_ATR_MULTI}")
+        # For "StrategyDefined_SD", RR and SL_ATR_MULTI might not be directly used from wrapper defaults if strategy_market_structure_sd fully defines SL/TP.
+        # However, logging them might still be informative if the backtesting strategy falls back or uses parts of ATR logic.
+        print(f"DEBUG execute_backtest: Using {sl_tp_mode} SL/TP. Strategy will define SL/TP. Wrapper RR: {BacktestStrategyWrapper.RR}, SL_ATR_MULTI: {BacktestStrategyWrapper.SL_ATR_MULTI}")
     
     print(f"DEBUG execute_backtest: Strategy RSI period: {getattr(BacktestStrategyWrapper, 'rsi_period', 'N/A')}") # Also log rsi_period
 
@@ -1128,7 +1153,25 @@ def run_backtest_command():
                  if backtest_run_button: backtest_run_button.config(state=tk.NORMAL)
                  return
             # sl_percentage and tp_percentage (and sl_pnl, tp_pnl) remain 0.0 as they are not used.
-            # The BacktestStrategyWrapper will use its internal ATR logic.
+            # The BacktestStrategyWrapper will use its internal ATR logic (or strategy-defined for StrategyDefined_SD).
+        elif current_backtest_sl_tp_mode == "StrategyDefined_SD":
+            # Similar to ATR/Dynamic, no specific numeric inputs from UI here for SL/TP values themselves,
+            # as the strategy (S6) will calculate them.
+            if not all([symbols_list, timeframe, interval_str, selected_strategy_name]):
+                 messagebox.showerror("Input Error", "Symbol(s), Timeframe, Interval, and Strategy are required for 'StrategyDefined_SD' mode.")
+                 if backtest_run_button: backtest_run_button.config(state=tk.NORMAL)
+                 return
+            # Ensure the selected strategy is compatible (i.e., Strategy 6)
+            # This check could be more robust by linking modes to strategies.
+            strategy_id_temp = None
+            for id_val, name_val in STRATEGIES.items():
+                if name_val == selected_strategy_name:
+                    strategy_id_temp = id_val
+                    break
+            if strategy_id_temp != 6: # Assuming ID 6 is Market Structure S/D
+                messagebox.showerror("Input Error", "'StrategyDefined_SD' mode is intended for the Market Structure S/D strategy.")
+                if backtest_run_button: backtest_run_button.config(state=tk.NORMAL)
+                return
         else: # Should not happen with Combobox
             messagebox.showerror("Input Error", "Invalid SL/TP Mode selected for backtest.")
             if backtest_run_button: backtest_run_button.config(state=tk.NORMAL)
@@ -1699,86 +1742,157 @@ def identify_market_structure(data: pd.DataFrame, swing_highs_bool: pd.Series, s
     if current_swing_low_price: temp_last_valid_low = {'price': current_swing_low_price, 'time': swing_low_prices.index[-1]}
 
     # Backwards iteration to find the most recent structure
-    # This part is complex due to needing to track sequences (HH/HL, LL/LH)
-    # Let's use a more direct approach based on the last few swings
+    # These will store the price AND TIME of the latest confirmed valid swing points
+    # last_valid_high/low_price are just the prices from these.
+    confirmed_valid_high_point = None # {'price': float, 'time': pd.Timestamp}
+    confirmed_valid_low_point = None  # {'price': float, 'time': pd.Timestamp}
+
+    # Store most recent swing high/low encountered, irrespective of confirmed validity for trend
+    latest_swing_high_point = None # {'price': float, 'time': pd.Timestamp}
+    latest_swing_low_point = None  # {'price': float, 'time': pd.Timestamp}
+
+    # For state transitions and pending confirmations
+    # A potential HL that needs confirmation (break of prior high) to become a valid_low_point in an uptrend
+    pending_hl_confirmation = None # {'price': float, 'time': pd.Timestamp}
+    # A potential LH that needs confirmation (break of prior low) to become a valid_high_point in a downtrend
+    pending_lh_confirmation = None # {'price': float, 'time': pd.Timestamp}
+
+    # Iterate through all_swings to determine structure
+    for i, current_swing in enumerate(all_swings):
+        current_price_at_swing_time = data['Close'].asof(current_swing['time'])
+
+        if current_swing['type'] == 'high':
+            latest_swing_high_point = current_swing
+            
+            if trend_bias == 'bullish':
+                if confirmed_valid_high_point and current_swing['price'] > confirmed_valid_high_point['price']: # Higher High (HH)
+                    if pending_hl_confirmation: # This HH confirms the pending_hl_confirmation as a valid low
+                        confirmed_valid_low_point = pending_hl_confirmation
+                        last_valid_low_price = confirmed_valid_low_point['price']
+                        pending_hl_confirmation = None # Clear pending HL
+                    confirmed_valid_high_point = current_swing # Update to new HH
+                    last_valid_high_price = confirmed_valid_high_point['price']
+                    break_of_structure_event = 'bos_high' # Continued bullish BoS
+                else: # Failed to make a HH or no prior valid high
+                    # This current_swing high could be a lower high (LH) if the trend is to change.
+                    # We don't change trend yet, but mark this as a potential LH.
+                    pending_lh_confirmation = current_swing
+                    # If confirmed_valid_low_point exists and current price < confirmed_valid_low_point['price']
+                    # This check is complex because current_swing is a high. A break of low happens with price action, not just a swing.
+                    # The rule is "switch trend bias when a VALID swing is broken".
+                    # For bullish, the valid swing is confirmed_valid_low_point (the last HL).
+                    # This check should happen when processing price action against confirmed_valid_low_point.
+                    # Let's refine: if price (e.g. data['Close']) between this swing and next swing breaks confirmed_valid_low_point.
+                    # Simplified: if we are at a high, and later a low breaks the confirmed_valid_low_point.
+                    pass # Keep trend_bias, this high is just a swing high for now.
+
+            elif trend_bias == 'bearish':
+                # This is a potential Lower High (LH)
+                if confirmed_valid_high_point is None or current_swing['price'] < confirmed_valid_high_point['price']:
+                    pending_lh_confirmation = current_swing 
+                # If current_swing['price'] > confirmed_valid_high_point['price'] (Break of valid LH)
+                # This is a change of character (CHoCH) / potential BoS upwards.
+                # Check if price *after* this high breaks this current_swing high.
+                # This high (current_swing) could become the first HH of a new uptrend if followed by a HL and then a break of this high.
+                # For now, if it breaks the *confirmed_valid_high_point* (last LH of downtrend):
+                elif confirmed_valid_high_point and current_swing['price'] > confirmed_valid_high_point['price']:
+                    trend_bias = 'bullish'
+                    break_of_structure_event = 'bos_high' # Trend changed to bullish
+                    confirmed_valid_high_point = current_swing # This is the first HH
+                    last_valid_high_price = confirmed_valid_high_point['price']
+                    if pending_hl_confirmation: # The low before this break becomes the first HL
+                        confirmed_valid_low_point = pending_hl_confirmation
+                        last_valid_low_price = confirmed_valid_low_point['price']
+                    else: # If no clear pending_hl, use the latest_swing_low_point before this break
+                        # Find the latest_swing_low_point that occurred before current_swing
+                        prev_lows = [s for s in all_swings[:i] if s['type'] == 'low']
+                        if prev_lows:
+                           confirmed_valid_low_point = prev_lows[-1]
+                           last_valid_low_price = confirmed_valid_low_point['price']
+                        else: # Should ideally not happen if swings alternate
+                           confirmed_valid_low_point = None; last_valid_low_price = None
+                    pending_lh_confirmation = None
+                    pending_hl_confirmation = None
+
+
+            elif trend_bias == 'ranging':
+                if latest_swing_low_point and current_swing['price'] > latest_swing_low_point['price']:
+                    # Initial move up, potential start of uptrend if this high is broken later by price
+                    confirmed_valid_high_point = current_swing # Tentative first high
+                    last_valid_high_price = current_swing['price']
+                    # The latest_swing_low_point becomes a candidate for the first HL
+                    pending_hl_confirmation = latest_swing_low_point
+                    # Don't change trend_bias to 'bullish' yet, wait for HH and HL confirmation (break of this current_swing['price'])
+                    trend_bias = 'bullish' # Tentatively bullish after first H and L sequence
+                    break_of_structure_event = 'bos_high'
+
+
+        elif current_swing['type'] == 'low':
+            latest_swing_low_point = current_swing
+
+            if trend_bias == 'bearish':
+                if confirmed_valid_low_point and current_swing['price'] < confirmed_valid_low_point['price']: # Lower Low (LL)
+                    if pending_lh_confirmation: # This LL confirms the pending_lh_confirmation as a valid high
+                        confirmed_valid_high_point = pending_lh_confirmation
+                        last_valid_high_price = confirmed_valid_high_point['price']
+                        pending_lh_confirmation = None
+                    confirmed_valid_low_point = current_swing # Update to new LL
+                    last_valid_low_price = confirmed_valid_low_point['price']
+                    break_of_structure_event = 'bos_low' # Continued bearish BoS
+                else: # Failed to make LL
+                    pending_hl_confirmation = current_swing
+                    pass # Keep trend_bias
+
+            elif trend_bias == 'bullish':
+                # This is a potential Higher Low (HL)
+                if confirmed_valid_low_point is None or current_swing['price'] > confirmed_valid_low_point['price']:
+                     pending_hl_confirmation = current_swing
+                # If current_swing['price'] < confirmed_valid_low_point['price'] (Break of valid HL)
+                # This is a CHoCH / BoS downwards
+                elif confirmed_valid_low_point and current_swing['price'] < confirmed_valid_low_point['price']:
+                    trend_bias = 'bearish'
+                    break_of_structure_event = 'bos_low' # Trend changed to bearish
+                    confirmed_valid_low_point = current_swing # This is the first LL
+                    last_valid_low_price = confirmed_valid_low_point['price']
+                    if pending_lh_confirmation: # The high before this break becomes the first LH
+                        confirmed_valid_high_point = pending_lh_confirmation
+                        last_valid_high_price = confirmed_valid_high_point['price']
+                    else: # Find latest_swing_high_point before this break
+                        prev_highs = [s for s in all_swings[:i] if s['type'] == 'high']
+                        if prev_highs:
+                            confirmed_valid_high_point = prev_highs[-1]
+                            last_valid_high_price = confirmed_valid_high_point['price']
+                        else:
+                            confirmed_valid_high_point = None; last_valid_high_price = None
+                    pending_hl_confirmation = None
+                    pending_lh_confirmation = None
+            
+            elif trend_bias == 'ranging':
+                if latest_swing_high_point and current_swing['price'] < latest_swing_high_point['price']:
+                    # Initial move down, potential start of downtrend
+                    confirmed_valid_low_point = current_swing # Tentative first low
+                    last_valid_low_price = current_swing['price']
+                    pending_lh_confirmation = latest_swing_high_point
+                    trend_bias = 'bearish' # Tentatively bearish
+                    break_of_structure_event = 'bos_low'
+
+    # Update current_swing_high/low_price based on the absolute latest swings found
+    if not swing_high_prices.empty: current_swing_high_price = swing_high_prices.iloc[-1]
+    else: current_swing_high_price = None
+    if not swing_low_prices.empty: current_swing_low_price = swing_low_prices.iloc[-1]
+    else: current_swing_low_price = None
     
-    # Simplified logic: Find last two highs and last two lows
-    sh_prices = swing_high_prices.sort_index(ascending=False)
-    sl_prices = swing_low_prices.sort_index(ascending=False)
-
-    if len(sh_prices) >= 2 and len(sl_prices) >= 2:
-        # Most recent swings
-        h1 = sh_prices.index[0]; h1_price = sh_prices.iloc[0]
-        h0 = sh_prices.index[1]; h0_price = sh_prices.iloc[1] # Previous high
-        l1 = sl_prices.index[0]; l1_price = sl_prices.iloc[0]
-        l0 = sl_prices.index[1]; l0_price = sl_prices.iloc[1] # Previous low
-
-        # Ensure alternation: h1 > l1 > h0 > l0 (uptrend) or l1 < h1 < l0 < h0 (downtrend)
-        # This checks for a basic sequence.
-        
-        # Uptrend: latest high (h1) is > previous high (h0), AND latest low (l1) is > previous low (l0)
-        # AND the swings are ordered correctly in time (e.g., l0 -> h0 -> l1 -> h1)
-        if h1_price > h0_price and l1_price > l0_price and h1 > l1 and l1 > h0 and h0 > l0 : # Time check
-            trend_bias = 'bullish'
-            last_valid_low_price = l1_price # The last HL is the crucial point for uptrend continuation
-            last_valid_high_price = h1_price # The last HH
-            if data['Close'].iloc[-1] > h0_price and not (data['Close'].iloc[-1] < l1_price): # Confirmed break of h0, and l1 not broken
-                 break_of_structure_event = 'bos_high'
-        # Downtrend: latest low (l1) is < previous low (l0), AND latest high (h1) is < previous high (h0)
-        # AND the swings are ordered correctly in time (e.g., h0 -> l0 -> h1 -> l1)
-        elif l1_price < l0_price and h1_price < h0_price and l1 > h1 and h1 > l0 and l0 > h0: # Time check
-            trend_bias = 'bearish'
-            last_valid_high_price = h1_price # The last LH is crucial
-            last_valid_low_price = l1_price # The last LL
-            if data['Close'].iloc[-1] < l0_price and not (data['Close'].iloc[-1] > h1_price): # Confirmed break of l0, and h1 not broken
-                 break_of_structure_event = 'bos_low'
-        else: # Otherwise ranging or more complex pattern
-            trend_bias = 'ranging'
-            # Attempt to set valid high/low based on latest major swings if ranging
-            if not sh_prices.empty: last_valid_high_price = sh_prices.iloc[0]
-            if not sl_prices.empty: last_valid_low_price = sl_prices.iloc[0]
-
-
-    elif len(sh_prices) >= 1 and len(sl_prices) >= 1: # Only one high and one low identified
-        last_valid_high_price = sh_prices.iloc[0]
-        last_valid_low_price = sl_prices.iloc[0]
-        if sh_prices.index[0] > sl_prices.index[0]: # High is more recent
-            if sh_prices.iloc[0] > sl_prices.iloc[0]: trend_bias = 'bullish' # Tentative if high > low
-        else: # Low is more recent
-            if sl_prices.iloc[0] < sh_prices.iloc[0]: trend_bias = 'bearish' # Tentative if low < high
-    
-    # Final check on BoS based on current price vs last valid points
-    # This simplified logic might not fully capture the "valid swing broken" rule for trend CHANGE,
-    # but helps identify if current price is breaking recent structure.
-    if trend_bias == 'bullish' and last_valid_high_price and data['Close'].iloc[-1] > last_valid_high_price:
-        break_of_structure_event = 'bos_high'
-    elif trend_bias == 'bearish' and last_valid_low_price and data['Close'].iloc[-1] < last_valid_low_price:
-        break_of_structure_event = 'bos_low'
-    
-    # If trend is ranging, use the latest swing high/low as "valid" for S/D context
+    # If still ranging at the end, use latest swings as "valid" for S/D context
     if trend_bias == 'ranging':
-        if not sh_prices.empty: last_valid_high_price = sh_prices.iloc[0]
-        else: last_valid_high_price = data['High'].iloc[-1] # Fallback to current high
-
-        if not sl_prices.empty: last_valid_low_price = sl_prices.iloc[0]
-        else: last_valid_low_price = data['Low'].iloc[-1] # Fallback to current low
-
-
-    # The "valid swing broken" rule for *switching* trend bias is the most complex part.
-    # E.g., in an uptrend (sequence of HH, HL), the trend bias only switches to bearish
-    # if a "valid" HL is broken. A HL is "valid" if it led to a HH.
-    # This simplified version determines current trend based on recent HH/HL or LL/LH patterns
-    # and notes if the most recent swing high/low was broken.
-    # A full state machine tracking valid points for trend change is more involved.
-    # For now, `last_valid_high_price` and `last_valid_low_price` will serve as reference points
-    # for TP targets in the strategy.
+        last_valid_high_price = current_swing_high_price
+        last_valid_low_price = current_swing_low_price
 
     return {
         'trend_bias': trend_bias,
         'last_valid_high_price': last_valid_high_price,
         'last_valid_low_price': last_valid_low_price,
-        'current_swing_high_price': current_swing_high_price, # Latest actual swing high
-        'current_swing_low_price': current_swing_low_price,   # Latest actual swing low
+        'current_swing_high_price': current_swing_high_price, 
+        'current_swing_low_price': current_swing_low_price,   
         'break_of_structure_event': break_of_structure_event
     }
 
@@ -3048,171 +3162,213 @@ def strategy_market_structure_sd(symbol: str) -> dict:
         'account_risk_percent': 0.01 
     }
 
-    min_klines_needed = 60 
+    min_klines_needed = 60
+    s6_log_prefix = f"[S6 LOG {symbol}]"
+    print(f"{s6_log_prefix} Initiating strategy_market_structure_sd.")
     kl_df = klines(symbol)
 
     if kl_df is None or len(kl_df) < min_klines_needed:
-        base_return['error'] = f"Insufficient kline data for {symbol} (need {min_klines_needed}, got {len(kl_df) if kl_df is not None else 0})"
+        error_msg = f"Insufficient kline data for {symbol} (need {min_klines_needed}, got {len(kl_df) if kl_df is not None else 0})"
+        print(f"{s6_log_prefix} Error: {error_msg}")
+        base_return['error'] = error_msg
         return base_return
+    print(f"{s6_log_prefix} Kline data length: {len(kl_df)}")
 
     try:
-        # Ensure necessary imports are available or handled within functions
-        # For example, find_swing_points might raise ImportError if scipy is missing.
-        # identify_supply_demand_zones handles TA-Lib/pandas-ta import itself.
-
         # 1. Market Structure Analysis
+        print(f"{s6_log_prefix} Finding swing points...")
         swing_highs_bool, swing_lows_bool = find_swing_points(kl_df, order=5) 
+        print(f"{s6_log_prefix} Swing highs found: {swing_highs_bool.sum()}, Swing lows found: {swing_lows_bool.sum()}")
+        
+        print(f"{s6_log_prefix} Identifying market structure...")
         market_structure = identify_market_structure(kl_df, swing_highs_bool, swing_lows_bool)
-
+        print(f"{s6_log_prefix} Market Structure: {market_structure}")
         base_return['all_conditions_status']['trend_bias'] = market_structure['trend_bias']
         base_return['all_conditions_status']['last_valid_low'] = market_structure['last_valid_low_price']
         base_return['all_conditions_status']['last_valid_high'] = market_structure['last_valid_high_price']
 
         # 2. Identify Supply & Demand Zones
+        print(f"{s6_log_prefix} Identifying S/D zones...")
         sd_zones = identify_supply_demand_zones(kl_df, atr_period=14, lookback_candles=10, consolidation_atr_factor=0.7, sharp_move_atr_factor=1.5)
+        print(f"{s6_log_prefix} Found {len(sd_zones)} S/D zones.")
 
         if not sd_zones:
-            # This is not an error, just no zones found. Strategy waits.
+            print(f"{s6_log_prefix} No S/D zones identified. No trade signal.")
             base_return['all_conditions_status']['zone_type_found'] = 'None'
-            return base_return # Return with 'none' signal
+            return base_return
 
         current_price = kl_df['Close'].iloc[-1]
+        print(f"{s6_log_prefix} Current price: {current_price}")
         potential_trade = None
         
-        # Use last ATR for SL adjustment if needed (though current SL is zone-based)
-        # atr_val = ta.volatility.AverageTrueRange(kl_df['High'], kl_df['Low'], kl_df['Close'], window=14).average_true_range().iloc[-1]
-        # if pd.isna(atr_val): atr_val = 0.0001 # Avoid division by zero if ATR is somehow NaN
-
         # 3. Strategy Logic
+        print(f"{s6_log_prefix} Current trend bias: {market_structure['trend_bias']}")
         if market_structure['trend_bias'] == 'bullish':
-            relevant_zones = [z for z in sd_zones if z['type'] == 'demand' and z['timestamp_end'] < kl_df.index[-1]] # Ensure zone is historical
-            relevant_zones.sort(key=lambda z: z['timestamp_end'], reverse=True) # Most recent first
+            relevant_zones = [z for z in sd_zones if z['type'] == 'demand' and z['timestamp_end'] < kl_df.index[-1]]
+            relevant_zones.sort(key=lambda z: z['timestamp_end'], reverse=True)
+            print(f"{s6_log_prefix} Found {len(relevant_zones)} relevant demand zones for bullish trend.")
 
             if relevant_zones:
-                zone = relevant_zones[0] # Consider the most recent valid demand zone
+                zone = relevant_zones[0]
+                print(f"{s6_log_prefix} Considering demand zone: Start={zone['price_start']}, End={zone['price_end']}, TimestampEnd={zone['timestamp_end']}")
                 base_return['all_conditions_status']['zone_type_found'] = 'demand'
                 base_return['all_conditions_status']['current_sd_zone_start'] = zone['price_start']
                 base_return['all_conditions_status']['current_sd_zone_end'] = zone['price_end']
                 
                 if zone['price_start'] <= current_price <= zone['price_end']:
+                    print(f"{s6_log_prefix} Price {current_price} is within demand zone.")
                     base_return['all_conditions_status']['price_in_zone'] = True
                     entry_price = current_price 
                     
-                    sl_price = zone['price_start'] # SL at the bottom of the demand zone
-                    # Add a small buffer to SL, e.g., 0.1 * zone height or small fraction of ATR
-                    sl_buffer = (zone['price_end'] - zone['price_start']) * 0.10 # 10% of zone height as buffer
-                    sl_price -= sl_buffer
-                    sl_price = round(sl_price, get_price_precision(symbol))
+                    sl_price_raw = zone['price_start']
+                    sl_buffer = (zone['price_end'] - zone['price_start']) * 0.10
+                    sl_price = round(sl_price_raw - sl_buffer, get_price_precision(symbol))
+                    print(f"{s6_log_prefix} Calculated SL for long: {sl_price} (Zone bottom: {sl_price_raw}, Buffer: {sl_buffer})")
 
-
-                    tp_price = market_structure.get('last_valid_high_price')
-                    if tp_price is None: tp_price = market_structure.get('current_swing_high_price')
-
+                    tp_price = market_structure.get('last_valid_high_price') or market_structure.get('current_swing_high_price')
+                    if tp_price: tp_price = round(tp_price, get_price_precision(symbol))
+                    print(f"{s6_log_prefix} Calculated TP for long: {tp_price} (LastValidHigh: {market_structure.get('last_valid_high_price')}, CurrentSwingHigh: {market_structure.get('current_swing_high_price')})")
 
                     if tp_price is None or tp_price <= entry_price:
-                        base_return['error'] = "Invalid TP for bullish (TP <= entry or None)."
+                        base_return['error'] = f"Invalid TP for bullish (TP {tp_price} <= entry {entry_price} or None)."
+                        print(f"{s6_log_prefix} {base_return['error']}")
                     elif sl_price >= entry_price:
-                        base_return['error'] = "Invalid SL for bullish (SL >= entry)."
+                        base_return['error'] = f"Invalid SL for bullish (SL {sl_price} >= entry {entry_price})."
+                        print(f"{s6_log_prefix} {base_return['error']}")
                     else:
                         reward_potential = tp_price - entry_price
                         risk_potential = entry_price - sl_price
-                        if risk_potential <= 0:
+                        if risk_potential <= 0: # Should be caught by sl_price >= entry_price
                             base_return['error'] = "Risk potential <= 0 for bullish."
+                            print(f"{s6_log_prefix} {base_return['error']}")
                         else:
                             rr_ratio = reward_potential / risk_potential
+                            print(f"{s6_log_prefix} Bullish R:R calc: RewardPot={reward_potential}, RiskPot={risk_potential}, Ratio={rr_ratio:.2f}")
                             if rr_ratio >= 2.5:
                                 base_return['all_conditions_status']['rr_ok'] = True
                                 potential_trade = {'signal': 'up', 'sl': sl_price, 'tp': tp_price, 'entry': entry_price}
+                                print(f"{s6_log_prefix} Bullish trade meets R:R. Signal: up, SL: {sl_price}, TP: {tp_price}")
                             else:
                                 base_return['error'] = f"R:R too low ({rr_ratio:.2f}) for demand."
+                                print(f"{s6_log_prefix} {base_return['error']}")
+                else:
+                    print(f"{s6_log_prefix} Price {current_price} not in most recent demand zone.")
+            else:
+                print(f"{s6_log_prefix} No relevant historical demand zones found for bullish trend.")
         
         elif market_structure['trend_bias'] == 'bearish':
             relevant_zones = [z for z in sd_zones if z['type'] == 'supply' and z['timestamp_end'] < kl_df.index[-1]]
             relevant_zones.sort(key=lambda z: z['timestamp_end'], reverse=True)
+            print(f"{s6_log_prefix} Found {len(relevant_zones)} relevant supply zones for bearish trend.")
 
             if relevant_zones:
-                zone = relevant_zones[0] # Most recent valid supply zone
+                zone = relevant_zones[0]
+                print(f"{s6_log_prefix} Considering supply zone: Start={zone['price_start']}, End={zone['price_end']}, TimestampEnd={zone['timestamp_end']}")
                 base_return['all_conditions_status']['zone_type_found'] = 'supply'
                 base_return['all_conditions_status']['current_sd_zone_start'] = zone['price_start']
                 base_return['all_conditions_status']['current_sd_zone_end'] = zone['price_end']
 
                 if zone['price_start'] <= current_price <= zone['price_end']:
+                    print(f"{s6_log_prefix} Price {current_price} is within supply zone.")
                     base_return['all_conditions_status']['price_in_zone'] = True
                     entry_price = current_price
                     
-                    sl_price = zone['price_end'] # SL at the top of the supply zone
+                    sl_price_raw = zone['price_end']
                     sl_buffer = (zone['price_end'] - zone['price_start']) * 0.10
-                    sl_price += sl_buffer
-                    sl_price = round(sl_price, get_price_precision(symbol))
+                    sl_price = round(sl_price_raw + sl_buffer, get_price_precision(symbol))
+                    print(f"{s6_log_prefix} Calculated SL for short: {sl_price} (Zone top: {sl_price_raw}, Buffer: {sl_buffer})")
 
-                    tp_price = market_structure.get('last_valid_low_price')
-                    if tp_price is None: tp_price = market_structure.get('current_swing_low_price')
+                    tp_price = market_structure.get('last_valid_low_price') or market_structure.get('current_swing_low_price')
+                    if tp_price: tp_price = round(tp_price, get_price_precision(symbol))
+                    print(f"{s6_log_prefix} Calculated TP for short: {tp_price} (LastValidLow: {market_structure.get('last_valid_low_price')}, CurrentSwingLow: {market_structure.get('current_swing_low_price')})")
 
                     if tp_price is None or tp_price >= entry_price:
-                        base_return['error'] = "Invalid TP for bearish (TP >= entry or None)."
+                        base_return['error'] = f"Invalid TP for bearish (TP {tp_price} >= entry {entry_price} or None)."
+                        print(f"{s6_log_prefix} {base_return['error']}")
                     elif sl_price <= entry_price:
-                         base_return['error'] = "Invalid SL for bearish (SL <= entry)."
+                         base_return['error'] = f"Invalid SL for bearish (SL {sl_price} <= entry {entry_price})."
+                         print(f"{s6_log_prefix} {base_return['error']}")
                     else:
                         reward_potential = entry_price - tp_price
                         risk_potential = sl_price - entry_price
-                        if risk_potential <= 0:
+                        if risk_potential <= 0: # Should be caught by sl_price <= entry_price
                             base_return['error'] = "Risk potential <= 0 for bearish."
+                            print(f"{s6_log_prefix} {base_return['error']}")
                         else:
                             rr_ratio = reward_potential / risk_potential
+                            print(f"{s6_log_prefix} Bearish R:R calc: RewardPot={reward_potential}, RiskPot={risk_potential}, Ratio={rr_ratio:.2f}")
                             if rr_ratio >= 2.5:
                                 base_return['all_conditions_status']['rr_ok'] = True
                                 potential_trade = {'signal': 'down', 'sl': sl_price, 'tp': tp_price, 'entry': entry_price}
+                                print(f"{s6_log_prefix} Bearish trade meets R:R. Signal: down, SL: {sl_price}, TP: {tp_price}")
                             else:
                                 base_return['error'] = f"R:R too low ({rr_ratio:.2f}) for supply."
+                                print(f"{s6_log_prefix} {base_return['error']}")
+                else:
+                    print(f"{s6_log_prefix} Price {current_price} not in most recent supply zone.")
+            else:
+                print(f"{s6_log_prefix} No relevant historical supply zones found for bearish trend.")
+        else: # Ranging trend
+            print(f"{s6_log_prefix} Trend is ranging. No S/D trades taken in ranging market.")
+            base_return['error'] = "Trend is ranging, no trade."
+
 
         if potential_trade:
             base_return['signal'] = potential_trade['signal']
-            # Rounding already done for SL, ensure TP is also rounded if not already
             base_return['sl_price'] = potential_trade['sl'] 
-            base_return['tp_price'] = round(potential_trade['tp'], get_price_precision(symbol)) if potential_trade['tp'] else None
+            base_return['tp_price'] = potential_trade['tp'] # TP already rounded
             base_return['entry_price_estimate'] = round(potential_trade['entry'], get_price_precision(symbol))
             base_return['conditions_met_count'] = 1 
-            if base_return['error'] and base_return['all_conditions_status']['rr_ok']: # Clear error if RR was ok and trade found
+            if base_return['error'] and base_return['all_conditions_status']['rr_ok']:
+                print(f"{s6_log_prefix} Clearing previous error as R:R is OK for trade: {base_return['error']}")
                 base_return['error'] = None 
         else:
+            # This 'else' means no 'potential_trade' was formed.
+            # The error might have been set above (e.g. R:R too low, invalid SL/TP)
+            # Or, no conditions to form a trade were met (e.g., price not in zone, no relevant zones)
             base_return['signal'] = 'none'
             base_return['sl_price'] = None
             base_return['tp_price'] = None
-            # Keep error if one was set and no trade found, or set a generic one if applicable
-            if not base_return['error'] and base_return['all_conditions_status']['zone_type_found'] not in ['N/A', 'None'] :
-                if not base_return['all_conditions_status']['price_in_zone']:
-                     base_return['error'] = "Price not in S/D zone."
-                elif not base_return['all_conditions_status']['rr_ok'] and base_return['all_conditions_status']['price_in_zone']:
-                     # Error for low R:R should be set if a zone was processed and R:R failed
-                     if not base_return['error']: base_return['error'] = "R:R check failed or TP/SL invalid."
+            if not base_return['error']: # If no specific error was set by R:R or SL/TP validation
+                if base_return['all_conditions_status']['zone_type_found'] not in ['N/A', 'None']:
+                    if not base_return['all_conditions_status']['price_in_zone']:
+                        base_return['error'] = "Price not in S/D zone."
+                elif market_structure['trend_bias'] != 'ranging': # Only set this if not ranging and no other error
+                     base_return['error'] = "No valid trade setup found (e.g. no zone entry, or other rule failed)."
+            if base_return['error']: print(f"{s6_log_prefix} No trade signal. Reason: {base_return['error']}")
+            else: print(f"{s6_log_prefix} No trade signal. Conditions not met.")
 
 
     except ImportError as e_imp: 
         base_return['error'] = f"ImportError S6 {symbol}: {e_imp}. Check scipy/talib/pandas_ta."
+        print(f"{s6_log_prefix} {base_return['error']}")
     except ValueError as ve: 
         base_return['error'] = f"ValueError S6 {symbol}: {ve}"
+        print(f"{s6_log_prefix} {base_return['error']}")
     except Exception as e:
         import traceback
         base_return['error'] = f"Unexpected error S6 {symbol}: {str(e)}"
-        print(f"Full Traceback for S6 error on {symbol}: {traceback.format_exc()}")
+        print(f"{s6_log_prefix} Full Traceback: {traceback.format_exc()}")
 
-    # Final check on SL/TP validity if a signal was generated
+    # Final validation and logging
     if base_return['signal'] != 'none':
         if base_return['sl_price'] is None or base_return['tp_price'] is None:
-            base_return['error'] = (base_return['error'] or "") + " SL/TP is None post-processing."
-            base_return['signal'] = 'none' # Invalidate signal
+            final_error = (base_return['error'] or "") + " SL/TP is None post-processing."
+            print(f"{s6_log_prefix} Invalidating signal due to None SL/TP. Error: {final_error}")
+            base_return['error'] = final_error
+            base_return['signal'] = 'none'
         elif base_return['signal'] == 'up' and (base_return['sl_price'] >= base_return['entry_price_estimate'] or base_return['tp_price'] <= base_return['entry_price_estimate']):
-            base_return['error'] = (base_return['error'] or "") + " Invalid SL/TP relation to entry for UP signal."
+            final_error = (base_return['error'] or "") + " Invalid SL/TP relation to entry for UP signal."
+            print(f"{s6_log_prefix} Invalidating UP signal due to SL/TP relation. Error: {final_error}")
+            base_return['error'] = final_error
             base_return['signal'] = 'none'
         elif base_return['signal'] == 'down' and (base_return['sl_price'] <= base_return['entry_price_estimate'] or base_return['tp_price'] >= base_return['entry_price_estimate']):
-            base_return['error'] = (base_return['error'] or "") + " Invalid SL/TP relation to entry for DOWN signal."
+            final_error = (base_return['error'] or "") + " Invalid SL/TP relation to entry for DOWN signal."
+            print(f"{s6_log_prefix} Invalidating DOWN signal due to SL/TP relation. Error: {final_error}")
+            base_return['error'] = final_error
             base_return['signal'] = 'none'
             
-    if base_return['error']:
-        print(f"Strategy Market Structure S/D ({symbol}) final state: Signal={base_return['signal']}, Error='{base_return['error']}'")
-        # Potentially clear sensitive info from all_conditions_status if error is severe, or leave for debugging
-        # base_return['all_conditions_status']['current_sd_zone_start'] = None # etc.
-
+    print(f"{s6_log_prefix} Final decision: Signal='{base_return['signal']}', SL={base_return['sl_price']}, TP={base_return['tp_price']}, Error='{base_return['error']}'")
     return base_return
 
 def set_leverage(symbol, level):
@@ -3366,14 +3522,14 @@ def open_order(symbol, side, strategy_sl=None, strategy_tp=None, strategy_accoun
                 tp_actual = round(price - (TP_PNL_AMOUNT / calculated_qty_asset), price_precision)
             print(f"Using Fixed PnL: SL: {sl_actual}, TP: {tp_actual} for {symbol} {side} (Qty: {calculated_qty_asset})")
 
-        elif SL_TP_MODE == "ATR/Dynamic":
+        elif SL_TP_MODE == "ATR/Dynamic" or SL_TP_MODE == "StrategyDefined_SD": # Modified to include new mode
             if strategy_sl is not None and strategy_tp is not None:
                 sl_actual = strategy_sl
                 tp_actual = strategy_tp
-                print(f"Using ATR/Dynamic (strategy-defined): SL: {sl_actual}, TP: {tp_actual} for {symbol} {side}")
+                print(f"Using {SL_TP_MODE} (strategy-defined): SL: {sl_actual}, TP: {tp_actual} for {symbol} {side}")
             else:
-                # Fallback to percentage if strategy doesn't provide SL/TP for ATR/Dynamic mode
-                print(f"INFO: ATR/Dynamic mode selected but no strategy_sl/tp provided for {symbol}. Falling back to Percentage SL/TP.")
+                # Fallback to percentage if strategy doesn't provide SL/TP for these modes
+                print(f"INFO: {SL_TP_MODE} mode selected but no strategy_sl/tp provided for {symbol}. Falling back to Percentage SL/TP.")
                 if side == 'buy':
                     sl_actual = round(price - price * SL_PERCENT, price_precision)
                     tp_actual = round(price + price * TP_PERCENT, price_precision)
@@ -4640,7 +4796,8 @@ def apply_settings():
     try:
         # SL/TP Mode
         selected_mode = sl_tp_mode_var.get()
-        if selected_mode not in ["Percentage", "ATR/Dynamic", "Fixed PnL"]:
+        # Added "StrategyDefined_SD" to the list of valid modes
+        if selected_mode not in ["Percentage", "ATR/Dynamic", "Fixed PnL", "StrategyDefined_SD"]:
             messagebox.showerror("Settings Error", "Invalid SL/TP Mode selected.")
             return False
         SL_TP_MODE = selected_mode
@@ -4891,10 +5048,10 @@ if __name__ == "__main__":
     account_risk_percent_entry.grid(row=0, column=1, padx=2, pady=2, sticky='w')
 
     ttk.Label(params_input_frame, text="SL/TP Mode:").grid(row=0, column=2, padx=2, pady=2, sticky='w')
-    sl_tp_modes = ["Percentage", "ATR/Dynamic", "Fixed PnL"]
+    sl_tp_modes = ["Percentage", "ATR/Dynamic", "Fixed PnL", "StrategyDefined_SD"] # Added new mode
     # Ensure sl_tp_mode_var is initialized here before use, using the global SL_TP_MODE
     sl_tp_mode_var = tk.StringVar(value=SL_TP_MODE) 
-    sl_tp_mode_combobox = ttk.Combobox(params_input_frame, textvariable=sl_tp_mode_var, values=sl_tp_modes, width=12, state="readonly")
+    sl_tp_mode_combobox = ttk.Combobox(params_input_frame, textvariable=sl_tp_mode_var, values=sl_tp_modes, width=17, state="readonly") # Increased width
     sl_tp_mode_combobox.grid(row=0, column=3, padx=2, pady=2, sticky='w')
 
     # Row 1: SL Percent, TP Percent (for Percentage mode)
@@ -5050,8 +5207,8 @@ if __name__ == "__main__":
     backtest_interval_entry.grid(row=1, column=1, padx=2, pady=2, sticky='w')
     
     ttk.Label(backtest_params_grid, text="SL/TP Mode:").grid(row=1, column=2, padx=2, pady=2, sticky='w')
-    # backtest_sl_tp_modes is same as sl_tp_modes global list
-    backtest_sl_tp_mode_combobox = ttk.Combobox(backtest_params_grid, textvariable=backtest_sl_tp_mode_var, values=sl_tp_modes, width=12, state="readonly")
+    # backtest_sl_tp_modes is same as sl_tp_modes global list (which now includes "StrategyDefined_SD")
+    backtest_sl_tp_mode_combobox = ttk.Combobox(backtest_params_grid, textvariable=backtest_sl_tp_mode_var, values=sl_tp_modes, width=17, state="readonly") # Increased width
     backtest_sl_tp_mode_combobox.grid(row=1, column=3, padx=2, pady=2, sticky='w')
 
     # Row 2: SL Percent, TP Percent (for "Percentage" mode)
