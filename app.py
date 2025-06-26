@@ -3167,18 +3167,37 @@ def strategy_market_structure_sd(symbol: str) -> dict:
     print(f"{s6_log_prefix} Initiating strategy_market_structure_sd.")
     kl_df = klines(symbol)
 
-    if kl_df is None or len(kl_df) < min_klines_needed:
-        error_msg = f"Insufficient kline data for {symbol} (need {min_klines_needed}, got {len(kl_df) if kl_df is not None else 0})"
+    # Data Sufficiency Check (Initial)
+    if kl_df is None:
+        error_msg = f"Insufficient kline data for {symbol} (kl_df is None)"
         print(f"{s6_log_prefix} Error: {error_msg}")
         base_return['error'] = error_msg
         return base_return
-    print(f"{s6_log_prefix} Kline data length: {len(kl_df)}")
+
+    # Assert and Log kline length
+    try:
+        assert len(kl_df) >= 60, f"S6 Error: Insufficient klines for {symbol} (need >=60, got {len(kl_df)})"
+        print(f"{s6_log_prefix} Kline data length check passed: {len(kl_df)} candles.")
+    except AssertionError as ae:
+        print(f"{s6_log_prefix} Error: {str(ae)}")
+        base_return['error'] = str(ae)
+        return base_return
+
+    # Fallback check if min_klines_needed is different from 60 for other reasons (though problem implies 60 is the target)
+    if len(kl_df) < min_klines_needed: # min_klines_needed is currently 60, so this is redundant if assert passes
+        error_msg = f"Insufficient kline data for {symbol} (need {min_klines_needed}, got {len(kl_df)})"
+        print(f"{s6_log_prefix} Error: {error_msg}") # Should ideally not be reached if assert for 60 is active
+        base_return['error'] = error_msg
+        return base_return
+    # This print is now covered by the one after assertion. Can be removed or kept for verbosity.
+    # print(f"{s6_log_prefix} Kline data length: {len(kl_df)}") 
 
     try:
         # 1. Market Structure Analysis
         print(f"{s6_log_prefix} Finding swing points...")
         swing_highs_bool, swing_lows_bool = find_swing_points(kl_df, order=5) 
-        print(f"{s6_log_prefix} Swing highs found: {swing_highs_bool.sum()}, Swing lows found: {swing_lows_bool.sum()}")
+        # Swing Count Logging
+        print(f"{s6_log_prefix} Swings: {swing_highs_bool.sum()} highs – {swing_lows_bool.sum()} lows")
         
         print(f"{s6_log_prefix} Identifying market structure...")
         market_structure = identify_market_structure(kl_df, swing_highs_bool, swing_lows_bool)
@@ -3190,7 +3209,8 @@ def strategy_market_structure_sd(symbol: str) -> dict:
         # 2. Identify Supply & Demand Zones
         print(f"{s6_log_prefix} Identifying S/D zones...")
         sd_zones = identify_supply_demand_zones(kl_df, atr_period=14, lookback_candles=10, consolidation_atr_factor=0.7, sharp_move_atr_factor=1.5)
-        print(f"{s6_log_prefix} Found {len(sd_zones)} S/D zones.")
+        # Zone Count Logging
+        print(f"{s6_log_prefix} Zones detected: {len(sd_zones)}")
 
         if not sd_zones:
             print(f"{s6_log_prefix} No S/D zones identified. No trade signal.")
@@ -3215,14 +3235,19 @@ def strategy_market_structure_sd(symbol: str) -> dict:
                 base_return['all_conditions_status']['current_sd_zone_start'] = zone['price_start']
                 base_return['all_conditions_status']['current_sd_zone_end'] = zone['price_end']
                 
+                # Price-in-Zone Logging (Bullish)
+                print(f"{s6_log_prefix} Bullish Zone Check: Zone bounds: {zone['price_start']}–{zone['price_end']}, Price: {current_price}")
                 if zone['price_start'] <= current_price <= zone['price_end']:
                     print(f"{s6_log_prefix} Price {current_price} is within demand zone.")
                     base_return['all_conditions_status']['price_in_zone'] = True
                     entry_price = current_price 
                     
                     sl_price_raw = zone['price_start']
-                    sl_buffer = (zone['price_end'] - zone['price_start']) * 0.10
+                    sl_buffer = (zone['price_end'] - zone['price_start']) * 0.10 # 10% of zone height as buffer
                     sl_price = round(sl_price_raw - sl_buffer, get_price_precision(symbol))
+                    # Ensure SL is actually below the zone start after buffer and rounding
+                    if sl_price >= zone['price_start']: sl_price = round(zone['price_start'] - (kl_df['Close'].iloc[-1] * 0.001), get_price_precision(symbol)) # Minimal fallback SL if buffer logic fails
+
                     print(f"{s6_log_prefix} Calculated SL for long: {sl_price} (Zone bottom: {sl_price_raw}, Buffer: {sl_buffer})")
 
                     tp_price = market_structure.get('last_valid_high_price') or market_structure.get('current_swing_high_price')
@@ -3238,13 +3263,15 @@ def strategy_market_structure_sd(symbol: str) -> dict:
                     else:
                         reward_potential = tp_price - entry_price
                         risk_potential = entry_price - sl_price
-                        if risk_potential <= 0: # Should be caught by sl_price >= entry_price
+                        if risk_potential <= 0: 
                             base_return['error'] = "Risk potential <= 0 for bullish."
                             print(f"{s6_log_prefix} {base_return['error']}")
                         else:
                             rr_ratio = reward_potential / risk_potential
-                            print(f"{s6_log_prefix} Bullish R:R calc: RewardPot={reward_potential}, RiskPot={risk_potential}, Ratio={rr_ratio:.2f}")
-                            if rr_ratio >= 2.5:
+                            # Risk-Reward Logging (Bullish)
+                            print(f"{s6_log_prefix} Bullish Risk/Reward: Risk: {risk_potential:.4f}, Reward: {reward_potential:.4f}, R:R = {rr_ratio:.2f}")
+                            # Adjust R:R Threshold
+                            if rr_ratio >= 1.5: # Temporarily lowered from 2.5
                                 base_return['all_conditions_status']['rr_ok'] = True
                                 potential_trade = {'signal': 'up', 'sl': sl_price, 'tp': tp_price, 'entry': entry_price}
                                 print(f"{s6_log_prefix} Bullish trade meets R:R. Signal: up, SL: {sl_price}, TP: {tp_price}")
@@ -3268,14 +3295,19 @@ def strategy_market_structure_sd(symbol: str) -> dict:
                 base_return['all_conditions_status']['current_sd_zone_start'] = zone['price_start']
                 base_return['all_conditions_status']['current_sd_zone_end'] = zone['price_end']
 
+                # Price-in-Zone Logging (Bearish)
+                print(f"{s6_log_prefix} Bearish Zone Check: Zone bounds: {zone['price_start']}–{zone['price_end']}, Price: {current_price}")
                 if zone['price_start'] <= current_price <= zone['price_end']:
                     print(f"{s6_log_prefix} Price {current_price} is within supply zone.")
                     base_return['all_conditions_status']['price_in_zone'] = True
                     entry_price = current_price
                     
                     sl_price_raw = zone['price_end']
-                    sl_buffer = (zone['price_end'] - zone['price_start']) * 0.10
+                    sl_buffer = (zone['price_end'] - zone['price_start']) * 0.10 # 10% of zone height as buffer
                     sl_price = round(sl_price_raw + sl_buffer, get_price_precision(symbol))
+                    # Ensure SL is actually above the zone end after buffer and rounding
+                    if sl_price <= zone['price_end']: sl_price = round(zone['price_end'] + (kl_df['Close'].iloc[-1] * 0.001), get_price_precision(symbol)) # Minimal fallback SL
+
                     print(f"{s6_log_prefix} Calculated SL for short: {sl_price} (Zone top: {sl_price_raw}, Buffer: {sl_buffer})")
 
                     tp_price = market_structure.get('last_valid_low_price') or market_structure.get('current_swing_low_price')
@@ -3291,13 +3323,15 @@ def strategy_market_structure_sd(symbol: str) -> dict:
                     else:
                         reward_potential = entry_price - tp_price
                         risk_potential = sl_price - entry_price
-                        if risk_potential <= 0: # Should be caught by sl_price <= entry_price
+                        if risk_potential <= 0: 
                             base_return['error'] = "Risk potential <= 0 for bearish."
                             print(f"{s6_log_prefix} {base_return['error']}")
                         else:
                             rr_ratio = reward_potential / risk_potential
-                            print(f"{s6_log_prefix} Bearish R:R calc: RewardPot={reward_potential}, RiskPot={risk_potential}, Ratio={rr_ratio:.2f}")
-                            if rr_ratio >= 2.5:
+                            # Risk-Reward Logging (Bearish)
+                            print(f"{s6_log_prefix} Bearish Risk/Reward: Risk: {risk_potential:.4f}, Reward: {reward_potential:.4f}, R:R = {rr_ratio:.2f}")
+                            # Adjust R:R Threshold
+                            if rr_ratio >= 1.5: # Temporarily lowered from 2.5
                                 base_return['all_conditions_status']['rr_ok'] = True
                                 potential_trade = {'signal': 'down', 'sl': sl_price, 'tp': tp_price, 'entry': entry_price}
                                 print(f"{s6_log_prefix} Bearish trade meets R:R. Signal: down, SL: {sl_price}, TP: {tp_price}")
@@ -3369,6 +3403,8 @@ def strategy_market_structure_sd(symbol: str) -> dict:
             base_return['signal'] = 'none'
             
     print(f"{s6_log_prefix} Final decision: Signal='{base_return['signal']}', SL={base_return['sl_price']}, TP={base_return['tp_price']}, Error='{base_return['error']}'")
+    # Surface Errors/Status (Final base_return log)
+    print(f"{s6_log_prefix} Final base_return: {base_return}")
     return base_return
 
 def set_leverage(symbol, level):
@@ -4370,6 +4406,13 @@ def run_bot_logic():
             elif current_active_strategy_id == 5: # Strategy 5 logic
                 # Assuming S5 can open trades as long as general conditions are met (e.g., not exceeding overall max positions if that's a global rule)
                 if len(open_position_symbols) < qty_concurrent_positions : # Check against global concurrent positions
+                    can_open_new_trade_overall = True
+                    _activity_set(activity_msg_prefix + "Ready. Seeking.")
+                else:
+                    _activity_set(activity_msg_prefix + f"Max open positions ({qty_concurrent_positions}) reached. Monitoring.")
+                    can_open_new_trade_overall = False
+            elif current_active_strategy_id == 6: # Strategy 6 logic for can_open_new_trade_overall
+                if len(open_position_symbols) < qty_concurrent_positions :
                     can_open_new_trade_overall = True
                     _activity_set(activity_msg_prefix + "Ready. Seeking.")
                 else:
