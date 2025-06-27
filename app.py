@@ -596,6 +596,7 @@ class BacktestStrategyWrapper(Strategy):
     tp_pnl_amount_bt = 0.0
     # user_sl and user_tp (percentages) are already class attributes
     leverage = 1.0 # Default leverage for backtesting
+    account_risk_percent_bt = 0.01 # Default 1% account risk for backtesting
 
 
     def init(self):
@@ -668,65 +669,134 @@ class BacktestStrategyWrapper(Strategy):
         log_prefix_bt_next = f"[BT Strategy LOG {trade_symbol} - Bar {len(self.data.Close)-1} - Price {price:.4f}]" # Adjusted precision
         
         # --- SL/TP Price Calculation Block (Common for all strategies) ---
-        sl_final_price = None
-        tp_final_price = None
-        sl_long, tp_long, sl_short, tp_short = None, None, None, None # Initialize here
+        sl_final_price = None # This seems unused, SL/TP are calculated per trade direction later
+        tp_final_price = None # This seems unused
+        sl_long, tp_long, sl_short, tp_short = None, None, None, None 
         entry_price_for_calc = price # Current price for SL/TP calculation
         
-        # For PnL calculation, estimate asset quantity based on equity fraction
-        # This assumes self.buy/sell size parameter (e.g., 0.02) is a fraction of equity.
-        # backtesting.py's `size` param in `self.buy` can be absolute units or fraction of equity.
-        # If it's fraction of equity (e.g. size=0.1 for 10% of equity), this calc is okay.
-        # If `size` is absolute units, then asset_qty_for_pnl_calc should just be that `size`.
-        # Assuming fractional equity for now as per typical backtesting.py examples.
-        trade_size_fraction_bt = 0.02 # Default/Example size, should match what strategies use
-        asset_qty_for_pnl_calc = (self.equity * trade_size_fraction_bt) / entry_price_for_calc if entry_price_for_calc > 0 else 0
+        # --- Trade Size Calculation based on Account Risk ---
+        # This block will determine `trade_size_to_use_in_order`
+        # which is a fraction of equity for backtesting.py's self.buy/sell(size=...)
+        
+        sl_percentage_effective_for_sizing = None
+        trade_size_to_use_in_order = 0.02 # Default fallback if sizing fails
 
         if self.sl_tp_mode_bt == "Percentage":
-            # Validate user_sl and user_tp to be between 0 (exclusive) and 1 (exclusive for SL, less critical for TP but good practice)
-            if 0 < self.user_sl < 1 and 0 < self.user_tp: 
+            if 0 < self.user_sl < 1: # user_sl is already a decimal (e.g., 0.02 for 2%)
+                sl_percentage_effective_for_sizing = self.user_sl
                 # For a potential long trade
                 _sl_long_raw = entry_price_for_calc * (1 - self.user_sl)
-                _tp_long_raw = entry_price_for_calc * (1 + self.user_tp)
+                _tp_long_raw = entry_price_for_calc * (1 + self.user_tp) # user_tp is also decimal
                 # For a potential short trade
                 _sl_short_raw = entry_price_for_calc * (1 + self.user_sl)
                 _tp_short_raw = entry_price_for_calc * (1 - self.user_tp)
 
-                # Ensure SL/TP are positive before rounding
                 if _sl_long_raw > 0: sl_long = round(_sl_long_raw, self.PRICE_PRECISION_BT)
                 if _tp_long_raw > 0: tp_long = round(_tp_long_raw, self.PRICE_PRECISION_BT)
                 if _sl_short_raw > 0: sl_short = round(_sl_short_raw, self.PRICE_PRECISION_BT)
                 if _tp_short_raw > 0: tp_short = round(_tp_short_raw, self.PRICE_PRECISION_BT)
             else:
-                print(f"DEBUG BT Percentage: Invalid user_sl ({self.user_sl}) or user_tp ({self.user_tp}). Must be > 0 (and SL < 1).")
+                print(f"{log_prefix_bt_next} Percentage SL/TP: Invalid user_sl ({self.user_sl}). Cannot size trade or set SL.")
                 # sl_long, tp_long, etc., remain None
+
+        elif self.sl_tp_mode_bt == "ATR/Dynamic":
+            # SL/TP prices will be calculated by the strategy logic later using ATR.
+            # For sizing, we need an *estimate* of SL percentage based on current ATR.
+            # This is tricky because the actual SL price depends on the trade direction and ATR value *at that moment*.
+            # The strategy logic will calculate the actual sl_price. We use that to find sl_percentage_effective_for_sizing.
+            # This means trade sizing for ATR/Dynamic might happen *after* the strategy signal and ATR SL calc.
+            # For now, we'll calculate sl_long, tp_long etc. within each strategy's ATR block.
+            # sl_percentage_effective_for_sizing will also be set there.
+            pass # Defer to strategy block
 
         elif self.sl_tp_mode_bt == "Fixed PnL":
-            if self.sl_pnl_amount_bt > 0 and self.tp_pnl_amount_bt > 0 and asset_qty_for_pnl_calc > 0:
-                # For a potential long trade
-                _sl_long_raw = entry_price_for_calc - (self.sl_pnl_amount_bt / asset_qty_for_pnl_calc)
-                _tp_long_raw = entry_price_for_calc + (self.tp_pnl_amount_bt / asset_qty_for_pnl_calc)
-                # For a potential short trade
-                _sl_short_raw = entry_price_for_calc + (self.sl_pnl_amount_bt / asset_qty_for_pnl_calc)
-                _tp_short_raw = entry_price_for_calc - (self.tp_pnl_amount_bt / asset_qty_for_pnl_calc)
+            # For Fixed PnL, the risk is `self.sl_pnl_amount_bt`.
+            # Position size is `self.sl_pnl_amount_bt / (entry_price - sl_price)`.
+            # `sl_price` is `entry_price - (self.sl_pnl_amount_bt / asset_quantity)`.
+            # This creates a circular dependency if we try to calculate size based on equity risk % here.
+            # Fixed PnL implies risk is defined by the PnL amount, not a percentage of equity directly.
+            # So, `self.account_risk_percent_bt` might not be directly applicable for sizing in Fixed PnL mode.
+            # The original logic for Fixed PnL SL/TP calculation based on `asset_qty_for_pnl_calc` (which used a default fraction)
+            # needs to be revisited if `account_risk_percent_bt` is to be the primary driver.
+            # For now, let's assume Fixed PnL sizing is separate and uses the PnL amounts to define risk.
+            # The existing `asset_qty_for_pnl_calc` using `trade_size_fraction_bt` was a placeholder.
+            # If we want Fixed PnL to also respect `account_risk_percent_bt`, the interpretation changes:
+            # `self.sl_pnl_amount_bt` would be `self.equity * self.account_risk_percent_bt`.
+            # Let's assume the user wants `account_risk_percent_bt` to define the PnL amount if Fixed PnL is chosen.
+            
+            if self.account_risk_percent_bt > 0 and self.tp_pnl_amount_bt > 0: # tp_pnl_amount_bt is still used for TP
+                # Redefine sl_pnl_amount based on account risk percent
+                sl_pnl_target_for_sizing = self.equity * self.account_risk_percent_bt
+                tp_pnl_target_for_sizing = self.tp_pnl_amount_bt # Keep TP PnL as user input for now, or also derive from RR? Assume user input.
 
-                if _sl_long_raw > 0: sl_long = round(_sl_long_raw, self.PRICE_PRECISION_BT)
-                if _tp_long_raw > 0: tp_long = round(_tp_long_raw, self.PRICE_PRECISION_BT)
-                if _sl_short_raw > 0: sl_short = round(_sl_short_raw, self.PRICE_PRECISION_BT)
-                if _tp_short_raw > 0: tp_short = round(_tp_short_raw, self.PRICE_PRECISION_BT)
+                # Estimate quantity: Qty = PnL_Risk / (Price_Diff_Per_Unit)
+                # To avoid circular dependency with SL price, we can estimate SL distance using a small percentage (e.g., 1% of price)
+                # This is just for estimating quantity. The actual SL price will be based on the final quantity and PnL target.
+                estimated_sl_distance_price = entry_price_for_calc * 0.01 # Assume 1% SL distance for quantity estimation
+                if estimated_sl_distance_price > 0:
+                    asset_qty_for_fixed_pnl_sizing = sl_pnl_target_for_sizing / estimated_sl_distance_price
+                    
+                    if asset_qty_for_fixed_pnl_sizing > 0:
+                        # For a potential long trade
+                        _sl_long_raw = entry_price_for_calc - (sl_pnl_target_for_sizing / asset_qty_for_fixed_pnl_sizing)
+                        _tp_long_raw = entry_price_for_calc + (tp_pnl_target_for_sizing / asset_qty_for_fixed_pnl_sizing)
+                        # For a potential short trade
+                        _sl_short_raw = entry_price_for_calc + (sl_pnl_target_for_sizing / asset_qty_for_fixed_pnl_sizing)
+                        _tp_short_raw = entry_price_for_calc - (tp_pnl_target_for_sizing / asset_qty_for_fixed_pnl_sizing)
+
+                        if _sl_long_raw > 0: sl_long = round(_sl_long_raw, self.PRICE_PRECISION_BT)
+                        if _tp_long_raw > 0: tp_long = round(_tp_long_raw, self.PRICE_PRECISION_BT)
+                        if _sl_short_raw > 0: sl_short = round(_sl_short_raw, self.PRICE_PRECISION_BT)
+                        if _tp_short_raw > 0: tp_short = round(_tp_short_raw, self.PRICE_PRECISION_BT)
+                        
+                        # For sizing, effective SL percentage is (sl_pnl_target_for_sizing / entry_price_for_calc) / asset_qty_for_fixed_pnl_sizing
+                        # Or more directly: sl_pnl_target_for_sizing / (entry_price_for_calc * asset_qty_for_fixed_pnl_sizing)
+                        # However, the trade_size_to_use_in_order is a fraction of equity.
+                        # For Fixed PnL, if sl_pnl_target_for_sizing is (self.equity * self.account_risk_percent_bt),
+                        # and size = (equity * account_risk) / sl_percentage, then sl_percentage here is implied.
+                        # The current `trade_size_to_use_in_order` needs to be calculated carefully.
+                        # Let's stick to the primary sizing logic below and adapt Fixed PnL SL/TP values.
+                        # The `sl_percentage_effective_for_sizing` for Fixed PnL would be `sl_pnl_target_for_sizing / (equity_at_risk_notional)`
+                        # This mode is complex to integrate perfectly with a single `trade_size_to_use_in_order` fraction.
+                        # The `size` parameter in `self.buy` is a fraction of *current equity*.
+                        # If we risk `X` (Fixed PnL amount), and our SL is `Y` price units away, we buy `X/Y` quantity.
+                        # The `trade_size_to_use_in_order` should represent `(X/Y * entry_price) / self.equity` if `size` is fraction of equity.
+                        # This is getting complicated. Let's assume for Fixed PnL, the trade_size is calculated differently or uses a default.
+                        # For now, `sl_percentage_effective_for_sizing` will be left None for Fixed PnL, and sizing will use default.
+                        # TODO: Revisit Fixed PnL sizing if account_risk_percent_bt should directly drive it.
+                        print(f"{log_prefix_bt_next} Fixed PnL: SL/TP calculated. Sizing will use default or needs strategy-specific logic if driven by account risk %.")
+                    else:
+                        print(f"{log_prefix_bt_next} Fixed PnL: Asset quantity for sizing is zero. Cannot calculate SL/TP.")
+                else:
+                    print(f"{log_prefix_bt_next} Fixed PnL: Estimated SL distance is zero. Cannot size trade.")
             else:
-                print(f"DEBUG BT Fixed PnL: Cannot calculate. Amounts positive? ({self.sl_pnl_amount_bt > 0}, {self.tp_pnl_amount_bt > 0}), AssetQty positive? ({asset_qty_for_pnl_calc > 0})")
-                # sl_long, tp_long, etc., remain None
-        
-        # If ATR/Dynamic, sl_final_price and tp_final_price remain None; strategy logic will calculate them.
-        # --- End of Common SL/TP Price Calculation Block ---
+                print(f"{log_prefix_bt_next} Fixed PnL: Invalid account_risk_percent_bt ({self.account_risk_percent_bt}) or tp_pnl_amount_bt ({self.tp_pnl_amount_bt}).")
 
-        # Actual trade size to be used by self.buy/sell
-        # This should be consistent with how strategies determine trade size.
-        # For now, using the example fractional size.
-        trade_size_to_use_in_order = trade_size_fraction_bt
+        # General trade sizing logic (primarily for Percentage and ATR/Dynamic modes after SL is known)
+        # This block will be moved/adapted into strategy logic where SL price is determined for ATR/Dynamic.
+        # For Percentage mode, sl_percentage_effective_for_sizing is already set.
+        
+        # The actual calculation of `trade_size_to_use_in_order` will now happen
+        # within each strategy's block, once `sl_percentage_effective_for_sizing` is known.
+        # The variable `trade_size_to_use_in_order` will be defined there.
+
+        # --- End of Common SL/TP Price Calculation / Sizing Block ---
+
 
         # --- Strategy Specific Logic ---
+        # Each strategy block will now be responsible for:
+        # 1. Calculating its specific entry/exit signals.
+        # 2. If ATR/Dynamic SL/TP mode:
+        #    a. Calculate `sl_price` and `tp_price` using ATR.
+        #    b. Calculate `sl_percentage_effective_for_sizing = abs(entry_price - sl_price) / entry_price`.
+        # 3. If Percentage SL/TP mode, `sl_long/sl_short` and `tp_long/tp_short` are already available.
+        #    `sl_percentage_effective_for_sizing` is `self.user_sl`.
+        # 4. If Fixed PnL mode, `sl_long/sl_short` and `tp_long/tp_short` are available. Sizing might use a default for now.
+        # 5. Calculate `trade_size_to_use_in_order` using `self.account_risk_percent_bt` and `sl_percentage_effective_for_sizing`.
+        #    `trade_size_to_use_in_order = self.account_risk_percent_bt / sl_percentage_effective_for_sizing` (if SL percentage > 0).
+        #    Ensure this size is capped (e.g., not > 1.0 or some other reasonable limit for fraction of equity).
+        # 6. Call `self.buy()` or `self.sell()` with the calculated `size`, `sl`, and `tp`.
+
         if self.current_strategy_id == 0: # Original Scalping Strategy
             if self.position:
                 # print(f"{log_prefix_bt_next} S0: Already in position. Skipping.") # Basic log, can be expanded
@@ -773,56 +843,64 @@ class BacktestStrategyWrapper(Strategy):
 
             if trade_side_s0:
                 entry_price_s0 = price
-                sl_price, tp_price = None, None # Initialize
-                # print(f"{log_prefix_bt_next} S0 Signal: {trade_side_s0.upper()}. Entry: {entry_price_s0:.2f}, SL/TP Mode: {self.sl_tp_mode_bt}")
+                sl_price, tp_price = None, None
+                sl_percentage_for_sizing_s0 = None
+
                 if self.sl_tp_mode_bt == "ATR/Dynamic":
                     if self.atr is None or len(self.atr) < 1 or pd.isna(self.atr[-1]) or self.atr[-1] == 0:
-                        # print(f"{log_prefix_bt_next} S0: ATR invalid for dynamic SL/TP (ATR: {self.atr[-1] if self.atr and len(self.atr)>0 else 'N/A'}). Skipping trade.")
-                        return 
+                        return
                     current_atr_s0 = self.atr[-1]
                     if trade_side_s0 == 'buy':
                         sl_price = round(entry_price_s0 - (current_atr_s0 * self.SL_ATR_MULTI), self.PRICE_PRECISION_BT)
-                        tp_price = round(entry_price_s0 + ((entry_price_s0 - sl_price) * self.RR), self.PRICE_PRECISION_BT)
-                        if sl_price >= entry_price_s0 or tp_price <= entry_price_s0: 
-                            # print(f"{log_prefix_bt_next} S0 ATR Buy: Invalid SL/TP. SL={sl_price}, TP={tp_price}. Skipping."); 
-                            return
+                        if sl_price < entry_price_s0: # Valid SL
+                            tp_price = round(entry_price_s0 + ((entry_price_s0 - sl_price) * self.RR), self.PRICE_PRECISION_BT)
+                            sl_percentage_for_sizing_s0 = (entry_price_s0 - sl_price) / entry_price_s0 if entry_price_s0 > 0 else None
+                        else: sl_price = None # Invalidate
                     else: # sell
                         sl_price = round(entry_price_s0 + (current_atr_s0 * self.SL_ATR_MULTI), self.PRICE_PRECISION_BT)
-                        tp_price = round(entry_price_s0 - ((sl_price - entry_price_s0) * self.RR), self.PRICE_PRECISION_BT)
-                        if sl_price <= entry_price_s0 or tp_price >= entry_price_s0: 
-                            # print(f"{log_prefix_bt_next} S0 ATR Sell: Invalid SL/TP. SL={sl_price}, TP={tp_price}. Skipping."); 
-                            return
+                        if sl_price > entry_price_s0: # Valid SL
+                            tp_price = round(entry_price_s0 - ((sl_price - entry_price_s0) * self.RR), self.PRICE_PRECISION_BT)
+                            sl_percentage_for_sizing_s0 = (sl_price - entry_price_s0) / entry_price_s0 if entry_price_s0 > 0 else None
+                        else: sl_price = None # Invalidate
+                
                 elif self.sl_tp_mode_bt == "Percentage":
                     sl_price = sl_long if trade_side_s0 == 'buy' else sl_short
                     tp_price = tp_long if trade_side_s0 == 'buy' else tp_short
-                    if sl_price is None or tp_price is None or sl_price <=0 or tp_price <=0: 
-                        # print(f"{log_prefix_bt_next} S0 Percentage: SL/TP calculation failed or invalid. SL={sl_price}, TP={tp_price}. Skipping."); 
-                        return
-                    if trade_side_s0 == 'buy' and (sl_price >= entry_price_s0 or tp_price <= entry_price_s0): 
-                        # print(f"{log_prefix_bt_next} S0 Percentage Buy: Invalid SL/TP. SL={sl_price}, TP={tp_price}. Skipping."); 
-                        return
-                    if trade_side_s0 == 'sell' and (sl_price <= entry_price_s0 or tp_price >= entry_price_s0): 
-                        # print(f"{log_prefix_bt_next} S0 Percentage Sell: Invalid SL/TP. SL={sl_price}, TP={tp_price}. Skipping."); 
-                        return
+                    if self.user_sl > 0: sl_percentage_for_sizing_s0 = self.user_sl
+
                 elif self.sl_tp_mode_bt == "Fixed PnL":
                     sl_price = sl_long if trade_side_s0 == 'buy' else sl_short
                     tp_price = tp_long if trade_side_s0 == 'buy' else tp_short
-                    if sl_price is None or tp_price is None or sl_price <=0 or tp_price <=0: 
-                        # print(f"{log_prefix_bt_next} S0 Fixed PnL: SL/TP calculation failed or invalid. SL={sl_price}, TP={tp_price}. Skipping."); 
-                        return
-                    if trade_side_s0 == 'buy' and (sl_price >= entry_price_s0 or tp_price <= entry_price_s0): 
-                        # print(f"{log_prefix_bt_next} S0 Fixed PnL Buy: Invalid SL/TP. SL={sl_price}, TP={tp_price}. Skipping."); 
-                        return
-                    if trade_side_s0 == 'sell' and (sl_price <= entry_price_s0 or tp_price >= entry_price_s0): 
-                        # print(f"{log_prefix_bt_next} S0 Fixed PnL Sell: Invalid SL/TP. SL={sl_price}, TP={tp_price}. Skipping."); 
-                        return
-                else: 
-                    # print(f"{log_prefix_bt_next} S0: Unknown SL/TP mode '{self.sl_tp_mode_bt}'. Skipping."); 
-                    return
+                    # For Fixed PnL, sl_percentage_for_sizing_s0 is not directly used from account_risk_percent_bt in current sizing model.
+                    # It would require sl_pnl_amount to be derived from equity * account_risk_percent_bt,
+                    # and then sizing based on that. For now, Fixed PnL uses its own risk definition.
+                    # We can use a default fraction for trade_size_to_use_in_order or skip sizing based on account_risk_percent_bt.
+                    # Let's use a default size for Fixed PnL for now.
+                    sl_percentage_for_sizing_s0 = None # Signal to use default size
+                
+                else: return # Unknown mode
 
-                # print(f"{log_prefix_bt_next} S0 Placing Trade: Side={trade_side_s0}, Entry={entry_price_s0:.2f}, SL={sl_price:.2f}, TP={tp_price:.2f}, Size={trade_size_to_use_in_order}")
-                if trade_side_s0 == 'buy': self.buy(sl=sl_price, tp=tp_price, size=trade_size_to_use_in_order)
-                else: self.sell(sl=sl_price, tp=tp_price, size=trade_size_to_use_in_order)
+                if sl_price is None or tp_price is None or sl_price <= 0 or tp_price <= 0: return
+                if trade_side_s0 == 'buy' and (sl_price >= entry_price_s0 or tp_price <= entry_price_s0): return
+                if trade_side_s0 == 'sell' and (sl_price <= entry_price_s0 or tp_price >= entry_price_s0): return
+
+                # Calculate trade size
+                final_trade_size_s0 = 0.02 # Default
+                if sl_percentage_for_sizing_s0 and sl_percentage_for_sizing_s0 > 0 and self.account_risk_percent_bt > 0:
+                    calculated_size = self.account_risk_percent_bt / sl_percentage_for_sizing_s0
+                    # Cap size at 1 (100% of equity as per backtesting.py `size` interpretation for fractions)
+                    # Or a more conservative cap like 0.5 (50%) might be appropriate depending on leverage.
+                    # With leverage, risking 1% with a 1% SL implies 1x equity.
+                    # If leverage is 10x, this becomes 0.1 of the leveraged equity.
+                    # backtesting.py `size` is fraction of *cash*. Margin is handled separately.
+                    # So, if cash = 10000, leverage = 1, risk % = 0.01 (1%), SL % = 0.01 (1%),
+                    # size = 0.01 / 0.01 = 1.0 (meaning 100% of cash, which becomes the position value).
+                    final_trade_size_s0 = min(calculated_size, 1.0) # Cap at 100% of cash
+                    print(f"{log_prefix_bt_next} S0 Sizing: AccRisk={self.account_risk_percent_bt*100:.2f}%, SL%={sl_percentage_for_sizing_s0*100:.2f}%, CalcSize={calculated_size:.4f}, FinalSize={final_trade_size_s0:.4f}")
+
+
+                if trade_side_s0 == 'buy': self.buy(sl=sl_price, tp=tp_price, size=final_trade_size_s0)
+                else: self.sell(sl=sl_price, tp=tp_price, size=final_trade_size_s0)
             # else:
                 # print(f"{log_prefix_bt_next} S0: No trade signal this bar.")
 
@@ -861,56 +939,47 @@ class BacktestStrategyWrapper(Strategy):
             if trade_side_s1:
                 entry_price_s1 = price
                 sl_to_use_s1, tp_to_use_s1 = None, None
-                # print(f"{log_prefix_bt_next} S1 Signal: {trade_side_s1.upper()}. Entry: {entry_price_s1:.2f}, SL/TP Mode: {self.sl_tp_mode_bt}")
+                sl_percentage_for_sizing_s1 = None
+
                 if self.sl_tp_mode_bt == "ATR/Dynamic":
                     if self.atr is None or len(self.atr) < 1 or pd.isna(self.atr[-1]) or self.atr[-1] == 0:
-                        # print(f"{log_prefix_bt_next} S1: ATR invalid for dynamic SL/TP (ATR: {self.atr[-1] if self.atr and len(self.atr)>0 else 'N/A'}). Skipping trade.")
                         return
                     current_atr_s1 = self.atr[-1]
                     if trade_side_s1 == 'buy':
                         sl_to_use_s1 = round(entry_price_s1 - (current_atr_s1 * self.SL_ATR_MULTI), self.PRICE_PRECISION_BT)
-                        tp_to_use_s1 = round(entry_price_s1 + ((entry_price_s1 - sl_to_use_s1) * self.RR), self.PRICE_PRECISION_BT)
-                        if sl_to_use_s1 >= entry_price_s1 or tp_to_use_s1 <= entry_price_s1: 
-                            # print(f"{log_prefix_bt_next} S1 ATR Buy: Invalid SL/TP. SL={sl_to_use_s1}, TP={tp_to_use_s1}. Skipping."); 
-                            return
+                        if sl_to_use_s1 < entry_price_s1:
+                            tp_to_use_s1 = round(entry_price_s1 + ((entry_price_s1 - sl_to_use_s1) * self.RR), self.PRICE_PRECISION_BT)
+                            sl_percentage_for_sizing_s1 = (entry_price_s1 - sl_to_use_s1) / entry_price_s1 if entry_price_s1 > 0 else None
+                        else: sl_to_use_s1 = None
                     else: # sell
                         sl_to_use_s1 = round(entry_price_s1 + (current_atr_s1 * self.SL_ATR_MULTI), self.PRICE_PRECISION_BT)
-                        tp_to_use_s1 = round(entry_price_s1 - ((sl_to_use_s1 - entry_price_s1) * self.RR), self.PRICE_PRECISION_BT)
-                        if sl_to_use_s1 <= entry_price_s1 or tp_to_use_s1 >= entry_price_s1: 
-                            # print(f"{log_prefix_bt_next} S1 ATR Sell: Invalid SL/TP. SL={sl_to_use_s1}, TP={tp_to_use_s1}. Skipping."); 
-                            return
+                        if sl_to_use_s1 > entry_price_s1:
+                            tp_to_use_s1 = round(entry_price_s1 - ((sl_to_use_s1 - entry_price_s1) * self.RR), self.PRICE_PRECISION_BT)
+                            sl_percentage_for_sizing_s1 = (sl_to_use_s1 - entry_price_s1) / entry_price_s1 if entry_price_s1 > 0 else None
+                        else: sl_to_use_s1 = None
+
                 elif self.sl_tp_mode_bt == "Percentage":
                     sl_to_use_s1 = sl_long if trade_side_s1 == 'buy' else sl_short
                     tp_to_use_s1 = tp_long if trade_side_s1 == 'buy' else tp_short
-                    if sl_to_use_s1 is None or tp_to_use_s1 is None or sl_to_use_s1 <= 0 or tp_to_use_s1 <= 0: 
-                        # print(f"{log_prefix_bt_next} S1 Percentage: SL/TP calc failed. SL={sl_to_use_s1}, TP={tp_to_use_s1}. Skipping."); 
-                        return
-                    if trade_side_s1 == 'buy' and (sl_to_use_s1 >= entry_price_s1 or tp_to_use_s1 <= entry_price_s1): 
-                        # print(f"{log_prefix_bt_next} S1 Percentage Buy: Invalid SL/TP. SL={sl_to_use_s1}, TP={tp_to_use_s1}. Skipping."); 
-                        return
-                    if trade_side_s1 == 'sell' and (sl_to_use_s1 <= entry_price_s1 or tp_to_use_s1 >= entry_price_s1): 
-                        # print(f"{log_prefix_bt_next} S1 Percentage Sell: Invalid SL/TP. SL={sl_to_use_s1}, TP={tp_to_use_s1}. Skipping."); 
-                        return
+                    if self.user_sl > 0: sl_percentage_for_sizing_s1 = self.user_sl
+                
                 elif self.sl_tp_mode_bt == "Fixed PnL":
                     sl_to_use_s1 = sl_long if trade_side_s1 == 'buy' else sl_short
                     tp_to_use_s1 = tp_long if trade_side_s1 == 'buy' else tp_short
-                    if sl_to_use_s1 is None or tp_to_use_s1 is None or sl_to_use_s1 <= 0 or tp_to_use_s1 <= 0: 
-                        # print(f"{log_prefix_bt_next} S1 Fixed PnL: SL/TP calc failed. SL={sl_to_use_s1}, TP={tp_to_use_s1}. Skipping."); 
-                        return
-                    if trade_side_s1 == 'buy' and (sl_to_use_s1 >= entry_price_s1 or tp_to_use_s1 <= entry_price_s1): 
-                        # print(f"{log_prefix_bt_next} S1 Fixed PnL Buy: Invalid SL/TP. SL={sl_to_use_s1}, TP={tp_to_use_s1}. Skipping."); 
-                        return
-                    if trade_side_s1 == 'sell' and (sl_to_use_s1 <= entry_price_s1 or tp_to_use_s1 >= entry_price_s1): 
-                        # print(f"{log_prefix_bt_next} S1 Fixed PnL Sell: Invalid SL/TP. SL={sl_to_use_s1}, TP={tp_to_use_s1}. Skipping."); 
-                        return
-                
-                if sl_to_use_s1 is None or tp_to_use_s1 is None: 
-                    # print(f"{log_prefix_bt_next} S1: Final SL/TP check failed. SL={sl_to_use_s1}, TP={tp_to_use_s1}. Skipping."); 
-                    return
+                    sl_percentage_for_sizing_s1 = None # Use default size
 
-                # print(f"{log_prefix_bt_next} S1 Placing Trade: Side={trade_side_s1}, Entry={entry_price_s1:.2f}, SL={sl_to_use_s1:.2f}, TP={tp_to_use_s1:.2f}, Size={trade_size_to_use_in_order}")
-                if trade_side_s1 == 'buy': self.buy(sl=sl_to_use_s1, tp=tp_to_use_s1, size=trade_size_to_use_in_order)
-                else: self.sell(sl=sl_to_use_s1, tp=tp_to_use_s1, size=trade_size_to_use_in_order)
+                if sl_to_use_s1 is None or tp_to_use_s1 is None or sl_to_use_s1 <= 0 or tp_to_use_s1 <= 0: return
+                if trade_side_s1 == 'buy' and (sl_to_use_s1 >= entry_price_s1 or tp_to_use_s1 <= entry_price_s1): return
+                if trade_side_s1 == 'sell' and (sl_to_use_s1 <= entry_price_s1 or tp_to_use_s1 >= entry_price_s1): return
+
+                final_trade_size_s1 = 0.02 # Default
+                if sl_percentage_for_sizing_s1 and sl_percentage_for_sizing_s1 > 0 and self.account_risk_percent_bt > 0:
+                    calculated_size_s1 = self.account_risk_percent_bt / sl_percentage_for_sizing_s1
+                    final_trade_size_s1 = min(calculated_size_s1, 1.0) 
+                    print(f"{log_prefix_bt_next} S1 Sizing: AccRisk={self.account_risk_percent_bt*100:.2f}%, SL%={sl_percentage_for_sizing_s1*100:.2f}%, CalcSize={calculated_size_s1:.4f}, FinalSize={final_trade_size_s1:.4f}")
+
+                if trade_side_s1 == 'buy': self.buy(sl=sl_to_use_s1, tp=tp_to_use_s1, size=final_trade_size_s1)
+                else: self.sell(sl=sl_to_use_s1, tp=tp_to_use_s1, size=final_trade_size_s1)
             # else:
                 # print(f"{log_prefix_bt_next} S1: No trade signal this bar.")
 
@@ -940,57 +1009,47 @@ class BacktestStrategyWrapper(Strategy):
             if trade_side_s5:
                 entry_price_s5 = price
                 sl_to_use_s5, tp_to_use_s5 = None, None
-                # print(f"{log_prefix_bt_next} S5 Signal: {trade_side_s5.upper()}. Entry: {entry_price_s5:.2f}, SL/TP Mode: {self.sl_tp_mode_bt}")
+                sl_percentage_for_sizing_s5 = None
 
                 if self.sl_tp_mode_bt == "ATR/Dynamic":
                     if pd.isna(self.atr[-1]) or self.atr[-1] == 0: 
-                        # print(f"{log_prefix_bt_next} S5: ATR invalid for dynamic SL/TP (ATR: {self.atr[-1]}). Skipping."); 
                         return
                     current_atr_s5 = self.atr[-1]
                     if trade_side_s5 == 'buy':
                         sl_to_use_s5 = round(entry_price_s5 - (current_atr_s5 * self.SL_ATR_MULTI), self.PRICE_PRECISION_BT)
-                        tp_to_use_s5 = round(entry_price_s5 + ((entry_price_s5 - sl_to_use_s5) * self.RR), self.PRICE_PRECISION_BT)
-                        if sl_to_use_s5 >= entry_price_s5 or tp_to_use_s5 <= entry_price_s5: 
-                            # print(f"{log_prefix_bt_next} S5 ATR Buy: Invalid SL/TP. SL={sl_to_use_s5}, TP={tp_to_use_s5}. Skipping."); 
-                            return
+                        if sl_to_use_s5 < entry_price_s5:
+                            tp_to_use_s5 = round(entry_price_s5 + ((entry_price_s5 - sl_to_use_s5) * self.RR), self.PRICE_PRECISION_BT)
+                            sl_percentage_for_sizing_s5 = (entry_price_s5 - sl_to_use_s5) / entry_price_s5 if entry_price_s5 > 0 else None
+                        else: sl_to_use_s5 = None
                     else: # sell
                         sl_to_use_s5 = round(entry_price_s5 + (current_atr_s5 * self.SL_ATR_MULTI), self.PRICE_PRECISION_BT)
-                        tp_to_use_s5 = round(entry_price_s5 - ((sl_to_use_s5 - entry_price_s5) * self.RR), self.PRICE_PRECISION_BT)
-                        if sl_to_use_s5 <= entry_price_s5 or tp_to_use_s5 >= entry_price_s5: 
-                            # print(f"{log_prefix_bt_next} S5 ATR Sell: Invalid SL/TP. SL={sl_to_use_s5}, TP={tp_to_use_s5}. Skipping."); 
-                            return
+                        if sl_to_use_s5 > entry_price_s5:
+                            tp_to_use_s5 = round(entry_price_s5 - ((sl_to_use_s5 - entry_price_s5) * self.RR), self.PRICE_PRECISION_BT)
+                            sl_percentage_for_sizing_s5 = (sl_to_use_s5 - entry_price_s5) / entry_price_s5 if entry_price_s5 > 0 else None
+                        else: sl_to_use_s5 = None
+
                 elif self.sl_tp_mode_bt == "Percentage":
                     sl_to_use_s5 = sl_long if trade_side_s5 == 'buy' else sl_short
                     tp_to_use_s5 = tp_long if trade_side_s5 == 'buy' else tp_short
-                    if sl_to_use_s5 is None or tp_to_use_s5 is None or sl_to_use_s5 <= 0 or tp_to_use_s5 <= 0: 
-                        # print(f"{log_prefix_bt_next} S5 Percentage: SL/TP calc failed. SL={sl_to_use_s5}, TP={tp_to_use_s5}. Skipping."); 
-                        return
-                    if trade_side_s5 == 'buy' and (sl_to_use_s5 >= entry_price_s5 or tp_to_use_s5 <= entry_price_s5): 
-                        # print(f"{log_prefix_bt_next} S5 Percentage Buy: Invalid SL/TP. SL={sl_to_use_s5}, TP={tp_to_use_s5}. Skipping."); 
-                        return
-                    if trade_side_s5 == 'sell' and (sl_to_use_s5 <= entry_price_s5 or tp_to_use_s5 >= entry_price_s5): 
-                        # print(f"{log_prefix_bt_next} S5 Percentage Sell: Invalid SL/TP. SL={sl_to_use_s5}, TP={tp_to_use_s5}. Skipping."); 
-                        return
+                    if self.user_sl > 0: sl_percentage_for_sizing_s5 = self.user_sl
+
                 elif self.sl_tp_mode_bt == "Fixed PnL":
                     sl_to_use_s5 = sl_long if trade_side_s5 == 'buy' else sl_short
                     tp_to_use_s5 = tp_long if trade_side_s5 == 'buy' else tp_short
-                    if sl_to_use_s5 is None or tp_to_use_s5 is None or sl_to_use_s5 <= 0 or tp_to_use_s5 <= 0: 
-                        # print(f"{log_prefix_bt_next} S5 Fixed PnL: SL/TP calc failed. SL={sl_to_use_s5}, TP={tp_to_use_s5}. Skipping."); 
-                        return
-                    if trade_side_s5 == 'buy' and (sl_to_use_s5 >= entry_price_s5 or tp_to_use_s5 <= entry_price_s5): 
-                        # print(f"{log_prefix_bt_next} S5 Fixed PnL Buy: Invalid SL/TP. SL={sl_to_use_s5}, TP={tp_to_use_s5}. Skipping."); 
-                        return
-                    if trade_side_s5 == 'sell' and (sl_to_use_s5 <= entry_price_s5 or tp_to_use_s5 >= entry_price_s5): 
-                        # print(f"{log_prefix_bt_next} S5 Fixed PnL Sell: Invalid SL/TP. SL={sl_to_use_s5}, TP={tp_to_use_s5}. Skipping."); 
-                        return
+                    sl_percentage_for_sizing_s5 = None # Use default size
 
-                if sl_to_use_s5 is None or tp_to_use_s5 is None: 
-                    # print(f"{log_prefix_bt_next} S5: Final SL/TP check failed. SL={sl_to_use_s5}, TP={tp_to_use_s5}. Skipping."); 
-                    return # Redundant but safe
+                if sl_to_use_s5 is None or tp_to_use_s5 is None or sl_to_use_s5 <= 0 or tp_to_use_s5 <= 0: return
+                if trade_side_s5 == 'buy' and (sl_to_use_s5 >= entry_price_s5 or tp_to_use_s5 <= entry_price_s5): return
+                if trade_side_s5 == 'sell' and (sl_to_use_s5 <= entry_price_s5 or tp_to_use_s5 >= entry_price_s5): return
                 
-                # print(f"{log_prefix_bt_next} S5 Placing Trade: Side={trade_side_s5}, Entry={entry_price_s5:.2f}, SL={sl_to_use_s5:.2f}, TP={tp_to_use_s5:.2f}, Size={trade_size_to_use_in_order}")
-                if trade_side_s5 == 'buy': self.buy(sl=sl_to_use_s5, tp=tp_to_use_s5, size=trade_size_to_use_in_order)
-                else: self.sell(sl=sl_to_use_s5, tp=tp_to_use_s5, size=trade_size_to_use_in_order)
+                final_trade_size_s5 = 0.02 # Default
+                if sl_percentage_for_sizing_s5 and sl_percentage_for_sizing_s5 > 0 and self.account_risk_percent_bt > 0:
+                    calculated_size_s5 = self.account_risk_percent_bt / sl_percentage_for_sizing_s5
+                    final_trade_size_s5 = min(calculated_size_s5, 1.0)
+                    print(f"{log_prefix_bt_next} S5 Sizing: AccRisk={self.account_risk_percent_bt*100:.2f}%, SL%={sl_percentage_for_sizing_s5*100:.2f}%, CalcSize={calculated_size_s5:.4f}, FinalSize={final_trade_size_s5:.4f}")
+                
+                if trade_side_s5 == 'buy': self.buy(sl=sl_to_use_s5, tp=tp_to_use_s5, size=final_trade_size_s5)
+                else: self.sell(sl=sl_to_use_s5, tp=tp_to_use_s5, size=final_trade_size_s5)
             # else:
                 # print(f"{log_prefix_bt_next} S5: No trade signal this bar.")
         
@@ -1133,11 +1192,28 @@ class BacktestStrategyWrapper(Strategy):
             # The earlier check `if market_structure['trend_bias'] == 'ranging': return` handles explicit ranging.
 
             if potential_trade_s6:
-                print(f"{log_prefix_bt_next} S6 Placing Trade: Side={potential_trade_s6['signal']}, Entry={entry_price_s6:.{log_price_precision}f}, SL={potential_trade_s6['sl']:.{log_price_precision}f}, TP={potential_trade_s6['tp']:.{log_price_precision}f}, Size={trade_size_to_use_in_order}")
+                sl_price_s6 = potential_trade_s6['sl']
+                tp_price_s6 = potential_trade_s6['tp']
+                entry_price_s6_final = potential_trade_s6['entry'] # Assuming entry was stored in potential_trade_s6
+                
+                sl_percentage_for_sizing_s6 = None
+                if entry_price_s6_final > 0 and sl_price_s6 > 0 :
+                    if potential_trade_s6['signal'] == 'buy' and sl_price_s6 < entry_price_s6_final:
+                        sl_percentage_for_sizing_s6 = (entry_price_s6_final - sl_price_s6) / entry_price_s6_final
+                    elif potential_trade_s6['signal'] == 'sell' and sl_price_s6 > entry_price_s6_final:
+                        sl_percentage_for_sizing_s6 = (sl_price_s6 - entry_price_s6_final) / entry_price_s6_final
+                
+                final_trade_size_s6 = 0.02 # Default
+                if sl_percentage_for_sizing_s6 and sl_percentage_for_sizing_s6 > 0 and self.account_risk_percent_bt > 0:
+                    calculated_size_s6 = self.account_risk_percent_bt / sl_percentage_for_sizing_s6
+                    final_trade_size_s6 = min(calculated_size_s6, 1.0)
+                    print(f"{log_prefix_bt_next} S6 Sizing: AccRisk={self.account_risk_percent_bt*100:.2f}%, SL%={sl_percentage_for_sizing_s6*100:.2f}%, CalcSize={calculated_size_s6:.4f}, FinalSize={final_trade_size_s6:.4f}")
+
+                print(f"{log_prefix_bt_next} S6 Placing Trade: Side={potential_trade_s6['signal']}, Entry={entry_price_s6_final:.{log_price_precision}f}, SL={sl_price_s6:.{log_price_precision}f}, TP={tp_price_s6:.{log_price_precision}f}, Size={final_trade_size_s6}")
                 if potential_trade_s6['signal'] == 'buy':
-                    self.buy(sl=potential_trade_s6['sl'], tp=potential_trade_s6['tp'], size=trade_size_to_use_in_order)
+                    self.buy(sl=sl_price_s6, tp=tp_price_s6, size=final_trade_size_s6)
                 else: # sell
-                    self.sell(sl=potential_trade_s6['sl'], tp=potential_trade_s6['tp'], size=trade_size_to_use_in_order)
+                    self.sell(sl=sl_price_s6, tp=tp_price_s6, size=final_trade_size_s6)
             else:
                  # This 'else' means no 'potential_trade_s6' was formed.
                  # Debug prints within the logic above should indicate why (e.g., R:R too low, price not in zone, etc.)
@@ -1222,62 +1298,71 @@ class BacktestStrategyWrapper(Strategy):
                 
                 if volume_spike_detected_s7_bt and ema_filter_passed_s7_bt:
                     # print(f"{log_prefix_bt_next} S7 BT: Filters passed (Volume Spike: {volume_spike_detected_s7_bt}, EMA Filter: {ema_filter_passed_s7_bt})")
-                    # Signal is confirmed, now use the SL/TP mode from backtest settings
                     entry_price_s7 = current_price_s7_bt
                     sl_to_use_s7, tp_to_use_s7 = None, None
+                    sl_percentage_for_sizing_s7 = None
 
                     if self.sl_tp_mode_bt == "ATR/Dynamic":
                         if self.atr_s7 is None or len(self.atr_s7) < 1 or pd.isna(self.atr_s7[-1]) or self.atr_s7[-1] == 0:
-                            # print(f"{log_prefix_bt_next} S7 BT: ATR invalid for ATR/Dynamic SL/TP. Skipping.")
                             return
                         current_atr_s7_bt = self.atr_s7[-1]
                         
-                        # For S7, the live strategy uses pattern wick + ATR buffer.
-                        # For backtesting in ATR/Dynamic mode, we can try to mimic this or use the standard ATR SL.
-                        # Let's try to use the sl_ref_price_s7_bt if available, otherwise fallback to standard ATR.
                         if sl_ref_price_s7_bt is not None:
-                            atr_buffer_s7_bt = current_atr_s7_bt * 0.1 # 10% of ATR as buffer
+                            atr_buffer_s7_bt = current_atr_s7_bt * 0.1 
                             if pattern_side_s7_bt == "up":
                                 sl_candidate = round(sl_ref_price_s7_bt - atr_buffer_s7_bt, self.PRICE_PRECISION_BT)
-                                if sl_candidate >= entry_price_s7: # If SL is too tight or above entry
-                                    sl_candidate = round(entry_price_s7 - (current_atr_s7_bt * self.SL_ATR_MULTI), self.PRICE_PRECISION_BT) # Fallback to standard ATR SL
+                                if sl_candidate >= entry_price_s7: 
+                                    sl_candidate = round(entry_price_s7 - (current_atr_s7_bt * self.SL_ATR_MULTI), self.PRICE_PRECISION_BT)
                                 sl_to_use_s7 = sl_candidate
-                                if sl_to_use_s7 < entry_price_s7 : tp_to_use_s7 = round(entry_price_s7 + (entry_price_s7 - sl_to_use_s7) * self.RR, self.PRICE_PRECISION_BT)
+                                if sl_to_use_s7 < entry_price_s7: 
+                                    tp_to_use_s7 = round(entry_price_s7 + (entry_price_s7 - sl_to_use_s7) * self.RR, self.PRICE_PRECISION_BT)
+                                    sl_percentage_for_sizing_s7 = (entry_price_s7 - sl_to_use_s7) / entry_price_s7 if entry_price_s7 > 0 else None
+                                else: sl_to_use_s7 = None # Invalidate if SL is bad
                             else: # down
                                 sl_candidate = round(sl_ref_price_s7_bt + atr_buffer_s7_bt, self.PRICE_PRECISION_BT)
                                 if sl_candidate <= entry_price_s7:
                                     sl_candidate = round(entry_price_s7 + (current_atr_s7_bt * self.SL_ATR_MULTI), self.PRICE_PRECISION_BT)
                                 sl_to_use_s7 = sl_candidate
-                                if sl_to_use_s7 > entry_price_s7 : tp_to_use_s7 = round(entry_price_s7 - (sl_to_use_s7 - entry_price_s7) * self.RR, self.PRICE_PRECISION_BT)
-                        else: # No specific sl_ref_price from pattern, use standard ATR SL/TP
+                                if sl_to_use_s7 > entry_price_s7: 
+                                    tp_to_use_s7 = round(entry_price_s7 - (sl_to_use_s7 - entry_price_s7) * self.RR, self.PRICE_PRECISION_BT)
+                                    sl_percentage_for_sizing_s7 = (sl_to_use_s7 - entry_price_s7) / entry_price_s7 if entry_price_s7 > 0 else None
+                                else: sl_to_use_s7 = None # Invalidate
+                        else: 
                             if pattern_side_s7_bt == "up":
                                 sl_to_use_s7 = round(entry_price_s7 - (current_atr_s7_bt * self.SL_ATR_MULTI), self.PRICE_PRECISION_BT)
-                                if sl_to_use_s7 < entry_price_s7 : tp_to_use_s7 = round(entry_price_s7 + (entry_price_s7 - sl_to_use_s7) * self.RR, self.PRICE_PRECISION_BT)
+                                if sl_to_use_s7 < entry_price_s7: 
+                                    tp_to_use_s7 = round(entry_price_s7 + (entry_price_s7 - sl_to_use_s7) * self.RR, self.PRICE_PRECISION_BT)
+                                    sl_percentage_for_sizing_s7 = (entry_price_s7 - sl_to_use_s7) / entry_price_s7 if entry_price_s7 > 0 else None
+                                else: sl_to_use_s7 = None
                             else: # down
                                 sl_to_use_s7 = round(entry_price_s7 + (current_atr_s7_bt * self.SL_ATR_MULTI), self.PRICE_PRECISION_BT)
-                                if sl_to_use_s7 > entry_price_s7 : tp_to_use_s7 = round(entry_price_s7 - (sl_to_use_s7 - entry_price_s7) * self.RR, self.PRICE_PRECISION_BT)
+                                if sl_to_use_s7 > entry_price_s7: 
+                                    tp_to_use_s7 = round(entry_price_s7 - (sl_to_use_s7 - entry_price_s7) * self.RR, self.PRICE_PRECISION_BT)
+                                    sl_percentage_for_sizing_s7 = (sl_to_use_s7 - entry_price_s7) / entry_price_s7 if entry_price_s7 > 0 else None
+                                else: sl_to_use_s7 = None
                         
                     elif self.sl_tp_mode_bt == "Percentage":
                         sl_to_use_s7 = sl_long if pattern_side_s7_bt == "up" else sl_short
                         tp_to_use_s7 = tp_long if pattern_side_s7_bt == "up" else tp_short
+                        if self.user_sl > 0: sl_percentage_for_sizing_s7 = self.user_sl
+
                     elif self.sl_tp_mode_bt == "Fixed PnL":
                         sl_to_use_s7 = sl_long if pattern_side_s7_bt == "up" else sl_short
                         tp_to_use_s7 = tp_long if pattern_side_s7_bt == "up" else tp_short
+                        sl_percentage_for_sizing_s7 = None # Use default size
                     
-                    # Final validation of calculated SL/TP for S7
-                    if sl_to_use_s7 is None or tp_to_use_s7 is None or sl_to_use_s7 <= 0 or tp_to_use_s7 <= 0:
-                        # print(f"{log_prefix_bt_next} S7 BT: SL/TP calculation failed or invalid. SL={sl_to_use_s7}, TP={tp_to_use_s7}. Skipping."); 
-                        return
-                    if pattern_side_s7_bt == "up" and (sl_to_use_s7 >= entry_price_s7 or tp_to_use_s7 <= entry_price_s7):
-                        # print(f"{log_prefix_bt_next} S7 BT UP: Invalid SL/TP relation. SL={sl_to_use_s7}, TP={tp_to_use_s7}, Entry={entry_price_s7}. Skipping."); 
-                        return
-                    if pattern_side_s7_bt == "down" and (sl_to_use_s7 <= entry_price_s7 or tp_to_use_s7 >= entry_price_s7):
-                        # print(f"{log_prefix_bt_next} S7 BT DOWN: Invalid SL/TP relation. SL={sl_to_use_s7}, TP={tp_to_use_s7}, Entry={entry_price_s7}. Skipping."); 
-                        return
+                    if sl_to_use_s7 is None or tp_to_use_s7 is None or sl_to_use_s7 <= 0 or tp_to_use_s7 <= 0: return
+                    if pattern_side_s7_bt == "up" and (sl_to_use_s7 >= entry_price_s7 or tp_to_use_s7 <= entry_price_s7): return
+                    if pattern_side_s7_bt == "down" and (sl_to_use_s7 <= entry_price_s7 or tp_to_use_s7 >= entry_price_s7): return
 
-                    # print(f"{log_prefix_bt_next} S7 BT Placing Trade: Side={pattern_side_s7_bt}, Entry={entry_price_s7:.{self.PRICE_PRECISION_BT}f}, SL={sl_to_use_s7:.{self.PRICE_PRECISION_BT}f}, TP={tp_to_use_s7:.{self.PRICE_PRECISION_BT}f}, Size={trade_size_to_use_in_order}")
-                    if pattern_side_s7_bt == "up": self.buy(sl=sl_to_use_s7, tp=tp_to_use_s7, size=trade_size_to_use_in_order)
-                    else: self.sell(sl=sl_to_use_s7, tp=tp_to_use_s7, size=trade_size_to_use_in_order)
+                    final_trade_size_s7 = 0.02 # Default
+                    if sl_percentage_for_sizing_s7 and sl_percentage_for_sizing_s7 > 0 and self.account_risk_percent_bt > 0:
+                        calculated_size_s7 = self.account_risk_percent_bt / sl_percentage_for_sizing_s7
+                        final_trade_size_s7 = min(calculated_size_s7, 1.0)
+                        print(f"{log_prefix_bt_next} S7 Sizing: AccRisk={self.account_risk_percent_bt*100:.2f}%, SL%={sl_percentage_for_sizing_s7*100:.2f}%, CalcSize={calculated_size_s7:.4f}, FinalSize={final_trade_size_s7:.4f}")
+
+                    if pattern_side_s7_bt == "up": self.buy(sl=sl_to_use_s7, tp=tp_to_use_s7, size=final_trade_size_s7)
+                    else: self.sell(sl=sl_to_use_s7, tp=tp_to_use_s7, size=final_trade_size_s7)
                 # else:
                     # print(f"{log_prefix_bt_next} S7 BT: Filters failed for {detected_pattern_name_s7_bt}. Volume Spike: {volume_spike_detected_s7_bt}, EMA Filter: {ema_filter_passed_s7_bt}")
             # else:
@@ -1302,9 +1387,10 @@ def execute_backtest(strategy_id_for_backtest, symbol, timeframe, interval_days,
                      ui_tp_percentage, ui_sl_percentage, # Percentage based
                      sl_tp_mode, sl_pnl_amount_val, tp_pnl_amount_val, # PnL and Mode based
                      starting_capital, # New parameter for starting capital
-                     leverage_bt # New parameter for leverage
+                     leverage_bt, # New parameter for leverage
+                     account_risk_percent_bt # New parameter for account risk %
                      ):
-    print(f"Executing backtest for Strategy ID {strategy_id_for_backtest} on {symbol} ({timeframe}, {interval_days} days), Start Capital: ${starting_capital:.2f}, Leverage: {leverage_bt}x, Mode: {sl_tp_mode}") # Added leverage_bt to print
+    print(f"Executing backtest for Strategy ID {strategy_id_for_backtest} on {symbol} ({timeframe}, {interval_days} days), Start Capital: ${starting_capital:.2f}, Leverage: {leverage_bt}x, Account Risk: {account_risk_percent_bt*100:.2f}%, Mode: {sl_tp_mode}") # Added account_risk_percent_bt
     if sl_tp_mode == "Percentage":
         print(f"  TP %: {ui_tp_percentage*100:.2f}%, SL %: {ui_sl_percentage*100:.2f}%")
     elif sl_tp_mode == "Fixed PnL":
@@ -1362,6 +1448,7 @@ def execute_backtest(strategy_id_for_backtest, symbol, timeframe, interval_days,
 
     # Set leverage for the strategy wrapper instance (though it's mainly for logging within the wrapper)
     BacktestStrategyWrapper.leverage = leverage_bt
+    BacktestStrategyWrapper.account_risk_percent_bt = account_risk_percent_bt # Set account risk
 
     # Calculate margin for backtesting.py: margin = 1 / leverage
     # Ensure leverage_bt >= 1. If leverage_bt is 0 or less, or less than 1, default to 1 (no leverage, margin=1).
@@ -1499,6 +1586,7 @@ backtest_sl_pnl_amount_var = None
 backtest_tp_pnl_amount_var = None
 backtest_sl_tp_mode_var = None
 backtest_starting_capital_var = None # New var for starting capital
+backtest_account_risk_var = None # New var for account risk %
 
 
 # --- Backtesting UI Command and Threading Logic ---
@@ -1506,7 +1594,7 @@ def run_backtest_command():
     global backtest_symbol_var, backtest_timeframe_var, backtest_interval_var
     global backtest_tp_var, backtest_sl_var, backtest_selected_strategy_var
     # Add new global vars for backtesting PnL and Mode
-    global backtest_sl_pnl_amount_var, backtest_tp_pnl_amount_var, backtest_sl_tp_mode_var, backtest_starting_capital_var, backtest_leverage_var # Added backtest_leverage_var
+    global backtest_sl_pnl_amount_var, backtest_tp_pnl_amount_var, backtest_sl_tp_mode_var, backtest_starting_capital_var, backtest_leverage_var, backtest_account_risk_var # Added backtest_account_risk_var
     global backtest_results_text_widget, STRATEGIES, root, status_var, backtest_run_button
 
     if backtest_run_button:
@@ -1530,6 +1618,7 @@ def run_backtest_command():
         selected_strategy_name = backtest_selected_strategy_var.get()
         starting_capital_str = backtest_starting_capital_var.get().strip()
         leverage_str = backtest_leverage_var.get().strip() # Get leverage string
+        account_risk_str = backtest_account_risk_var.get().strip() # Get account risk string
         
         # Get SL/TP mode for backtesting
         current_backtest_sl_tp_mode = backtest_sl_tp_mode_var.get()
@@ -1541,6 +1630,7 @@ def run_backtest_command():
         tp_pnl = 0.0
         starting_capital = 10000 # Default starting capital
         leverage_val = 1.0 # Default leverage
+        account_risk_val = 0.01 # Default 1% account risk
 
         # Validate Starting Capital
         if not starting_capital_str:
@@ -1571,6 +1661,23 @@ def run_backtest_command():
                 return
         except ValueError:
             messagebox.showerror("Input Error", "Invalid number format for Leverage.")
+            if backtest_run_button: backtest_run_button.config(state=tk.NORMAL)
+            return
+
+        # Validate Account Risk %
+        if not account_risk_str:
+            messagebox.showerror("Input Error", "Account Risk % is required.")
+            if backtest_run_button: backtest_run_button.config(state=tk.NORMAL)
+            return
+        try:
+            account_risk_input_val = float(account_risk_str)
+            if not (0 < account_risk_input_val <= 100):
+                messagebox.showerror("Input Error", "Account Risk % must be between 0 (exclusive) and 100 (inclusive).")
+                if backtest_run_button: backtest_run_button.config(state=tk.NORMAL)
+                return
+            account_risk_val = account_risk_input_val / 100.0 # Convert to decimal
+        except ValueError:
+            messagebox.showerror("Input Error", "Invalid number format for Account Risk %.")
             if backtest_run_button: backtest_run_button.config(state=tk.NORMAL)
             return
 
@@ -1665,11 +1772,11 @@ def run_backtest_command():
                                   args=(symbols_list, strategy_id_for_backtest, timeframe, interval_days, 
                                         tp_percentage, sl_percentage,
                                         current_backtest_sl_tp_mode, sl_pnl, tp_pnl,
-                                        starting_capital, leverage_val),
+                                        starting_capital, leverage_val, account_risk_val), # Added account_risk_val
                                   daemon=True)
         thread.start()
 
-    except ValueError: # Catches float/int conversion errors for Interval, TP/SL %, PnL Amounts, Starting Capital, or Leverage
+    except ValueError: # Catches float/int conversion errors for Interval, TP/SL %, PnL Amounts, Starting Capital, Leverage, or Account Risk
         messagebox.showerror("Input Error", "Invalid number format for Interval, TP/SL %, PnL Amounts, Starting Capital, or Leverage.")
         if backtest_run_button: backtest_run_button.config(state=tk.NORMAL) 
     except Exception as e:
@@ -1685,7 +1792,7 @@ def run_backtest_command():
 def perform_backtest_for_multiple_symbols(symbols_list, strategy_id, timeframe, interval_days,
                                           tp_percentage_val, sl_percentage_val,
                                           passed_sl_tp_mode, sl_pnl_val, tp_pnl_val,
-                                          starting_capital_val, leverage_val):
+                                          starting_capital_val, leverage_val, account_risk_percentage_val): # Added account_risk_percentage_val
     global backtest_results_text_widget, root, status_var, backtest_run_button
     all_symbols_completed = True
 
@@ -1718,7 +1825,7 @@ def perform_backtest_for_multiple_symbols(symbols_list, strategy_id, timeframe, 
             strategy_id, symbol_item, timeframe, interval_days,
             tp_percentage_val, sl_percentage_val,
             passed_sl_tp_mode, sl_pnl_val, tp_pnl_val,
-            starting_capital_val, leverage_val
+            starting_capital_val, leverage_val, account_risk_percentage_val # Added account_risk_percentage_val
         )
 
         # Update UI with results for this specific symbol
@@ -5616,6 +5723,7 @@ if __name__ == "__main__":
     backtest_sl_tp_mode_var = tk.StringVar(value="ATR/Dynamic") # Default mode
     backtest_starting_capital_var = tk.StringVar(value="10000") # Default starting capital
     backtest_leverage_var = tk.StringVar(value="1") # New StringVar for backtest leverage, default 1x
+    backtest_account_risk_var = tk.StringVar(value="1.0") # Default 1.0% account risk
 
     backtest_selected_strategy_var = tk.StringVar()
 
@@ -5782,6 +5890,10 @@ if __name__ == "__main__":
     ttk.Label(backtest_params_grid, text="Leverage (e.g., 10):").grid(row=5, column=0, padx=2, pady=2, sticky='w')
     backtest_leverage_entry = ttk.Entry(backtest_params_grid, textvariable=backtest_leverage_var, width=7)
     backtest_leverage_entry.grid(row=5, column=1, padx=2, pady=2, sticky='w')
+
+    ttk.Label(backtest_params_grid, text="Account Risk %:").grid(row=5, column=2, padx=2, pady=2, sticky='w') # New Row 5, Col 2
+    backtest_account_risk_entry = ttk.Entry(backtest_params_grid, textvariable=backtest_account_risk_var, width=7) # New Entry
+    backtest_account_risk_entry.grid(row=5, column=3, padx=2, pady=2, sticky='w') # New Entry position
     
     ttk.Label(backtest_params_grid, text="Backtest Strategy:").grid(row=6, column=0, padx=2, pady=2, sticky='w')
     backtest_strategy_combobox = ttk.Combobox(backtest_params_grid, textvariable=backtest_selected_strategy_var, values=list(STRATEGIES.values()), width=25, state="readonly")
