@@ -587,7 +587,7 @@ class BacktestStrategyWrapper(Strategy):
     
     current_strategy_id = 5 # Defaulting to 5 for "New RSI-Based Strategy"
     RR = 1.5  # Risk/Reward ratio
-    SL_ATR_MULTI = DEFAULT_ATR_MULTIPLIER # Multiplier for ATR to determine SL distance
+    SL_ATR_MULTI = 1.0 # Multiplier for ATR to determine SL distance - SET TO 1.0
     PRICE_PRECISION_BT = 4 # Default rounding precision for backtesting
 
     # Attributes for new SL/TP modes, to be set by execute_backtest
@@ -598,10 +598,15 @@ class BacktestStrategyWrapper(Strategy):
     leverage = 1.0 # Default leverage for backtesting
     account_risk_percent_bt = 0.01 # Default 1% account risk for backtesting
 
+    # Attributes for Backtesting Trailing Stop, to be set by execute_backtest
+    trailing_stop_enabled_bt = False
+    trailing_stop_atr_multiplier_bt = 1.5
+
 
     def init(self):
         # Use self.sl_tp_mode_bt (or whatever name is chosen for the class attribute)
         print(f"DEBUG BacktestStrategyWrapper.init: Initializing for strategy ID {self.current_strategy_id}, SL/TP Mode: {getattr(self, 'sl_tp_mode_bt', 'N/A')}, Leverage: {self.leverage}")
+        print(f"DEBUG BacktestStrategyWrapper.init: Trailing Stop Enabled (BT): {getattr(self, 'trailing_stop_enabled_bt', 'N/A')}, Trailing ATR Multi (BT): {getattr(self, 'trailing_stop_atr_multiplier_bt', 'N/A')}")
         # --- Jules's Logging ---
         print(f"[BT Strategy LOG for {self.data.symbol if hasattr(self.data, 'symbol') else 'N/A'}] init() called.")
         print(f"[BT Strategy LOG for {self.data.symbol if hasattr(self.data, 'symbol') else 'N/A'}] Data received by strategy: self.data.df shape: {self.data.df.shape}")
@@ -667,6 +672,53 @@ class BacktestStrategyWrapper(Strategy):
         price = float(self.data.Close[-1]) 
         trade_symbol = self.data.symbol if hasattr(self.data, 'symbol') else 'N/A'
         log_prefix_bt_next = f"[BT Strategy LOG {trade_symbol} - Bar {len(self.data.Close)-1} - Price {price:.4f}]" # Adjusted precision
+        
+        # --- ATR-Scaled Trailing Stop Logic for Backtesting ---
+        if self.position and getattr(self, 'trailing_stop_enabled_bt', False):
+            # Determine which ATR series to use based on current strategy
+            # This assumes each strategy that might use ATR trailing stop has 'self.atr' or 'self.atr_sX'
+            atr_to_use_for_trailing = None
+            if self.current_strategy_id == 0 and hasattr(self, 'atr') and self.atr is not None and len(self.atr) > 0: atr_to_use_for_trailing = self.atr[-1]
+            elif self.current_strategy_id == 1 and hasattr(self, 'atr') and self.atr is not None and len(self.atr) > 0: atr_to_use_for_trailing = self.atr[-1]
+            elif self.current_strategy_id == 5 and hasattr(self, 'atr') and self.atr is not None and len(self.atr) > 0: atr_to_use_for_trailing = self.atr[-1]
+            elif self.current_strategy_id == 7 and hasattr(self, 'atr_s7') and self.atr_s7 is not None and len(self.atr_s7) > 0: atr_to_use_for_trailing = self.atr_s7[-1]
+            # Add other strategies here if they have their own ATR indicators (e.g., self.atr_s6 for S6 if it were to use this)
+            # Fallback to a generic self.atr if specific strategy ATR isn't found but trailing is on.
+            elif hasattr(self, 'atr') and self.atr is not None and len(self.atr) > 0: 
+                atr_to_use_for_trailing = self.atr[-1]
+                print(f"{log_prefix_bt_next} TRAIL_SL_BT: Strategy {self.current_strategy_id} - using generic self.atr for trailing.")
+            
+            if atr_to_use_for_trailing is not None and not pd.isna(atr_to_use_for_trailing) and atr_to_use_for_trailing > 0:
+                current_trade = self.trades[-1] # Get the current active trade
+                current_sl = current_trade.sl 
+                
+                new_trailing_sl = None
+                atr_offset = atr_to_use_for_trailing * getattr(self, 'trailing_stop_atr_multiplier_bt', 1.5)
+
+                if self.position.is_long:
+                    potential_new_sl = price - atr_offset
+                    if current_sl is None or potential_new_sl > current_sl:
+                        new_trailing_sl = round(potential_new_sl, self.PRICE_PRECISION_BT)
+                elif self.position.is_short:
+                    potential_new_sl = price + atr_offset
+                    if current_sl is None or potential_new_sl < current_sl:
+                         new_trailing_sl = round(potential_new_sl, self.PRICE_PRECISION_BT)
+                
+                if new_trailing_sl is not None:
+                    # Validate new_trailing_sl: For long, must be < price. For short, must be > price.
+                    is_valid_new_sl = False
+                    if self.position.is_long and new_trailing_sl < price:
+                        is_valid_new_sl = True
+                    elif self.position.is_short and new_trailing_sl > price:
+                        is_valid_new_sl = True
+                    
+                    if is_valid_new_sl:
+                        print(f"{log_prefix_bt_next} TRAIL_SL_BT: Modifying SL for {trade_symbol}. Old SL: {current_sl}, New SL: {new_trailing_sl}, Price: {price}, ATR used: {atr_to_use_for_trailing:.4f}")
+                        current_trade.sl = new_trailing_sl
+            elif atr_to_use_for_trailing is None:
+                 print(f"{log_prefix_bt_next} TRAIL_SL_BT: ATR not available for strategy {self.current_strategy_id}. Cannot trail SL.")
+            elif pd.isna(atr_to_use_for_trailing) or atr_to_use_for_trailing <= 0:
+                 print(f"{log_prefix_bt_next} TRAIL_SL_BT: Invalid ATR value ({atr_to_use_for_trailing}) for {trade_symbol}. Cannot trail SL.")
         
         # --- SL/TP Price Calculation Block (Common for all strategies) ---
         sl_final_price = None # This seems unused, SL/TP are calculated per trade direction later
@@ -1388,15 +1440,17 @@ def execute_backtest(strategy_id_for_backtest, symbol, timeframe, interval_days,
                      sl_tp_mode, sl_pnl_amount_val, tp_pnl_amount_val, # PnL and Mode based
                      starting_capital, # New parameter for starting capital
                      leverage_bt, # New parameter for leverage
-                     account_risk_percent_bt # New parameter for account risk %
+                     account_risk_percent_bt, # New parameter for account risk %
+                     ts_enabled_bt_param, ts_atr_multiplier_bt_param # Trailing Stop parameters for backtest
                      ):
-    print(f"Executing backtest for Strategy ID {strategy_id_for_backtest} on {symbol} ({timeframe}, {interval_days} days), Start Capital: ${starting_capital:.2f}, Leverage: {leverage_bt}x, Account Risk: {account_risk_percent_bt*100:.2f}%, Mode: {sl_tp_mode}") # Added account_risk_percent_bt
+    print(f"Executing backtest for Strategy ID {strategy_id_for_backtest} on {symbol} ({timeframe}, {interval_days} days), Start Capital: ${starting_capital:.2f}, Leverage: {leverage_bt}x, Account Risk: {account_risk_percent_bt*100:.2f}%, Mode: {sl_tp_mode}")
     if sl_tp_mode == "Percentage":
         print(f"  TP %: {ui_tp_percentage*100:.2f}%, SL %: {ui_sl_percentage*100:.2f}%")
     elif sl_tp_mode == "Fixed PnL":
         print(f"  SL PnL: ${sl_pnl_amount_val:.2f}, TP PnL: ${tp_pnl_amount_val:.2f}")
     elif sl_tp_mode == "ATR/Dynamic":
         print(f"  Using ATR/Dynamic SL/TP defined in strategy.")
+    print(f"  Trailing Stop Enabled (BT): {ts_enabled_bt_param}, Trailing ATR Multiplier (BT): {ts_atr_multiplier_bt_param}")
 
 
     kl_df, klines_error_msg = klines_extended(symbol, timeframe, interval_days)
@@ -1449,6 +1503,12 @@ def execute_backtest(strategy_id_for_backtest, symbol, timeframe, interval_days,
     # Set leverage for the strategy wrapper instance (though it's mainly for logging within the wrapper)
     BacktestStrategyWrapper.leverage = leverage_bt
     BacktestStrategyWrapper.account_risk_percent_bt = account_risk_percent_bt # Set account risk
+    
+    # Set Trailing Stop parameters for BacktestStrategyWrapper
+    BacktestStrategyWrapper.trailing_stop_enabled_bt = ts_enabled_bt_param
+    BacktestStrategyWrapper.trailing_stop_atr_multiplier_bt = ts_atr_multiplier_bt_param
+    print(f"DEBUG execute_backtest: Set BacktestStrategyWrapper.trailing_stop_enabled_bt to: {ts_enabled_bt_param}")
+    print(f"DEBUG execute_backtest: Set BacktestStrategyWrapper.trailing_stop_atr_multiplier_bt to: {ts_atr_multiplier_bt_param}")
 
     # Calculate margin for backtesting.py: margin = 1 / leverage
     # Ensure leverage_bt >= 1. If leverage_bt is 0 or less, or less than 1, default to 1 (no leverage, margin=1).
@@ -1551,6 +1611,10 @@ sl_pnl_amount_var = None
 tp_pnl_amount_var = None
 sl_tp_mode_var = None
 
+# Tkinter Vars for Trailing Stop
+trailing_stop_enabled_var = None
+trailing_stop_atr_multiplier_var = None
+
 leverage_var = None
 qty_concurrent_positions_var = None
 local_high_low_lookback_var = None
@@ -1587,6 +1651,9 @@ backtest_tp_pnl_amount_var = None
 backtest_sl_tp_mode_var = None
 backtest_starting_capital_var = None # New var for starting capital
 backtest_account_risk_var = None # New var for account risk %
+# Backtesting UI Variables for Trailing Stop
+backtest_trailing_stop_enabled_var = None
+backtest_trailing_stop_atr_multiplier_var = None
 
 
 # --- Backtesting UI Command and Threading Logic ---
@@ -1594,7 +1661,9 @@ def run_backtest_command():
     global backtest_symbol_var, backtest_timeframe_var, backtest_interval_var
     global backtest_tp_var, backtest_sl_var, backtest_selected_strategy_var
     # Add new global vars for backtesting PnL and Mode
-    global backtest_sl_pnl_amount_var, backtest_tp_pnl_amount_var, backtest_sl_tp_mode_var, backtest_starting_capital_var, backtest_leverage_var, backtest_account_risk_var # Added backtest_account_risk_var
+    global backtest_sl_pnl_amount_var, backtest_tp_pnl_amount_var, backtest_sl_tp_mode_var, backtest_starting_capital_var, backtest_leverage_var, backtest_account_risk_var
+    # Add global vars for backtesting Trailing Stop
+    global backtest_trailing_stop_enabled_var, backtest_trailing_stop_atr_multiplier_var
     global backtest_results_text_widget, STRATEGIES, root, status_var, backtest_run_button
 
     if backtest_run_button:
@@ -1620,6 +1689,11 @@ def run_backtest_command():
         leverage_str = backtest_leverage_var.get().strip() # Get leverage string
         account_risk_str = backtest_account_risk_var.get().strip() # Get account risk string
         
+        # Get Trailing Stop parameters for backtesting
+        ts_enabled_bt = backtest_trailing_stop_enabled_var.get()
+        ts_atr_multiplier_str_bt = backtest_trailing_stop_atr_multiplier_var.get().strip()
+        ts_atr_multiplier_bt = 1.5 # Default
+
         # Get SL/TP mode for backtesting
         current_backtest_sl_tp_mode = backtest_sl_tp_mode_var.get()
 
@@ -1680,6 +1754,23 @@ def run_backtest_command():
             messagebox.showerror("Input Error", "Invalid number format for Account Risk %.")
             if backtest_run_button: backtest_run_button.config(state=tk.NORMAL)
             return
+
+        # Validate Trailing Stop ATR Multiplier if enabled for backtesting
+        if ts_enabled_bt:
+            if not ts_atr_multiplier_str_bt:
+                messagebox.showerror("Input Error", "Trailing Stop ATR Multiplier is required when Trailing Stop is enabled for backtest.")
+                if backtest_run_button: backtest_run_button.config(state=tk.NORMAL)
+                return
+            try:
+                ts_atr_multiplier_bt = float(ts_atr_multiplier_str_bt)
+                if ts_atr_multiplier_bt <= 0:
+                    messagebox.showerror("Input Error", "Trailing Stop ATR Multiplier must be positive for backtest.")
+                    if backtest_run_button: backtest_run_button.config(state=tk.NORMAL)
+                    return
+            except ValueError:
+                messagebox.showerror("Input Error", "Invalid number format for Trailing Stop ATR Multiplier for backtest.")
+                if backtest_run_button: backtest_run_button.config(state=tk.NORMAL)
+                return
 
         if current_backtest_sl_tp_mode == "Percentage":
             tp_str = backtest_tp_var.get().strip() # TP %
@@ -1772,7 +1863,8 @@ def run_backtest_command():
                                   args=(symbols_list, strategy_id_for_backtest, timeframe, interval_days, 
                                         tp_percentage, sl_percentage,
                                         current_backtest_sl_tp_mode, sl_pnl, tp_pnl,
-                                        starting_capital, leverage_val, account_risk_val), # Added account_risk_val
+                                        starting_capital, leverage_val, account_risk_val,
+                                        ts_enabled_bt, ts_atr_multiplier_bt), # Added Trailing Stop params for BT
                                   daemon=True)
         thread.start()
 
@@ -1792,7 +1884,8 @@ def run_backtest_command():
 def perform_backtest_for_multiple_symbols(symbols_list, strategy_id, timeframe, interval_days,
                                           tp_percentage_val, sl_percentage_val,
                                           passed_sl_tp_mode, sl_pnl_val, tp_pnl_val,
-                                          starting_capital_val, leverage_val, account_risk_percentage_val): # Added account_risk_percentage_val
+                                          starting_capital_val, leverage_val, account_risk_percentage_val,
+                                          ts_enabled_bt_val, ts_atr_multiplier_bt_val): # Added Trailing Stop params
     global backtest_results_text_widget, root, status_var, backtest_run_button
     all_symbols_completed = True
 
@@ -1825,7 +1918,8 @@ def perform_backtest_for_multiple_symbols(symbols_list, strategy_id, timeframe, 
             strategy_id, symbol_item, timeframe, interval_days,
             tp_percentage_val, sl_percentage_val,
             passed_sl_tp_mode, sl_pnl_val, tp_pnl_val,
-            starting_capital_val, leverage_val, account_risk_percentage_val # Added account_risk_percentage_val
+            starting_capital_val, leverage_val, account_risk_percentage_val,
+            ts_enabled_bt_val, ts_atr_multiplier_bt_val # Pass Trailing Stop params
         )
 
         # Update UI with results for this specific symbol
@@ -1992,6 +2086,9 @@ strategy1_active_trade_info_default = {'symbol': None, 'entry_time': None, 'entr
 strategy3_active_trade_info_default = {'symbol': None, 'entry_time': None, 'entry_price': None, 'side': None, 'initial_atr_for_profit_target': None, 'vwap_trail_active': False}
 strategy4_active_trade_info_default = {'symbol': None, 'entry_time': None, 'entry_price': None, 'side': None, 'divergence_price_point': None}
 
+# Global dictionary to store details of active positions including SL/TP order IDs and prices
+g_active_positions_details = {}
+
 # pending_signals = {} # To store {'symbol': {'timestamp': pd.Timestamp, 'side': 'up'/'down', 'last_signal_eval_true': True/False, 'initial_conditions_met_count': 0, 'last_check_time': pd.Timestamp}}
 
 # g_conditional_pending_signals stores signals that have met partial conditions
@@ -2021,6 +2118,10 @@ LOCAL_HIGH_LOW_LOOKBACK_PERIOD = 20 # New global for breakout logic
 SL_TP_MODE = "ATR/Dynamic" # Default SL/TP mode
 SL_PNL_AMOUNT = 10.0       # Default SL PnL amount in $
 TP_PNL_AMOUNT = 20.0       # Default TP PnL amount in $
+
+# Global variables for Trailing Stop
+TRAILING_STOP_ENABLED = False
+TRAILING_STOP_ATR_MULTIPLIER = 1.5
 
 
 # --- GUI Helper Function ---
@@ -2772,8 +2873,9 @@ def scalping_strategy_signal(symbol):
                     dynamic_sl_tp_result = calculate_dynamic_sl_tp(
                         symbol=symbol,
                         entry_price=entry_price,
-                        side=return_data['signal'] 
-                        # atr_multiplier and rr will use defaults in calculate_dynamic_sl_tp
+                        side=return_data['signal'],
+                        atr_multiplier=1.0 # Use 1.0x ATR for initial SL
+                        # rr will use default from calculate_dynamic_sl_tp
                     )
 
                     if dynamic_sl_tp_result['error']:
@@ -2922,7 +3024,7 @@ def strategy_ema_supertrend(symbol):
                 entry_price = current_price
                 # S1 has RR defined in its BacktestStrategyWrapper, but not directly in its signal function.
                 # It uses default RR from calculate_dynamic_sl_tp. ATR multiplier is also default.
-                dynamic_sl_tp_result = calculate_dynamic_sl_tp(symbol, entry_price, final_signal_str)
+                dynamic_sl_tp_result = calculate_dynamic_sl_tp(symbol, entry_price, final_signal_str, atr_multiplier=1.0) # Use 1.0x ATR
 
                 if dynamic_sl_tp_result['error']:
                     error_msg = f"S1 ATR SL/TP Error ({symbol}, {final_signal_str}): {dynamic_sl_tp_result['error']}"
@@ -3076,7 +3178,7 @@ def strategy_bollinger_band_mean_reversion(symbol):
                 entry_price = current_price
                 # S2 specifics for calculate_dynamic_sl_tp (if any, like RR or ATR Multiplier)
                 # Using defaults from calculate_dynamic_sl_tp for now.
-                dynamic_sl_tp_result = calculate_dynamic_sl_tp(symbol, entry_price, final_signal_str)
+                dynamic_sl_tp_result = calculate_dynamic_sl_tp(symbol, entry_price, final_signal_str, atr_multiplier=1.0) # Use 1.0x ATR
 
                 if dynamic_sl_tp_result['error']:
                     error_msg = f"S2 ATR SL/TP Error ({symbol}, {final_signal_str}): {dynamic_sl_tp_result['error']}"
@@ -3264,7 +3366,7 @@ def strategy_vwap_breakout_momentum(symbol):
                 entry_price = current_price
                 # S3 specifics for calculate_dynamic_sl_tp (if any)
                 # Using defaults from calculate_dynamic_sl_tp for now.
-                dynamic_sl_tp_result = calculate_dynamic_sl_tp(symbol, entry_price, final_signal_str)
+                dynamic_sl_tp_result = calculate_dynamic_sl_tp(symbol, entry_price, final_signal_str, atr_multiplier=1.0) # Use 1.0x ATR
 
                 if dynamic_sl_tp_result['error']:
                     error_msg = f"S3 ATR SL/TP Error ({symbol}, {final_signal_str}): {dynamic_sl_tp_result['error']}"
@@ -3484,7 +3586,7 @@ def strategy_macd_divergence_pivot(symbol):
                 entry_price = current_price
                 # S4 specifics for calculate_dynamic_sl_tp (if any)
                 # Using defaults from calculate_dynamic_sl_tp for now.
-                dynamic_sl_tp_result = calculate_dynamic_sl_tp(symbol, entry_price, final_signal)
+                dynamic_sl_tp_result = calculate_dynamic_sl_tp(symbol, entry_price, final_signal, atr_multiplier=1.0) # Use 1.0x ATR
                 
                 if dynamic_sl_tp_result['error']:
                     error_msg = f"S4 ATR SL/TP Error ({symbol}, {final_signal}): {dynamic_sl_tp_result['error']}"
@@ -3659,7 +3761,7 @@ def strategy_rsi_enhanced(symbol):
                 entry_price = current_price
                 # S5 specifics for calculate_dynamic_sl_tp (if any)
                 # Using defaults from calculate_dynamic_sl_tp for now.
-                dynamic_sl_tp_result = calculate_dynamic_sl_tp(symbol, entry_price, base_return['signal'])
+                dynamic_sl_tp_result = calculate_dynamic_sl_tp(symbol, entry_price, base_return['signal'], atr_multiplier=1.0) # Use 1.0x ATR
 
                 if dynamic_sl_tp_result['error']:
                     error_msg = f"S5 ATR SL/TP Error ({symbol}, {base_return['signal']}): {dynamic_sl_tp_result['error']}"
@@ -4232,7 +4334,23 @@ def open_order(symbol, side, strategy_sl=None, strategy_tp=None, strategy_accoun
             print(f"{err_msg_prefix}: INSUFFICIENT BALANCE (Code -2010). Check available margin/funds. Binance msg: {error.error_message}")
         else:
             print(f"{err_msg_prefix}: Code {error.error_code} - {error.error_message if error.error_message else error}")
-    except Exception as e: print(f"Order Unexpected Err ({symbol}, {side}): {e}")
+        return None # Return None on ClientError
+    except Exception as e:
+        print(f"Order Unexpected Err ({symbol}, {side}): {e}")
+        return None # Return None on other exceptions
+    
+    # If all orders are successful, return their details
+    order_details = {
+        'entry_order_id': resp1.get('orderId') if resp1 else None,
+        'sl_order_id': resp2.get('orderId') if resp2 else None,
+        'tp_order_id': resp3.get('orderId') if resp3 else None,
+        'sl_price': sl_actual,
+        'tp_price': tp_actual,
+        'entry_price': price, # The price at which the LIMIT order was placed
+        'qty': calculated_qty_asset,
+        'side': side # 'buy' or 'sell'
+    }
+    return order_details
 
 def get_active_positions_data(): # Renamed from get_pos for clarity
     global client, status_var, root
@@ -4808,12 +4926,46 @@ def run_bot_logic():
                         try: entry_price_for_tracking = float(client.ticker_price(symbol)['price'])
                         except Exception as e_track_price: print(f"Error fetching entry price for tracking {symbol}: {e_track_price}")
 
-                        open_order(symbol, side, strategy_sl=sl_to_use, strategy_tp=tp_to_use, strategy_account_risk_percent=risk_percent)
+                        order_outcome = open_order(symbol, side, strategy_sl=sl_to_use, strategy_tp=tp_to_use, strategy_account_risk_percent=risk_percent)
                         
+                        if order_outcome:
+                            g_active_positions_details[symbol] = {
+                                'sl_order_id': order_outcome.get('sl_order_id'),
+                                'sl_price': order_outcome.get('sl_price'),
+                                'tp_order_id': order_outcome.get('tp_order_id'),
+                                'tp_price': order_outcome.get('tp_price'),
+                                'entry_price': order_outcome.get('entry_price'),
+                                'qty': order_outcome.get('qty'),
+                                'side': order_outcome.get('side'), # 'buy' or 'sell'
+                                'entry_order_id': order_outcome.get('entry_order_id'),
+                                'strategy_id': strategy_id # Store which strategy opened it
+                            }
+                            print(f"DEBUG: Stored in g_active_positions_details for {symbol}: {g_active_positions_details[symbol]}")
+
                         trade_entry_ts = pd.Timestamp.now(tz='UTC')
-                        if strategy_id == 1: strategy1_active_trade_info.update({'symbol': symbol, 'entry_time': trade_entry_ts, 'entry_price': entry_price_for_tracking, 'side': side})
-                        elif strategy_id == 2: strategy2_active_trades.append({'symbol': symbol, 'entry_time': trade_entry_ts, 'entry_price': entry_price_for_tracking, 'side': side})
-                        elif strategy_id == 3: strategy3_active_trade_info.update({'symbol': symbol, 'entry_time': trade_entry_ts, 'entry_price': entry_price_for_tracking, 'side': side, 'initial_atr_for_profit_target': current_strategy_output.get('last_atr'), 'vwap_trail_active': False })
+                        # Update strategy-specific trackers (ensure they also store SL/TP order IDs if needed by their specific logic)
+                        if strategy_id == 1:
+                            strategy1_active_trade_info.update({
+                                'symbol': symbol, 'entry_time': trade_entry_ts, 'entry_price': entry_price_for_tracking, 'side': side,
+                                'sl_order_id': order_outcome.get('sl_order_id') if order_outcome else None, # Populate from open_order
+                                'tp_order_id': order_outcome.get('tp_order_id') if order_outcome else None  # Populate from open_order
+                            })
+                        elif strategy_id == 2:
+                             # For S2, each item in strategy2_active_trades needs to be a dict with these keys
+                            new_trade_s2 = {'symbol': symbol, 'entry_time': trade_entry_ts, 'entry_price': entry_price_for_tracking, 'side': side}
+                            if order_outcome:
+                                new_trade_s2['sl_order_id'] = order_outcome.get('sl_order_id')
+                                new_trade_s2['tp_order_id'] = order_outcome.get('tp_order_id')
+                                new_trade_s2['sl_price'] = order_outcome.get('sl_price')
+                                new_trade_s2['tp_price'] = order_outcome.get('tp_price')
+                            strategy2_active_trades.append(new_trade_s2)
+                        elif strategy_id == 3:
+                            strategy3_active_trade_info.update({
+                                'symbol': symbol, 'entry_time': trade_entry_ts, 'entry_price': entry_price_for_tracking, 'side': side,
+                                'initial_atr_for_profit_target': current_strategy_output.get('last_atr'), 'vwap_trail_active': False,
+                                'sl_order_id': order_outcome.get('sl_order_id') if order_outcome else None,
+                                'tp_order_id': order_outcome.get('tp_order_id') if order_outcome else None
+                            })
                         
                         if key in g_conditional_pending_signals: del g_conditional_pending_signals[key]
                         sleep(1)
@@ -4913,9 +5065,103 @@ def run_bot_logic():
             open_position_symbols = [p['symbol'] for p in active_positions_data] if active_positions_data else []
             # active_open_orders_data is now available if needed for further logic here
 
+            # --- ATR-Scaled Trailing Stop Logic ---
+            if TRAILING_STOP_ENABLED and g_active_positions_details:
+                _activity_set("Applying Trailing Stop Logic...")
+                print(f"DEBUG TRAIL_SL: Trailing Stop Enabled. Active positions: {list(g_active_positions_details.keys())}")
+                for symbol_to_trail, pos_details in list(g_active_positions_details.items()):
+                    if not bot_running: break
+                    print(f"DEBUG TRAIL_SL: Checking {symbol_to_trail} for trailing SL. Details: {pos_details}")
+
+                    current_sl_price = pos_details.get('sl_price')
+                    sl_order_id_to_cancel = pos_details.get('sl_order_id')
+                    position_side = pos_details.get('side') # 'buy' or 'sell'
+                    position_qty = pos_details.get('qty')
+
+                    if not all([current_sl_price, sl_order_id_to_cancel, position_side, position_qty]):
+                        print(f"WARNING TRAIL_SL: Insufficient details for {symbol_to_trail} to trail SL. Skipping. Details: {pos_details}")
+                        continue
+
+                    kl_trail_df = klines(symbol_to_trail) # Fetches 5m klines
+                    if kl_trail_df is None or len(kl_trail_df) < 20: # Need enough for ATR
+                        print(f"WARNING TRAIL_SL: Insufficient kline data for {symbol_to_trail} for ATR calculation. Skipping trail.")
+                        continue
+                    
+                    try:
+                        atr_trail = ta.volatility.AverageTrueRange(high=kl_trail_df['High'], low=kl_trail_df['Low'], close=kl_trail_df['Close'], window=14).average_true_range()
+                        if atr_trail is None or atr_trail.empty or pd.isna(atr_trail.iloc[-1]):
+                            print(f"WARNING TRAIL_SL: ATR calculation failed or NaN for {symbol_to_trail}. Skipping trail.")
+                            continue
+                        current_atr_for_trail = atr_trail.iloc[-1]
+                        latest_close_price = kl_trail_df['Close'].iloc[-1]
+                        price_precision_trail = get_price_precision(symbol_to_trail)
+
+                        new_potential_sl = None
+                        if position_side == 'buy': # Long position
+                            new_potential_sl = latest_close_price - (current_atr_for_trail * TRAILING_STOP_ATR_MULTIPLIER)
+                            new_potential_sl = round(new_potential_sl, price_precision_trail)
+                            # Ensure new SL is higher (better) than current SL and below current price
+                            if new_potential_sl > current_sl_price and new_potential_sl < latest_close_price:
+                                print(f"INFO TRAIL_SL ({symbol_to_trail} LONG): New SL {new_potential_sl} > Old SL {current_sl_price}. Modifying.")
+                            else:
+                                new_potential_sl = None # Condition not met
+                        elif position_side == 'sell': # Short position
+                            new_potential_sl = latest_close_price + (current_atr_for_trail * TRAILING_STOP_ATR_MULTIPLIER)
+                            new_potential_sl = round(new_potential_sl, price_precision_trail)
+                            # Ensure new SL is lower (better) than current SL and above current price
+                            if new_potential_sl < current_sl_price and new_potential_sl > latest_close_price:
+                                print(f"INFO TRAIL_SL ({symbol_to_trail} SHORT): New SL {new_potential_sl} < Old SL {current_sl_price}. Modifying.")
+                            else:
+                                new_potential_sl = None # Condition not met
+                        
+                        if new_potential_sl is not None:
+                            try:
+                                print(f"Attempting to cancel old SL Order ID {sl_order_id_to_cancel} for {symbol_to_trail}")
+                                client.cancel_order(symbol=symbol_to_trail, orderId=sl_order_id_to_cancel)
+                                print(f"Old SL Order ID {sl_order_id_to_cancel} for {symbol_to_trail} cancelled.")
+                                
+                                # Determine order side for new SL: if long pos, SL is SELL; if short pos, SL is BUY
+                                new_sl_order_side = 'SELL' if position_side == 'buy' else 'BUY'
+                                
+                                print(f"Attempting to place new SL order for {symbol_to_trail}: Side={new_sl_order_side}, Qty={position_qty}, StopPrice={new_potential_sl}")
+                                new_sl_order_resp = client.new_order(
+                                    symbol=symbol_to_trail,
+                                    side=new_sl_order_side,
+                                    type='STOP_MARKET',
+                                    quantity=abs(float(position_qty)), # Ensure qty is positive
+                                    timeInForce='GTC',
+                                    stopPrice=new_potential_sl,
+                                    reduceOnly=True # SL orders should always be reduceOnly
+                                )
+                                print(f"New SL order placed for {symbol_to_trail}: {new_sl_order_resp}")
+                                
+                                # Update g_active_positions_details with new SL info
+                                pos_details['sl_order_id'] = new_sl_order_resp.get('orderId')
+                                pos_details['sl_price'] = new_potential_sl
+                                print(f"DEBUG TRAIL_SL: Updated g_active_positions_details for {symbol_to_trail} with new SL: {pos_details}")
+
+                            except ClientError as ce:
+                                print(f"ERROR TRAIL_SL: ClientError modifying SL for {symbol_to_trail}: {ce}")
+                                # Potentially revert pos_details or handle the fact that SL might be in an inconsistent state
+                            except Exception as e_sl_mod:
+                                print(f"ERROR TRAIL_SL: Exception modifying SL for {symbol_to_trail}: {e_sl_mod}")
+                        else:
+                            print(f"DEBUG TRAIL_SL: No profitable SL adjustment for {symbol_to_trail} at this time.")
+
+                    except Exception as e_trail_inner:
+                        print(f"ERROR TRAIL_SL: Inner exception processing {symbol_to_trail}: {e_trail_inner}")
+                    sleep(0.2) # Small delay between processing each symbol's trailing stop
+
             # --- Position Closure Detection and Resetting Strategy Trackers ---
+            # Consolidate g_active_positions_details cleanup here
+            closed_symbols_this_cycle = set(g_active_positions_details.keys()) - set(open_position_symbols)
+            for closed_sym in closed_symbols_this_cycle:
+                print(f"DEBUG: Position for {closed_sym} detected as closed. Removing from g_active_positions_details.")
+                if closed_sym in g_active_positions_details:
+                    del g_active_positions_details[closed_sym]
+            
             s1_sym = strategy1_active_trade_info['symbol']
-            if s1_sym and s1_sym not in open_position_symbols:
+            if s1_sym and s1_sym not in open_position_symbols: # Also implies s1_sym in closed_symbols_this_cycle
                 print(f"Strategy 1: Detected closure of trade on {s1_sym}.")
                 strategy1_last_trade_was_loss = True 
                 strategy1_cooldown_active = True
@@ -4925,19 +5171,19 @@ def run_bot_logic():
             current_s2_trades = list(strategy2_active_trades) # Iterate over a copy
             for trade_info in current_s2_trades:
                 s2_sym = trade_info['symbol']
-                if s2_sym not in open_position_symbols:
+                if s2_sym not in open_position_symbols: # Also implies s2_sym in closed_symbols_this_cycle
                     print(f"Strategy 2: Detected closure of trade on {s2_sym}.")
                     strategy2_active_trades.remove(trade_info) # remove from original list
                     _activity_set(f"S2: {s2_sym} closed. Available S2 slots: {2-len(strategy2_active_trades)}.")
             
             s3_sym = strategy3_active_trade_info['symbol']
-            if s3_sym and s3_sym not in open_position_symbols:
+            if s3_sym and s3_sym not in open_position_symbols: # Also implies s3_sym in closed_symbols_this_cycle
                 print(f"Strategy 3: Detected closure of trade on {s3_sym}.")
                 strategy3_active_trade_info = strategy3_active_trade_info_default.copy()
                 _activity_set(f"S3: {s3_sym} closed.")
 
             s4_sym = strategy4_active_trade_info['symbol']
-            if s4_sym and s4_sym not in open_position_symbols:
+            if s4_sym and s4_sym not in open_position_symbols: # Also implies s4_sym in closed_symbols_this_cycle
                 print(f"Strategy 4: Detected closure of trade on {s4_sym}.")
                 strategy4_active_trade_info = strategy4_active_trade_info_default.copy()
                 _activity_set(f"S4: {s4_sym} closed.")
@@ -5146,10 +5392,25 @@ def run_bot_logic():
                             _status_set(f"S5: Ordering {sym_to_check} ({current_signal_s5.upper()})...")
                             set_mode(sym_to_check, margin_type_setting); sleep(0.1) # Use margin_type_setting
                             set_leverage(sym_to_check, leverage); sleep(0.1)
-                            open_order(sym_to_check, current_signal_s5, 
+                            order_outcome_s5 = open_order(sym_to_check, current_signal_s5, 
                                        strategy_sl=signal_data_s5.get('sl_price'), 
                                        strategy_tp=signal_data_s5.get('tp_price'), 
                                        strategy_account_risk_percent=signal_data_s5.get('account_risk_percent'))
+                            
+                            if order_outcome_s5:
+                                g_active_positions_details[sym_to_check] = {
+                                    'sl_order_id': order_outcome_s5.get('sl_order_id'),
+                                    'sl_price': order_outcome_s5.get('sl_price'),
+                                    'tp_order_id': order_outcome_s5.get('tp_order_id'),
+                                    'tp_price': order_outcome_s5.get('tp_price'),
+                                    'entry_price': order_outcome_s5.get('entry_price'),
+                                    'qty': order_outcome_s5.get('qty'),
+                                    'side': order_outcome_s5.get('side'),
+                                    'entry_order_id': order_outcome_s5.get('entry_order_id'),
+                                    'strategy_id': 5 # Strategy ID for S5
+                                }
+                                print(f"DEBUG: Stored in g_active_positions_details for S5 {sym_to_check}: {g_active_positions_details[sym_to_check]}")
+
                             _activity_set(f"S5: Trade initiated for {sym_to_check}.")
                             # S5 might allow multiple trades across symbols, so no 'break' here unless a specific S5 trade management global var is checked.
                             # If S5 was meant to be one-trade-at-a-time like S1/S3/S4, a global tracker for S5's active trade would be needed.
@@ -5179,11 +5440,25 @@ def run_bot_logic():
                             set_leverage(sym_to_check, leverage); sleep(0.1)
                             
                             # Pass SL, TP, and risk from strategy directly
-                            open_order(sym_to_check, current_signal_s6, 
+                            order_outcome_s6 = open_order(sym_to_check, current_signal_s6, 
                                        strategy_sl=signal_data_s6.get('sl_price'), 
                                        strategy_tp=signal_data_s6.get('tp_price'), 
                                        strategy_account_risk_percent=signal_data_s6.get('account_risk_percent'))
                             
+                            if order_outcome_s6:
+                                g_active_positions_details[sym_to_check] = {
+                                    'sl_order_id': order_outcome_s6.get('sl_order_id'),
+                                    'sl_price': order_outcome_s6.get('sl_price'),
+                                    'tp_order_id': order_outcome_s6.get('tp_order_id'),
+                                    'tp_price': order_outcome_s6.get('tp_price'),
+                                    'entry_price': order_outcome_s6.get('entry_price'),
+                                    'qty': order_outcome_s6.get('qty'),
+                                    'side': order_outcome_s6.get('side'),
+                                    'entry_order_id': order_outcome_s6.get('entry_order_id'),
+                                    'strategy_id': 6 # Strategy ID for S6
+                                }
+                                print(f"DEBUG: Stored in g_active_positions_details for S6 {sym_to_check}: {g_active_positions_details[sym_to_check]}")
+                                
                             _activity_set(f"S6: Trade initiated for {sym_to_check}.")
                             # S6 might also allow multiple trades across symbols unless a specific tracker is added.
                             sleep(1) 
@@ -5215,11 +5490,25 @@ def run_bot_logic():
                             set_mode(sym_to_check, margin_type_setting); sleep(0.1)
                             set_leverage(sym_to_check, leverage); sleep(0.1)
                             
-                            open_order(sym_to_check, current_signal_s7, 
+                            order_outcome_s7 = open_order(sym_to_check, current_signal_s7, 
                                        strategy_sl=signal_data_s7.get('sl_price'), 
                                        strategy_tp=signal_data_s7.get('tp_price'), 
                                        strategy_account_risk_percent=signal_data_s7.get('account_risk_percent'))
                             
+                            if order_outcome_s7:
+                                g_active_positions_details[sym_to_check] = {
+                                    'sl_order_id': order_outcome_s7.get('sl_order_id'),
+                                    'sl_price': order_outcome_s7.get('sl_price'),
+                                    'tp_order_id': order_outcome_s7.get('tp_order_id'),
+                                    'tp_price': order_outcome_s7.get('tp_price'),
+                                    'entry_price': order_outcome_s7.get('entry_price'),
+                                    'qty': order_outcome_s7.get('qty'),
+                                    'side': order_outcome_s7.get('side'),
+                                    'entry_order_id': order_outcome_s7.get('entry_order_id'),
+                                    'strategy_id': 7 # Strategy ID for S7
+                                }
+                                print(f"DEBUG: Stored in g_active_positions_details for S7 {sym_to_check}: {g_active_positions_details[sym_to_check]}")
+
                             _activity_set(f"S7: Trade initiated for {sym_to_check}.")
                             # S7, like S5 and S6, might allow multiple trades across symbols.
                             # No specific single-trade tracker for S7 implemented yet.
@@ -5271,19 +5560,39 @@ def run_bot_logic():
                                 print(f"S4: Critical error - no price available for {sym_to_check} to place order. Skipping.")
                                 continue
     
-                            open_order(sym_to_check, current_signal_s4, 
+                            order_outcome_s4 = open_order(sym_to_check, current_signal_s4, 
                                        strategy_sl=sl_price_s4, 
                                        strategy_tp=tp_price_s4, 
                                        strategy_account_risk_percent=strategy_risk_s4)
                             
-                            trade_entry_timestamp_s4 = pd.Timestamp.now(tz='UTC')
-                            strategy4_active_trade_info.update({
-                                'symbol': sym_to_check, 
-                                'entry_time': trade_entry_timestamp_s4, 
-                                'entry_price': entry_price_for_tracking_s4,
-                                'side': current_signal_s4, 
-                                'divergence_price_point': signal_data_s4.get('divergence_price_point')
-                            })
+                            if order_outcome_s4:
+                                g_active_positions_details[sym_to_check] = {
+                                    'sl_order_id': order_outcome_s4.get('sl_order_id'),
+                                    'sl_price': order_outcome_s4.get('sl_price'),
+                                    'tp_order_id': order_outcome_s4.get('tp_order_id'),
+                                    'tp_price': order_outcome_s4.get('tp_price'),
+                                    'entry_price': order_outcome_s4.get('entry_price'),
+                                    'qty': order_outcome_s4.get('qty'),
+                                    'side': order_outcome_s4.get('side'),
+                                    'entry_order_id': order_outcome_s4.get('entry_order_id'),
+                                    'strategy_id': 4 # Strategy ID for S4
+                                }
+                                print(f"DEBUG: Stored in g_active_positions_details for S4 {sym_to_check}: {g_active_positions_details[sym_to_check]}")
+                                
+                                # Also update strategy4_active_trade_info with SL/TP order IDs if needed by its specific logic
+                                strategy4_active_trade_info.update({
+                                    'symbol': sym_to_check, 
+                                    'entry_time': pd.Timestamp.now(tz='UTC'), 
+                                    'entry_price': entry_price_for_tracking_s4, # Use the fetched price
+                                    'side': current_signal_s4, 
+                                    'divergence_price_point': signal_data_s4.get('divergence_price_point'),
+                                    'sl_order_id': order_outcome_s4.get('sl_order_id'), # Store SL ID
+                                    'tp_order_id': order_outcome_s4.get('tp_order_id')  # Store TP ID
+                                })
+                            else: # open_order failed
+                                strategy4_active_trade_info = strategy4_active_trade_info_default.copy()
+
+
                             _activity_set(f"S4: Trade initiated for {sym_to_check}. Monitoring.")
                             sleep(3) 
                             break # Strategy 4 handles one trade at a time
@@ -5448,9 +5757,9 @@ def run_bot_logic():
 def apply_settings():
     global ACCOUNT_RISK_PERCENT, TP_PERCENT, SL_PERCENT, leverage, qty_concurrent_positions, LOCAL_HIGH_LOW_LOOKBACK_PERIOD, margin_type_setting, TARGET_SYMBOLS, ACTIVE_STRATEGY_ID
     # Add new globals for PnL SL/TP settings
-    global SL_TP_MODE, SL_PNL_AMOUNT, TP_PNL_AMOUNT 
+    global SL_TP_MODE, SL_PNL_AMOUNT, TP_PNL_AMOUNT, TRAILING_STOP_ENABLED, TRAILING_STOP_ATR_MULTIPLIER
     # And their corresponding tk StringVars
-    global sl_tp_mode_var, sl_pnl_amount_var, tp_pnl_amount_var
+    global sl_tp_mode_var, sl_pnl_amount_var, tp_pnl_amount_var, trailing_stop_enabled_var, trailing_stop_atr_multiplier_var
 
     try:
         # SL/TP Mode
@@ -5556,6 +5865,18 @@ def apply_settings():
              messagebox.showerror("Settings Error", "Invalid Margin Type selected.")
              return False
 
+        # Trailing Stop Settings
+        TRAILING_STOP_ENABLED = trailing_stop_enabled_var.get()
+        try:
+            ts_atr_multi = float(trailing_stop_atr_multiplier_var.get())
+            if ts_atr_multi <= 0:
+                messagebox.showerror("Settings Error", "Trailing Stop ATR Multiplier must be positive.")
+                return False
+            TRAILING_STOP_ATR_MULTIPLIER = ts_atr_multi
+        except ValueError:
+            messagebox.showerror("Settings Error", "Invalid number format for Trailing Stop ATR Multiplier.")
+            return False
+
         print(f"Applied settings: Strategy='{STRATEGIES[ACTIVE_STRATEGY_ID]}', Risk={ACCOUNT_RISK_PERCENT*100:.2f}%, SL/TP Mode='{SL_TP_MODE}'")
         if SL_TP_MODE == "Percentage":
             print(f"  SL={SL_PERCENT*100:.2f}%, TP={TP_PERCENT*100:.2f}%")
@@ -5563,6 +5884,7 @@ def apply_settings():
             print(f"  SL PnL=${SL_PNL_AMOUNT:.2f}, TP PnL=${TP_PNL_AMOUNT:.2f}")
         # ATR/Dynamic mode will use strategy's internal RR and ATR Multiplier, not printed here directly from these global settings
         print(f"  Lev={leverage}, MaxPos={qty_concurrent_positions}, Lookback={LOCAL_HIGH_LOW_LOOKBACK_PERIOD}, Margin={margin_type_setting}, Symbols={TARGET_SYMBOLS}")
+        print(f"  Trailing Stop Enabled: {TRAILING_STOP_ENABLED}, Trailing ATR Multiplier: {TRAILING_STOP_ATR_MULTIPLIER}")
         messagebox.showinfo("Settings", "Settings applied successfully!")
         return True
 
@@ -5710,6 +6032,10 @@ if __name__ == "__main__":
     overall_profit_loss_var = tk.StringVar(value="N/A")
     total_unrealized_pnl_var = tk.StringVar(value="N/A")
 
+    # Tkinter Vars for Trailing Stop (Live Trading) - Initialized here
+    trailing_stop_enabled_var = tk.BooleanVar(value=TRAILING_STOP_ENABLED)
+    trailing_stop_atr_multiplier_var = tk.StringVar(value=str(TRAILING_STOP_ATR_MULTIPLIER))
+
     # Backtesting StringVars
     backtest_symbol_var = tk.StringVar(value="XRPUSDT")
     backtest_timeframe_var = tk.StringVar(value="5m")
@@ -5724,6 +6050,10 @@ if __name__ == "__main__":
     backtest_starting_capital_var = tk.StringVar(value="10000") # Default starting capital
     backtest_leverage_var = tk.StringVar(value="1") # New StringVar for backtest leverage, default 1x
     backtest_account_risk_var = tk.StringVar(value="1.0") # Default 1.0% account risk
+    
+    # Initialize Backtesting Trailing Stop Vars
+    backtest_trailing_stop_enabled_var = tk.BooleanVar(value=False) # Default to False for backtesting
+    backtest_trailing_stop_atr_multiplier_var = tk.StringVar(value="1.5") # Default ATR multiplier for backtesting
 
     backtest_selected_strategy_var = tk.StringVar()
 
@@ -5805,13 +6135,22 @@ if __name__ == "__main__":
     target_symbols_entry = ttk.Entry(params_input_frame, textvariable=target_symbols_var, width=40) 
     target_symbols_entry.grid(row=5, column=1, columnspan=3, padx=2, pady=2, sticky='we')
 
+    # Row 6: Trailing Stop Configuration
+    trailing_stop_enabled_checkbox = ttk.Checkbutton(params_input_frame, text="Enable Trailing Stop", variable=trailing_stop_enabled_var)
+    trailing_stop_enabled_checkbox.grid(row=6, column=0, padx=2, pady=2, sticky='w')
+
+    ttk.Label(params_input_frame, text="Trailing ATR Multiplier:").grid(row=6, column=2, padx=2, pady=2, sticky='w')
+    trailing_stop_atr_multiplier_entry = ttk.Entry(params_input_frame, textvariable=trailing_stop_atr_multiplier_var, width=10)
+    trailing_stop_atr_multiplier_entry.grid(row=6, column=3, padx=2, pady=2, sticky='w')
+
     params_widgets = [
         account_risk_percent_entry, sl_tp_mode_combobox,
         sl_percent_entry, tp_percent_entry,
         sl_pnl_amount_entry, tp_pnl_amount_entry,
         leverage_entry, qty_concurrent_positions_entry,
         local_high_low_lookback_entry, margin_type_isolated_radio, margin_type_cross_radio,
-        target_symbols_entry
+        target_symbols_entry,
+        trailing_stop_enabled_checkbox, trailing_stop_atr_multiplier_entry # Added new widgets
     ]
     params_input_frame.columnconfigure(1, weight=1) 
     params_input_frame.columnconfigure(3, weight=1) 
@@ -5898,7 +6237,15 @@ if __name__ == "__main__":
     ttk.Label(backtest_params_grid, text="Backtest Strategy:").grid(row=6, column=0, padx=2, pady=2, sticky='w')
     backtest_strategy_combobox = ttk.Combobox(backtest_params_grid, textvariable=backtest_selected_strategy_var, values=list(STRATEGIES.values()), width=25, state="readonly")
     if STRATEGIES: backtest_strategy_combobox.current(ACTIVE_STRATEGY_ID if ACTIVE_STRATEGY_ID in STRATEGIES else 0) 
-    backtest_strategy_combobox.grid(row=6, column=1, columnspan=3, padx=2, pady=2, sticky='w') 
+    backtest_strategy_combobox.grid(row=6, column=1, columnspan=3, padx=2, pady=2, sticky='w')
+
+    # Row 7: Backtesting Trailing Stop Configuration
+    backtest_ts_enabled_checkbox = ttk.Checkbutton(backtest_params_grid, text="Enable Trailing Stop", variable=backtest_trailing_stop_enabled_var)
+    backtest_ts_enabled_checkbox.grid(row=7, column=0, columnspan=2, padx=2, pady=2, sticky='w')
+
+    ttk.Label(backtest_params_grid, text="Trailing ATR Multiplier:").grid(row=7, column=2, padx=2, pady=2, sticky='w')
+    backtest_ts_atr_multiplier_entry = ttk.Entry(backtest_params_grid, textvariable=backtest_trailing_stop_atr_multiplier_var, width=7)
+    backtest_ts_atr_multiplier_entry.grid(row=7, column=3, padx=2, pady=2, sticky='w')
     
     account_summary_frame = ttk.LabelFrame(side_by_side_frame, text="Account Summary")
     account_summary_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
