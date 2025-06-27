@@ -2538,9 +2538,15 @@ def klines(symbol):
         resp = resp.set_index('Time')
         resp.index = pd.to_datetime(resp.index, unit = 'ms')
         resp = resp.astype(float)
+        print(f"DEBUG klines({symbol}): Returning DataFrame with shape {resp.shape}. Head:\n{resp.head()}")
         return resp
-    except ClientError: pass # Error already printed by other functions or too noisy
-    except Exception: pass
+    except ClientError as ce: # Error already printed by other functions or too noisy
+        print(f"DEBUG klines({symbol}): ClientError: {ce}. Returning None.")
+        pass 
+    except Exception as e:
+        print(f"DEBUG klines({symbol}): Exception: {e}. Returning None.")
+        pass
+    print(f"DEBUG klines({symbol}): Returning None due to unhandled case or prior error.")
     return None
 
 def scalping_strategy_signal(symbol):
@@ -4877,6 +4883,13 @@ def run_bot_logic():
                 else:
                     _activity_set(activity_msg_prefix + f"Max open positions ({qty_concurrent_positions}) reached. Monitoring.")
                     can_open_new_trade_overall = False
+            elif current_active_strategy_id == 7: # Strategy 7 logic for can_open_new_trade_overall
+                if len(open_position_symbols) < qty_concurrent_positions :
+                    can_open_new_trade_overall = True
+                    _activity_set(activity_msg_prefix + "Ready. Seeking.")
+                else:
+                    _activity_set(activity_msg_prefix + f"Max open positions ({qty_concurrent_positions}) reached. Monitoring.")
+                    can_open_new_trade_overall = False
             
             # --- Manage Pending Signals (Part 2) ---
             # (This loop was inserted in the previous step and is assumed to be correct)
@@ -4970,6 +4983,7 @@ def run_bot_logic():
             # --- Signal Detection and Pending State Initiation (Part 1) ---
             if can_open_new_trade_overall : 
                 symbols_to_check = TARGET_SYMBOLS 
+                print(f"DEBUG: Symbols to check for trading: {symbols_to_check}") # Debug log for symbols
                 for sym_to_check in symbols_to_check:
                     if not bot_running: break
 
