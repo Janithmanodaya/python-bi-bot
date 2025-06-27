@@ -22,17 +22,20 @@ def calculate_dynamic_sl_tp(symbol: str, entry_price: float, side: str, atr_peri
     # Also assumes 'ta' and 'pd' (pandas) are imported.
 
     return_value = {'sl_price': None, 'tp_price': None, 'error': None}
-    
+    # Helper to log rejections before returning
+    def _reject_trade(error_message):
+        return_value['error'] = error_message
+        print(f"[S7 DEBUG {symbol}] calculate_dynamic_sl_tp rejected trade: {error_message}")
+        return return_value
+
     kl_df = klines(symbol) # Fetches 5m klines by default from existing function
 
     if kl_df is None or kl_df.empty:
-        return_value['error'] = f"No kline data returned for {symbol}."
-        return return_value
+        return _reject_trade(f"No kline data returned for {symbol}.")
 
     # Ensure enough data for ATR calculation (atr_period + a few for stability)
     if len(kl_df) < atr_period + 5: # Arbitrary buffer of 5, adjust if needed
-        return_value['error'] = f"Insufficient kline data for ATR calculation on {symbol} (need at least {atr_period + 5}, got {len(kl_df)})."
-        return return_value
+        return _reject_trade(f"Insufficient kline data for ATR calculation on {symbol} (need at least {atr_period + 5}, got {len(kl_df)}).")
 
     try:
         # Ensure columns are correct, klines() function seems to provide them
@@ -46,19 +49,16 @@ def calculate_dynamic_sl_tp(symbol: str, entry_price: float, side: str, atr_peri
         atr_series = atr_indicator.average_true_range()
 
         if atr_series is None or atr_series.empty:
-            return_value['error'] = f"ATR calculation resulted in an empty series for {symbol}."
-            return return_value
+            return _reject_trade(f"ATR calculation resulted in an empty series for {symbol}.")
         
         # Get the last valid ATR value
         atr_value = atr_series.dropna().iloc[-1] if not atr_series.dropna().empty else None
 
         if atr_value is None or pd.isna(atr_value) or atr_value == 0: # ATR could be zero in very flat markets
-            return_value['error'] = f"Invalid ATR value ({atr_value}) for {symbol}. Cannot calculate SL/TP."
-            return return_value
+            return _reject_trade(f"Invalid ATR value ({atr_value}) for {symbol}. Cannot calculate SL/TP.")
 
     except Exception as e:
-        return_value['error'] = f"Error calculating ATR for {symbol}: {str(e)}"
-        return return_value
+        return _reject_trade(f"Error calculating ATR for {symbol}: {str(e)}")
 
     price_precision = get_price_precision(symbol)
     if not isinstance(price_precision, int) or price_precision < 0:
@@ -74,33 +74,28 @@ def calculate_dynamic_sl_tp(symbol: str, entry_price: float, side: str, atr_peri
         sl_calculated = entry_price - (atr_value * atr_multiplier) # Changed calculation
         # Ensure SL is actually below entry for a long trade
         if sl_calculated >= entry_price:
-            return_value['error'] = f"Calculated SL ({sl_calculated}) for 'up' side is not below entry price ({entry_price})."
             # Optionally, could adjust SL here, e.g. entry_price - atr_value (without buffer), or just return error.
             # For now, returning error as per strict interpretation.
-            return return_value
+            return _reject_trade(f"Calculated SL ({sl_calculated}) for 'up' side is not below entry price ({entry_price}).")
         tp_calculated = entry_price + (entry_price - sl_calculated) * rr
     elif side == 'down':
         sl_calculated = entry_price + (atr_value * atr_multiplier) # Changed calculation
         # Ensure SL is actually above entry for a short trade
         if sl_calculated <= entry_price:
-            return_value['error'] = f"Calculated SL ({sl_calculated}) for 'down' side is not above entry price ({entry_price})."
-            return return_value
+            return _reject_trade(f"Calculated SL ({sl_calculated}) for 'down' side is not above entry price ({entry_price}).")
         tp_calculated = entry_price - (sl_calculated - entry_price) * rr
     else:
-        return_value['error'] = f"Invalid side '{side}' provided. Must be 'up' or 'down'."
-        return return_value
+        return _reject_trade(f"Invalid side '{side}' provided. Must be 'up' or 'down'." )
 
     # Rounding
     try:
         # Before rounding, check if calculated SL/TP are positive
         if sl_calculated <= 0:
-            return_value['error'] = f"Calculated SL price ({sl_calculated}) is not positive for {symbol}."
-            return_value['sl_price'] = None
+            return_value['sl_price'] = None # Keep SL None
             return_value['tp_price'] = None # Invalidate TP as well if SL is invalid
-            return return_value
+            return _reject_trade(f"Calculated SL price ({sl_calculated}) is not positive for {symbol}.")
         
         if tp_calculated <= 0:
-            return_value['error'] = f"Calculated TP price ({tp_calculated}) is not positive for {symbol}."
             # SL might still be valid, but TP is not. Depending on strategy, this might be acceptable or invalidate the signal.
             # For now, let's invalidate TP but keep SL if it was positive.
             # However, since TP depends on SL, if SL was the issue, TP would also be affected.
@@ -119,47 +114,66 @@ def calculate_dynamic_sl_tp(symbol: str, entry_price: float, side: str, atr_peri
             # The strategy should handle this if tp_price is None.
             # Let's stick to: if sl_calculated <= 0, both are None. If tp_calculated <=0, only tp is None (sl might be valid).
             # This will be handled by the subsequent checks as well.
+            # If TP is bad, but SL was okay, we log the rejection for TP, but might still return the valid SL.
+            # However, typically a trade needs both. So, if TP is bad, the whole signal is usually bad.
+            # Let's ensure that if tp_calculated is bad, we call _reject_trade.
+            # The 'return_value['tp_price'] = None' will be set, and the error message will be logged.
+            return _reject_trade(f"Calculated TP price ({tp_calculated}) is not positive for {symbol}.")
+
 
         return_value['sl_price'] = round(sl_calculated, price_precision)
         return_value['tp_price'] = round(tp_calculated, price_precision)
 
     except TypeError as te: # Handles if sl_calculated or tp_calculated are None
-         return_value['error'] = f"Error rounding SL/TP for {symbol}: {str(te)}. SL Calc: {sl_calculated}, TP Calc: {tp_calculated}, Precision: {price_precision}"
          return_value['sl_price'] = None 
          return_value['tp_price'] = None
-         return return_value
+         return _reject_trade(f"Error rounding SL/TP for {symbol}: {str(te)}. SL Calc: {sl_calculated}, TP Calc: {tp_calculated}, Precision: {price_precision}")
 
     # Final validation for SL/TP prices being positive after rounding
     if return_value['sl_price'] is not None and return_value['sl_price'] <= 0:
-        return_value['error'] = f"Rounded SL price ({return_value['sl_price']}) is not positive for {symbol}."
         return_value['sl_price'] = None
         return_value['tp_price'] = None # Invalidate TP as well
-        return return_value
+        return _reject_trade(f"Rounded SL price ({return_value.get('sl_price', 'N/A')}) is not positive for {symbol}.") # Use .get for safety
 
     if return_value['tp_price'] is not None and return_value['tp_price'] <= 0:
-        return_value['error'] = f"Rounded TP price ({return_value['tp_price']}) is not positive for {symbol}."
-        return_value['tp_price'] = None
         # SL might still be valid, but the strategy should check if tp_price is None.
         # No need to return immediately here if SL is valid.
+        # We set tp_price to None and log the error. The calling function will decide.
+        current_sl = return_value['sl_price'] # Store current SL before modifying tp_price
+        return_value['tp_price'] = None
+        _reject_trade(f"Rounded TP price ({return_value.get('tp_price', 'N/A')}) is not positive for {symbol}.") # Log it
+        # If SL was valid, we still return it, but with TP as None and error set.
+        # The _reject_trade function sets return_value['error'].
+        # We should return the return_value object which now has error set and tp_price as None.
+        return_value['sl_price'] = current_sl # Restore SL if it was valid
+        return return_value # Return the object with error set and TP as None
+
 
     # Final validation for TP vs Entry (and SL vs Entry was done earlier implicitly)
     if side == 'up':
         if return_value['sl_price'] is not None and return_value['sl_price'] >= entry_price:
-             return_value['error'] = f"SL price ({return_value['sl_price']}) for 'up' side not below entry ({entry_price})."
-             return_value['sl_price'] = None; return_value['tp_price'] = None; return return_value
+             return_value['sl_price'] = None; return_value['tp_price'] = None; 
+             return _reject_trade(f"SL price ({return_value.get('sl_price', 'N/A')}) for 'up' side not below entry ({entry_price}).")
         if return_value['tp_price'] is not None and return_value['tp_price'] <= entry_price:
-            return_value['error'] = f"TP price ({return_value['tp_price']}) for 'up' side not above entry ({entry_price})."
-            return_value['tp_price'] = None 
             # SL might still be valid. Strategy should check.
+            current_sl_up = return_value['sl_price']
+            return_value['tp_price'] = None 
+            _reject_trade(f"TP price ({return_value.get('tp_price', 'N/A')}) for 'up' side not above entry ({entry_price}).")
+            return_value['sl_price'] = current_sl_up
+            return return_value
+
 
     elif side == 'down':
         if return_value['sl_price'] is not None and return_value['sl_price'] <= entry_price:
-            return_value['error'] = f"SL price ({return_value['sl_price']}) for 'down' side not above entry ({entry_price})."
-            return_value['sl_price'] = None; return_value['tp_price'] = None; return return_value
+            return_value['sl_price'] = None; return_value['tp_price'] = None; 
+            return _reject_trade(f"SL price ({return_value.get('sl_price', 'N/A')}) for 'down' side not above entry ({entry_price}).")
         if return_value['tp_price'] is not None and return_value['tp_price'] >= entry_price:
-            return_value['error'] = f"TP price ({return_value['tp_price']}) for 'down' side not below entry ({entry_price})."
-            return_value['tp_price'] = None
             # SL might still be valid. Strategy should check.
+            current_sl_down = return_value['sl_price']
+            return_value['tp_price'] = None
+            _reject_trade(f"TP price ({return_value.get('tp_price', 'N/A')}) for 'down' side not below entry ({entry_price}).")
+            return_value['sl_price'] = current_sl_down
+            return return_value
 
     return return_value
 
@@ -513,11 +527,21 @@ def strategy_candlestick_patterns_signal(symbol: str) -> dict:
     base_return['all_conditions_status']['last_ema200'] = f"{last_ema200:.{price_precision}f}" if not pd.isna(last_ema200) else "N/A"
 
     if pattern_side != "none":
-        ema_filter_passed = (pattern_side == "up" and current_price > last_ema200) or \
-                            (pattern_side == "down" and current_price < last_ema200)
-        base_return['all_conditions_status']['ema_filter_passed'] = ema_filter_passed
-        
-        if volume_spike_detected and ema_filter_passed:
+        # Log detected pattern before filters
+        print(f"[S7 {symbol}] Pattern detected: {detected_pattern_name} ({pattern_side}) at price {current_price}")
+
+        # Relax Filters (Temporarily Disable)
+        # ema_filter_passed = (pattern_side == "up" and current_price > last_ema200) or \
+        #                     (pattern_side == "down" and current_price < last_ema200)
+        # base_return['all_conditions_status']['ema_filter_passed'] = ema_filter_passed
+        ema_filter_passed = True # Assuming filter is disabled for now
+        base_return['all_conditions_status']['ema_filter_passed'] = "Disabled"
+
+
+        # if volume_spike_detected and ema_filter_passed:
+        if ema_filter_passed: # Volume filter also temporarily disabled for testing increased frequency
+            base_return['all_conditions_status']['volume_spike'] = "Disabled (Original: {volume_spike_detected})"
+            
             base_return['signal'] = pattern_side
             entry_price = current_price
             sl_calculated, tp_calculated = None, None
@@ -546,22 +570,98 @@ def strategy_candlestick_patterns_signal(symbol: str) -> dict:
                 base_return['tp_price'] = tp_calculated
             else:
                 base_return['signal'] = 'none'
-                base_return['error'] = f"S7: SL/TP calc failed for {detected_pattern_name} SL_ref={sl_ref_price}, SL={sl_calculated}, TP={tp_calculated}"
+                rejection_reason_sltp = f"SL/TP calc failed for {detected_pattern_name} SL_ref={sl_ref_price}, SL={sl_calculated}, TP={tp_calculated}"
+                base_return['error'] = f"S7: {rejection_reason_sltp}"
+                print(f"[S7 {symbol}] REJECTED: {rejection_reason_sltp}") # New rejection log
         else: 
-            if base_return['signal'] == 'none' and detected_pattern_name != "None": 
+            if base_return['signal'] == 'none' and detected_pattern_name != "None":
+                # Construct rejection reason based on which original filters failed
+                # Since filters are currently disabled, this block might not be hit often,
+                # but keeping logic for when they are re-enabled.
                 error_details = []
-                if not volume_spike_detected: error_details.append("No volume spike")
-                if not ema_filter_passed: error_details.append("EMA filter failed")
-                if error_details: 
-                    base_return['error'] = f"S7: {detected_pattern_name} filters failed: {', '.join(error_details)}"
+                # Original filter checks (currently bypassed)
+                original_ema_filter_passed = (pattern_side == "up" and current_price > last_ema200) or \
+                                             (pattern_side == "down" and current_price < last_ema200)
+                if not volume_spike_detected: error_details.append("Volume spike false") # Original volume_spike_detected
+                if not original_ema_filter_passed: error_details.append("EMA filter false")
+                
+                if error_details:
+                    rejection_reason_filters = f"{detected_pattern_name} filters failed (Original state: {', '.join(error_details)})"
+                    base_return['error'] = f"S7: {rejection_reason_filters}"
+                    print(f"[S7 {symbol}] REJECTED: {rejection_reason_filters}") # New rejection log
             
+    # Standard "no pattern" message if applicable, not a "rejection" of a specific pattern
     if base_return['signal'] == 'none' and detected_pattern_name == "None" and not base_return['error'] :
-         base_return['error'] = "S7: No specific pattern detected."
+         base_return['error'] = "S7: No specific pattern detected." # This is not a rejection, but lack of signal
     
-    if base_return['error'] and base_return['error'] not in ["S7: No specific pattern detected.", f"S7: {detected_pattern_name} filters failed: No volume spike, EMA filter failed", f"S7: {detected_pattern_name} filters failed: No volume spike", f"S7: {detected_pattern_name} filters failed: EMA filter failed"]: 
-        print(f"{s7_log_prefix} {base_return['error']}")
-    elif base_return['signal'] != 'none':
-        print(f"{s7_log_prefix} Signal: {base_return['signal']} for {detected_pattern_name}. SL={base_return['sl_price']}, TP={base_return['tp_price']}")
+    # Logging for errors that are not specific rejections (e.g., data issues)
+    # The new [S7 REJECTED] logs cover specific rejections.
+    # The [S7 SIGNAL] log will cover successful signals.
+    # This block can log other errors that might prevent even getting to a pattern.
+    if base_return['error'] and not base_return['error'].startswith(f"S7: {detected_pattern_name} filters failed") and not base_return['error'].startswith("S7: SL/TP calc failed"):
+        # Avoid double logging rejections, but log other setup/data errors.
+        # Also avoid logging "No specific pattern detected" as a verbose error here.
+        if base_return['error'] != "S7: No specific pattern detected.":
+            print(f"{s7_log_prefix} Setup/Data Error: {base_return['error']}")
+
+    if base_return['signal'] != 'none':
+        # Improved visibility log for trade taken
+        print(f"[S7 {symbol}] SIGNAL: {detected_pattern_name} @ {current_price} (SL: {base_return['sl_price']}, TP: {base_return['tp_price']})")
+    elif base_return['signal'] == 'none' and detected_pattern_name == "None" and not base_return['error']: # Check if no pattern detected and no prior error
+        # --- RSI Fallback Logic ---
+        print(f"[S7 {symbol}] No candlestick pattern. Checking RSI fallback...")
+        try:
+            rsi_series = ta.momentum.RSIIndicator(close=kl_df['Close'], window=14).rsi()
+            if rsi_series is None or rsi_series.empty or rsi_series.isnull().all():
+                print(f"[S7 {symbol}] RSI calculation failed for fallback.")
+            else:
+                last_rsi = rsi_series.iloc[-1]
+                if pd.isna(last_rsi):
+                    print(f"[S7 {symbol}] RSI is NaN for fallback.")
+                else:
+                    print(f"[S7 {symbol}] Last RSI for fallback: {last_rsi:.2f}")
+                    rsi_fallback_signal_side = "none"
+                    rsi_fallback_pattern_name = "None"
+
+                    if last_rsi < 30:
+                        rsi_fallback_signal_side = "up"
+                        rsi_fallback_pattern_name = "RSI Oversold Fallback"
+                        print(f"[S7 {symbol}] RSI Fallback: Potential LONG signal (RSI < 30)")
+                    elif last_rsi > 70:
+                        rsi_fallback_signal_side = "down"
+                        rsi_fallback_pattern_name = "RSI Overbought Fallback"
+                        print(f"[S7 {symbol}] RSI Fallback: Potential SHORT signal (RSI > 70)")
+                    
+                    if rsi_fallback_signal_side != "none":
+                        # Use calculate_dynamic_sl_tp for RSI fallback SL/TP
+                        # Ensure atr_multiplier and rr are appropriate for RSI signals, using defaults for now.
+                        # The RR is 1.5 by default in calculate_dynamic_sl_tp.
+                        # The atr_multiplier is 2.0 by default in calculate_dynamic_sl_tp.
+                        entry_price_rsi = current_price # current_price is already available
+                        dynamic_sl_tp_rsi = calculate_dynamic_sl_tp(symbol, entry_price_rsi, rsi_fallback_signal_side)
+
+                        if dynamic_sl_tp_rsi['error']:
+                            rejection_reason_rsi_sltp = f"RSI Fallback SL/TP calc failed: {dynamic_sl_tp_rsi['error']}"
+                            print(f"[S7 {symbol}] REJECTED: {rejection_reason_rsi_sltp}")
+                            base_return['error'] = f"S7 RSI Fallback: {rejection_reason_rsi_sltp}" # Update error for UI display
+                        elif dynamic_sl_tp_rsi['sl_price'] is not None and dynamic_sl_tp_rsi['tp_price'] is not None:
+                            base_return['signal'] = rsi_fallback_signal_side
+                            base_return['sl_price'] = dynamic_sl_tp_rsi['sl_price']
+                            base_return['tp_price'] = dynamic_sl_tp_rsi['tp_price']
+                            # Update detected_pattern_name for the [S7 SIGNAL] log if RSI fallback is taken
+                            detected_pattern_name = rsi_fallback_pattern_name 
+                            base_return['all_conditions_status']['detected_pattern'] = detected_pattern_name # Update for UI
+                            print(f"[S7 {symbol}] SIGNAL: {detected_pattern_name} @ {entry_price_rsi} (SL: {base_return['sl_price']}, TP: {base_return['tp_price']})")
+                        else:
+                            # This case might be redundant if calculate_dynamic_sl_tp always sets an error when SL/TP is None.
+                            rejection_reason_rsi_sltp_none = "RSI Fallback SL/TP calculation resulted in None values without explicit error."
+                            print(f"[S7 {symbol}] REJECTED: {rejection_reason_rsi_sltp_none}")
+                            base_return['error'] = f"S7 RSI Fallback: {rejection_reason_rsi_sltp_none}"
+
+
+        except Exception as e_rsi_fallback:
+            print(f"[S7 {symbol}] Error during RSI fallback logic: {e_rsi_fallback}")
+            base_return['error'] = f"S7 RSI Fallback Error: {e_rsi_fallback}" # Update error for UI
 
     return base_return
 
