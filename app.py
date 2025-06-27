@@ -293,6 +293,278 @@ def supertrend_numerical_bt(high_series, low_series, close_series, atr_period, m
     numerical_signal = st_signal_str.map({'green': 1, 'red': -1}).fillna(0) # Fill NaNs with 0 (neutral)
     return numerical_signal.values # self.I expects a numpy array or list
 
+# --- Candlestick Pattern Helper Functions (Strategy 7) ---
+def get_candle_metrics(candle_series: pd.Series) -> dict:
+    """Extracts OHLC and calculates body, wicks, and range from a candle series."""
+    o = float(candle_series['Open'])
+    h = float(candle_series['High'])
+    l = float(candle_series['Low'])
+    c = float(candle_series['Close'])
+    v = float(candle_series['Volume'])
+    
+    body = abs(c - o)
+    upper_wick = h - max(o, c)
+    lower_wick = min(o, c) - l
+    total_range = h - l
+    
+    return {
+        'o': o, 'h': h, 'l': l, 'c': c, 'v': v,
+        'body': body, 'upper_wick': upper_wick, 'lower_wick': lower_wick, 'total_range': total_range,
+        'is_bullish': c > o, 'is_bearish': c < o,
+        'is_doji_shape': body <= total_range * 0.1 if total_range > 0 else body == 0 
+    }
+
+def check_volume_spike(kl_df: pd.DataFrame, lookback_period: int = 20, multiplier: float = 2.0) -> bool:
+    if kl_df is None or len(kl_df) < lookback_period + 1:
+        return False
+    try:
+        avg_volume = kl_df['Volume'].iloc[-(lookback_period + 1):-1].mean()
+        current_volume = kl_df['Volume'].iloc[-1]
+        if pd.isna(avg_volume) or pd.isna(current_volume) or avg_volume == 0:
+            return current_volume > 0 if avg_volume == 0 else False
+        return current_volume > (avg_volume * multiplier)
+    except Exception as e:
+        print(f"Error in check_volume_spike: {e}")
+        return False
+
+def is_hammer(metrics: dict) -> bool:
+    if not metrics: return False
+    return metrics['body'] > 0 and metrics['lower_wick'] >= 2 * metrics['body'] and metrics['upper_wick'] < metrics['body'] * 0.8 
+
+def is_inverted_hammer(metrics: dict) -> bool:
+    if not metrics: return False
+    return metrics['body'] > 0 and metrics['upper_wick'] >= 2 * metrics['body'] and metrics['lower_wick'] < metrics['body'] * 0.8
+
+def is_bullish_engulfing(prev_metrics: dict, curr_metrics: dict) -> bool:
+    if not prev_metrics or not curr_metrics: return False
+    return prev_metrics['is_bearish'] and curr_metrics['is_bullish'] and \
+           curr_metrics['c'] > prev_metrics['o'] and curr_metrics['o'] < prev_metrics['c'] and \
+           curr_metrics['body'] > prev_metrics['body']
+
+def is_piercing_line(prev_metrics: dict, curr_metrics: dict) -> bool:
+    if not prev_metrics or not curr_metrics: return False
+    mid_point_prev_body = prev_metrics['c'] + prev_metrics['body'] / 2 if prev_metrics['is_bearish'] else prev_metrics['o'] + prev_metrics['body'] / 2
+    return prev_metrics['is_bearish'] and curr_metrics['is_bullish'] and \
+           curr_metrics['o'] < prev_metrics['l'] and \
+           curr_metrics['c'] > mid_point_prev_body and \
+           curr_metrics['c'] < prev_metrics['o'] 
+
+def is_morning_star(c1m: dict, c2m: dict, c3m: dict) -> bool: 
+    if not c1m or not c2m or not c3m: return False
+    return c1m['is_bearish'] and (c1m['body'] / (c1m['total_range'] if c1m['total_range'] > 0 else 1)) > 0.6 and \
+           (c2m['body'] / (c2m['total_range'] if c2m['total_range'] > 0 else 1)) < 0.3 and \
+           max(c2m['o'], c2m['c']) < c1m['c'] and \
+           c3m['is_bullish'] and c3m['c'] > (c1m['o'] + c1m['c']) / 2
+
+def is_hanging_man(metrics: dict) -> bool: 
+    if not metrics: return False
+    return is_hammer(metrics)
+
+def is_shooting_star(metrics: dict) -> bool: 
+    if not metrics: return False
+    return is_inverted_hammer(metrics)
+
+def is_bearish_engulfing(prev_metrics: dict, curr_metrics: dict) -> bool:
+    if not prev_metrics or not curr_metrics: return False
+    return prev_metrics['is_bullish'] and curr_metrics['is_bearish'] and \
+           curr_metrics['o'] > prev_metrics['c'] and curr_metrics['c'] < prev_metrics['o'] and \
+           curr_metrics['body'] > prev_metrics['body']
+
+def is_evening_star(c1m: dict, c2m: dict, c3m: dict) -> bool: 
+    if not c1m or not c2m or not c3m: return False
+    return c1m['is_bullish'] and (c1m['body'] / (c1m['total_range'] if c1m['total_range'] > 0 else 1)) > 0.6 and \
+           (c2m['body'] / (c2m['total_range'] if c2m['total_range'] > 0 else 1)) < 0.3 and \
+           min(c2m['o'], c2m['c']) > c1m['c'] and \
+           c3m['is_bearish'] and c3m['c'] < (c1m['o'] + c1m['c']) / 2
+           
+def is_dark_cloud_cover(prev_metrics: dict, curr_metrics: dict) -> bool:
+    if not prev_metrics or not curr_metrics: return False
+    mid_point_prev_body = prev_metrics['o'] + prev_metrics['body'] / 2 if prev_metrics['is_bullish'] else prev_metrics['c'] + prev_metrics['body'] / 2
+    return prev_metrics['is_bullish'] and curr_metrics['is_bearish'] and \
+           curr_metrics['o'] > prev_metrics['h'] and \
+           curr_metrics['c'] < mid_point_prev_body and \
+           curr_metrics['c'] > prev_metrics['o'] 
+
+def is_three_white_soldiers(c1m: dict, c2m: dict, c3m: dict) -> bool:
+    if not c1m or not c2m or not c3m: return False
+    cond1 = c1m['is_bullish'] and c2m['is_bullish'] and c3m['is_bullish']
+    cond2 = all((m['body'] / (m['total_range'] if m['total_range'] > 0 else 1)) > 0.5 for m in [c1m, c2m, c3m]) 
+    cond3 = (c1m['o'] < c2m['o'] and c2m['o'] < c1m['c']) and \
+            (c2m['o'] < c3m['o'] and c3m['o'] < c2m['c']) 
+    cond4 = c3m['c'] > c2m['c'] and c2m['c'] > c1m['c'] 
+    cond5 = all(m['upper_wick'] < m['body'] * 0.5 for m in [c1m, c2m, c3m]) 
+    return cond1 and cond2 and cond3 and cond4 and cond5
+
+def is_rising_three_methods(kl_df_last5: pd.DataFrame) -> bool:
+    if kl_df_last5 is None or len(kl_df_last5) < 5: return False
+    m = [get_candle_metrics(kl_df_last5.iloc[i]) for i in range(5)]
+    cond1 = m[0]['is_bullish'] and (m[0]['body'] / (m[0]['total_range'] if m[0]['total_range'] > 0 else 1)) > 0.7
+    cond2 = m[1]['is_bearish'] and m[2]['is_bearish'] and m[3]['is_bearish']
+    cond3 = all((sm_m['body'] / (sm_m['total_range'] if sm_m['total_range'] > 0 else 1)) < 0.4 for sm_m in [m[1],m[2],m[3]]) 
+    cond4 = all(sm_m['h'] < m[0]['h'] and sm_m['l'] > m[0]['l'] for sm_m in [m[1],m[2],m[3]]) 
+    cond5 = m[4]['is_bullish'] and m[4]['c'] > m[0]['h'] and (m[4]['body'] / (m[4]['total_range'] if m[4]['total_range'] > 0 else 1)) > 0.7
+    return cond1 and cond2 and cond3 and cond4 and cond5
+
+def is_three_black_crows(c1m: dict, c2m: dict, c3m: dict) -> bool:
+    if not c1m or not c2m or not c3m: return False
+    cond1 = c1m['is_bearish'] and c2m['is_bearish'] and c3m['is_bearish']
+    cond2 = all((m['body'] / (m['total_range'] if m['total_range'] > 0 else 1)) > 0.5 for m in [c1m, c2m, c3m])
+    cond3 = (c1m['c'] < c2m['o'] and c2m['o'] < c1m['o']) and \
+            (c2m['c'] < c3m['o'] and c3m['o'] < c2m['o']) 
+    cond4 = c3m['c'] < c2m['c'] and c2m['c'] < c1m['c'] 
+    cond5 = all(m['lower_wick'] < m['body'] * 0.5 for m in [c1m, c2m, c3m]) 
+    return cond1 and cond2 and cond3 and cond4 and cond5
+
+def is_falling_three_methods(kl_df_last5: pd.DataFrame) -> bool:
+    if kl_df_last5 is None or len(kl_df_last5) < 5: return False
+    m = [get_candle_metrics(kl_df_last5.iloc[i]) for i in range(5)]
+    cond1 = m[0]['is_bearish'] and (m[0]['body'] / (m[0]['total_range'] if m[0]['total_range'] > 0 else 1)) > 0.7
+    cond2 = m[1]['is_bullish'] and m[2]['is_bullish'] and m[3]['is_bullish']
+    cond3 = all((sm_m['body'] / (sm_m['total_range'] if sm_m['total_range'] > 0 else 1)) < 0.4 for sm_m in [m[1],m[2],m[3]])
+    cond4 = all(sm_m['h'] < m[0]['h'] and sm_m['l'] > m[0]['l'] for sm_m in [m[1],m[2],m[3]])
+    cond5 = m[4]['is_bearish'] and m[4]['c'] < m[0]['l'] and (m[4]['body'] / (m[4]['total_range'] if m[4]['total_range'] > 0 else 1)) > 0.7
+    return cond1 and cond2 and cond3 and cond4 and cond5
+
+def is_doji(metrics: dict, body_to_range_ratio_threshold=0.05) -> bool:
+    if not metrics: return False
+    if metrics['total_range'] == 0: return metrics['body'] == 0 
+    return metrics['body'] / metrics['total_range'] <= body_to_range_ratio_threshold
+
+def is_spinning_top(metrics: dict, body_to_range_ratio_threshold=0.3, min_wick_to_body_ratio=1.5) -> bool:
+    if not metrics: return False
+    small_body = (metrics['body'] / metrics['total_range'] <= body_to_range_ratio_threshold) if metrics['total_range'] > 0 else metrics['body'] == 0
+    long_wicks = False
+    if metrics['body'] > 0: 
+        long_wicks = (metrics['upper_wick'] / metrics['body'] >= min_wick_to_body_ratio) and \
+                     (metrics['lower_wick'] / metrics['body'] >= min_wick_to_body_ratio)
+    elif metrics['total_range'] > 0 : 
+        long_wicks = (metrics['upper_wick'] / metrics['total_range'] > 0.3) and \
+                     (metrics['lower_wick'] / metrics['total_range'] > 0.3)
+    return small_body and long_wicks
+
+# --- Strategy 7: Candlestick Patterns ---
+def strategy_candlestick_patterns_signal(symbol: str) -> dict:
+    base_return = {
+        'signal': 'none', 'sl_price': None, 'tp_price': None, 'error': None,
+        'account_risk_percent': 0.005, 
+        'all_conditions_status': {} 
+    }
+    s7_log_prefix = f"[S7 {symbol}]"
+
+    min_klines_needed = 205 
+    kl_df = klines(symbol)
+    if kl_df is None or len(kl_df) < min_klines_needed:
+        base_return['error'] = f"S7: Insufficient klines (need {min_klines_needed}, got {len(kl_df) if kl_df is not None else 0})"
+        return base_return
+
+    now_utc = pd.Timestamp.now(tz='UTC')
+    if now_utc.hour == 23 or now_utc.hour == 0:
+        base_return['error'] = "S7: Outside trading hours (23:00-01:00 UTC excluded)"
+        base_return['all_conditions_status']['liquidity_filter_passed'] = False
+        return base_return
+    base_return['all_conditions_status']['liquidity_filter_passed'] = True
+
+    try:
+        ema200_series = ta.trend.EMAIndicator(close=kl_df['Close'], window=200).ema_indicator()
+        if ema200_series is None or ema200_series.empty or ema200_series.isnull().all(): 
+            base_return['error'] = "S7: EMA200 calculation resulted in an empty or all-NaN series."
+            return base_return
+        last_ema200 = ema200_series.iloc[-1]
+        if pd.isna(last_ema200):
+            base_return['error'] = "S7: EMA200 is NaN for the latest candle."
+            return base_return
+    except Exception as e:
+        base_return['error'] = f"S7: Error calculating EMA200: {str(e)}"
+        return base_return
+    
+    current_price = kl_df['Close'].iloc[-1]
+    price_precision = get_price_precision(symbol)
+
+    volume_spike_detected = check_volume_spike(kl_df, lookback_period=20, multiplier=2.0)
+    base_return['all_conditions_status']['volume_spike'] = volume_spike_detected
+
+    m_curr = get_candle_metrics(kl_df.iloc[-1])
+    m_prev = get_candle_metrics(kl_df.iloc[-2]) if len(kl_df) >= 2 else None
+    m_prev2 = get_candle_metrics(kl_df.iloc[-3]) if len(kl_df) >= 3 else None
+    df_last5 = kl_df.iloc[-5:] if len(kl_df) >= 5 else None
+
+
+    detected_pattern_name = "None"
+    pattern_side = "none" 
+    sl_ref_price = None 
+
+    if m_prev2 and m_prev and is_morning_star(m_prev2, m_prev, m_curr): detected_pattern_name, pattern_side, sl_ref_price = "Morning Star", "up", min(m_prev2['l'], m_prev['l'], m_curr['l'])
+    elif m_prev2 and m_prev and is_evening_star(m_prev2, m_prev, m_curr): detected_pattern_name, pattern_side, sl_ref_price = "Evening Star", "down", max(m_prev2['h'], m_prev['h'], m_curr['h'])
+    elif m_prev and is_bullish_engulfing(m_prev, m_curr): detected_pattern_name, pattern_side, sl_ref_price = "Bullish Engulfing", "up", m_curr['l'] 
+    elif m_prev and is_bearish_engulfing(m_prev, m_curr): detected_pattern_name, pattern_side, sl_ref_price = "Bearish Engulfing", "down", m_curr['h'] 
+    elif is_hammer(m_curr): detected_pattern_name, pattern_side, sl_ref_price = "Hammer", "up", m_curr['l']
+    elif is_hanging_man(m_curr): detected_pattern_name, pattern_side, sl_ref_price = "Hanging Man", "down", m_curr['h']
+    elif is_inverted_hammer(m_curr): detected_pattern_name, pattern_side, sl_ref_price = "Inverted Hammer", "up", m_curr['l']
+    elif is_shooting_star(m_curr): detected_pattern_name, pattern_side, sl_ref_price = "Shooting Star", "down", m_curr['h']
+    elif m_prev and is_piercing_line(m_prev, m_curr): detected_pattern_name, pattern_side, sl_ref_price = "Piercing Line", "up", m_curr['l']
+    elif m_prev and is_dark_cloud_cover(m_prev, m_curr): detected_pattern_name, pattern_side, sl_ref_price = "Dark Cloud Cover", "down", m_curr['h']
+    elif m_prev2 and m_prev and is_three_white_soldiers(m_prev2, m_prev, m_curr): detected_pattern_name, pattern_side, sl_ref_price = "Three White Soldiers", "up", m_prev2['l']
+    elif m_prev2 and m_prev and is_three_black_crows(m_prev2, m_prev, m_curr): detected_pattern_name, pattern_side, sl_ref_price = "Three Black Crows", "down", m_prev2['h']
+    elif df_last5 is not None and is_rising_three_methods(df_last5): detected_pattern_name, pattern_side, sl_ref_price = "Rising Three Methods", "up", df_last5.iloc[0]['Low']
+    elif df_last5 is not None and is_falling_three_methods(df_last5): detected_pattern_name, pattern_side, sl_ref_price = "Falling Three Methods", "down", df_last5.iloc[0]['High']
+
+    base_return['all_conditions_status']['detected_pattern'] = detected_pattern_name
+    base_return['all_conditions_status']['current_price_for_ema_check'] = f"{current_price:.{price_precision}f}"
+    base_return['all_conditions_status']['last_ema200'] = f"{last_ema200:.{price_precision}f}" if not pd.isna(last_ema200) else "N/A"
+
+    if pattern_side != "none":
+        ema_filter_passed = (pattern_side == "up" and current_price > last_ema200) or \
+                            (pattern_side == "down" and current_price < last_ema200)
+        base_return['all_conditions_status']['ema_filter_passed'] = ema_filter_passed
+        
+        if volume_spike_detected and ema_filter_passed:
+            base_return['signal'] = pattern_side
+            entry_price = current_price
+            sl_calculated, tp_calculated = None, None
+            
+            atr_val_buffer = 0.0
+            try:
+                atr_series_buffer = ta.volatility.AverageTrueRange(high=kl_df['High'], low=kl_df['Low'], close=kl_df['Close'], window=14).average_true_range()
+                if atr_series_buffer is not None and not atr_series_buffer.empty and not pd.isna(atr_series_buffer.iloc[-1]):
+                    atr_val_buffer = atr_series_buffer.iloc[-1] * 0.1 
+            except Exception as e_atr_buff: print(f"{s7_log_prefix} ATR buffer calc error: {e_atr_buff}")
+
+            if sl_ref_price is not None:
+                if pattern_side == "up":
+                    sl_calculated = round(sl_ref_price - atr_val_buffer, price_precision)
+                    if sl_calculated >= entry_price: sl_calculated = round(entry_price * (1 - 0.003), price_precision) 
+                    if sl_calculated > 0 and entry_price > sl_calculated: 
+                         tp_calculated = round(entry_price + (entry_price - sl_calculated) * 1.5, price_precision)
+                elif pattern_side == "down":
+                    sl_calculated = round(sl_ref_price + atr_val_buffer, price_precision)
+                    if sl_calculated <= entry_price: sl_calculated = round(entry_price * (1 + 0.003), price_precision) 
+                    if sl_calculated > 0 and entry_price < sl_calculated :
+                        tp_calculated = round(entry_price - (sl_calculated - entry_price) * 1.5, price_precision)
+            
+            if sl_calculated and tp_calculated and sl_calculated > 0 and tp_calculated > 0:
+                base_return['sl_price'] = sl_calculated
+                base_return['tp_price'] = tp_calculated
+            else:
+                base_return['signal'] = 'none'
+                base_return['error'] = f"S7: SL/TP calc failed for {detected_pattern_name} SL_ref={sl_ref_price}, SL={sl_calculated}, TP={tp_calculated}"
+        else: 
+            if base_return['signal'] == 'none' and detected_pattern_name != "None": 
+                error_details = []
+                if not volume_spike_detected: error_details.append("No volume spike")
+                if not ema_filter_passed: error_details.append("EMA filter failed")
+                if error_details: 
+                    base_return['error'] = f"S7: {detected_pattern_name} filters failed: {', '.join(error_details)}"
+            
+    if base_return['signal'] == 'none' and detected_pattern_name == "None" and not base_return['error'] :
+         base_return['error'] = "S7: No specific pattern detected."
+    
+    if base_return['error'] and base_return['error'] not in ["S7: No specific pattern detected.", f"S7: {detected_pattern_name} filters failed: No volume spike, EMA filter failed", f"S7: {detected_pattern_name} filters failed: No volume spike", f"S7: {detected_pattern_name} filters failed: EMA filter failed"]: 
+        print(f"{s7_log_prefix} {base_return['error']}")
+    elif base_return['signal'] != 'none':
+        print(f"{s7_log_prefix} Signal: {base_return['signal']} for {detected_pattern_name}. SL={base_return['sl_price']}, TP={base_return['tp_price']}")
+
+    return base_return
+
 # Backtest Strategy Wrapper Class
 class BacktestStrategyWrapper(Strategy):
     # Default parameters, will be overridden by UI inputs later
@@ -374,6 +646,14 @@ class BacktestStrategyWrapper(Strategy):
                 self.bt_swing_lows_bool = pd.Series([False]*len(self.data.df), index=self.data.df.index)
                 self.bt_sd_zones = []
                 self.atr = None # Invalidate ATR if setup fails critically
+        elif self.current_strategy_id == 7: # Candlestick Patterns Strategy
+            print(f"DEBUG BacktestStrategyWrapper.init: Initializing for Strategy ID 7 (Candlestick Patterns)")
+            # Required indicators for S7's filters and logic
+            self.ema200_s7 = self.I(ema_bt, self.data.Close, 200, name='EMA200_S7')
+            self.atr_s7 = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, 14, name='ATR_S7') # ATR for general use or SL/TP if ATR/Dynamic mode
+            # Candlestick pattern recognition will be done in next() using helper functions
+            # on self.data.df slices. No specific self.I needed for the patterns themselves here.
+            # Volume data is self.data.Volume
         else: # Default for any other strategy ID, ensure ATR is available
             print(f"DEBUG BacktestStrategyWrapper.init: Strategy ID {self.current_strategy_id} - Defaulting to RSI and ATR.")
             self.rsi_period_val = getattr(self, 'rsi_period', 14)
@@ -862,6 +1142,147 @@ class BacktestStrategyWrapper(Strategy):
                  # This 'else' means no 'potential_trade_s6' was formed.
                  # Debug prints within the logic above should indicate why (e.g., R:R too low, price not in zone, etc.)
                  print(f"{log_prefix_bt_next} S6: No valid trade signal this bar based on refined conditions.")
+        
+        elif self.current_strategy_id == 7: # Candlestick Patterns Strategy (Backtesting Logic)
+            if self.position:
+                # print(f"{log_prefix_bt_next} S7 BT: Already in position. Skipping.")
+                return
+
+            min_bars_s7 = 205 # Matches live strategy's min_klines_needed for EMA200 and volume lookback
+            if len(self.data.Close) < min_bars_s7:
+                # print(f"{log_prefix_bt_next} S7 BT: Insufficient data length ({len(self.data.Close)} < {min_bars_s7}). Skipping.")
+                return
+            
+            if self.ema200_s7 is None or len(self.ema200_s7) < 1 or pd.isna(self.ema200_s7[-1]):
+                # print(f"{log_prefix_bt_next} S7 BT: EMA200 not available or NaN. Skipping.")
+                return
+            
+            # Liquidity filter (simplified for backtesting - assuming data is for active hours)
+            # Live strategy checks current UTC hour. For backtesting, this is harder without explicit hour data per bar.
+            # We'll assume data provided for backtesting is within valid trading hours.
+
+            # Prepare data for pattern functions (last 5 candles for some patterns)
+            # self.data.df provides Open, High, Low, Close, Volume
+            current_df_slice = self.data.df.iloc[len(self.data.Close)-5 : len(self.data.Close)] if len(self.data.Close) >=5 else self.data.df.iloc[:len(self.data.Close)]
+            
+            # Mimic `strategy_candlestick_patterns_signal` structure
+            m_curr = get_candle_metrics(current_df_slice.iloc[-1]) if len(current_df_slice) >= 1 else None
+            m_prev = get_candle_metrics(current_df_slice.iloc[-2]) if len(current_df_slice) >= 2 else None
+            m_prev2 = get_candle_metrics(current_df_slice.iloc[-3]) if len(current_df_slice) >= 3 else None
+            # df_last5 for Rising/Falling Three Methods will be current_df_slice itself if len >=5
+
+            if not m_curr: # Must have at least current candle metrics
+                # print(f"{log_prefix_bt_next} S7 BT: Not enough candle metrics. Skipping.")
+                return
+
+            # Volume Spike Check for Backtesting
+            # Use self.data.Volume which is available in backtesting.py
+            # The check_volume_spike function expects a DataFrame with a 'Volume' column.
+            # We can pass a slice of self.data.df for this.
+            # The lookback for volume average is 20, plus current candle.
+            volume_lookback_period_s7_bt = 20
+            if len(self.data.Volume) < volume_lookback_period_s7_bt + 1:
+                # print(f"{log_prefix_bt_next} S7 BT: Not enough volume data for spike check. Skipping.")
+                volume_spike_detected_s7_bt = False
+            else:
+                # Pass the relevant part of the historical data DataFrame to check_volume_spike
+                # Ensure the slice ends at the current bar being processed.
+                # self.data.df contains all historical data up to the current point in `next()`
+                volume_data_slice_for_spike_check = self.data.df.iloc[len(self.data.Close) - (volume_lookback_period_s7_bt + 1) : len(self.data.Close)]
+                volume_spike_detected_s7_bt = check_volume_spike(volume_data_slice_for_spike_check, lookback_period=volume_lookback_period_s7_bt, multiplier=2.0)
+
+            # EMA Filter
+            last_ema200_s7_bt = self.ema200_s7[-1]
+            current_price_s7_bt = price # price is self.data.Close[-1]
+
+            detected_pattern_name_s7_bt = "None"
+            pattern_side_s7_bt = "none"
+            sl_ref_price_s7_bt = None # Reference price from pattern for SL (e.g., wick low/high)
+
+            # Pattern Detection Logic (copied and adapted from live strategy)
+            if m_prev2 and m_prev and is_morning_star(m_prev2, m_prev, m_curr): detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Morning Star", "up", min(m_prev2['l'], m_prev['l'], m_curr['l'])
+            elif m_prev2 and m_prev and is_evening_star(m_prev2, m_prev, m_curr): detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Evening Star", "down", max(m_prev2['h'], m_prev['h'], m_curr['h'])
+            elif m_prev and is_bullish_engulfing(m_prev, m_curr): detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Bullish Engulfing", "up", m_curr['l']
+            elif m_prev and is_bearish_engulfing(m_prev, m_curr): detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Bearish Engulfing", "down", m_curr['h']
+            elif is_hammer(m_curr): detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Hammer", "up", m_curr['l']
+            elif is_hanging_man(m_curr): detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Hanging Man", "down", m_curr['h']
+            elif is_inverted_hammer(m_curr): detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Inverted Hammer", "up", m_curr['l']
+            elif is_shooting_star(m_curr): detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Shooting Star", "down", m_curr['h']
+            elif m_prev and is_piercing_line(m_prev, m_curr): detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Piercing Line", "up", m_curr['l']
+            elif m_prev and is_dark_cloud_cover(m_prev, m_curr): detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Dark Cloud Cover", "down", m_curr['h']
+            elif m_prev2 and m_prev and is_three_white_soldiers(m_prev2, m_prev, m_curr): detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Three White Soldiers", "up", m_prev2['l']
+            elif m_prev2 and m_prev and is_three_black_crows(m_prev2, m_prev, m_curr): detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Three Black Crows", "down", m_prev2['h']
+            elif len(current_df_slice) >= 5 and is_rising_three_methods(current_df_slice): detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Rising Three Methods", "up", current_df_slice.iloc[0]['Low']
+            elif len(current_df_slice) >= 5 and is_falling_three_methods(current_df_slice): detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Falling Three Methods", "down", current_df_slice.iloc[0]['High']
+
+            if pattern_side_s7_bt != "none":
+                # print(f"{log_prefix_bt_next} S7 BT: Pattern detected: {detected_pattern_name_s7_bt} ({pattern_side_s7_bt})")
+                ema_filter_passed_s7_bt = (pattern_side_s7_bt == "up" and current_price_s7_bt > last_ema200_s7_bt) or \
+                                          (pattern_side_s7_bt == "down" and current_price_s7_bt < last_ema200_s7_bt)
+                
+                if volume_spike_detected_s7_bt and ema_filter_passed_s7_bt:
+                    # print(f"{log_prefix_bt_next} S7 BT: Filters passed (Volume Spike: {volume_spike_detected_s7_bt}, EMA Filter: {ema_filter_passed_s7_bt})")
+                    # Signal is confirmed, now use the SL/TP mode from backtest settings
+                    entry_price_s7 = current_price_s7_bt
+                    sl_to_use_s7, tp_to_use_s7 = None, None
+
+                    if self.sl_tp_mode_bt == "ATR/Dynamic":
+                        if self.atr_s7 is None or len(self.atr_s7) < 1 or pd.isna(self.atr_s7[-1]) or self.atr_s7[-1] == 0:
+                            # print(f"{log_prefix_bt_next} S7 BT: ATR invalid for ATR/Dynamic SL/TP. Skipping.")
+                            return
+                        current_atr_s7_bt = self.atr_s7[-1]
+                        
+                        # For S7, the live strategy uses pattern wick + ATR buffer.
+                        # For backtesting in ATR/Dynamic mode, we can try to mimic this or use the standard ATR SL.
+                        # Let's try to use the sl_ref_price_s7_bt if available, otherwise fallback to standard ATR.
+                        if sl_ref_price_s7_bt is not None:
+                            atr_buffer_s7_bt = current_atr_s7_bt * 0.1 # 10% of ATR as buffer
+                            if pattern_side_s7_bt == "up":
+                                sl_candidate = round(sl_ref_price_s7_bt - atr_buffer_s7_bt, self.PRICE_PRECISION_BT)
+                                if sl_candidate >= entry_price_s7: # If SL is too tight or above entry
+                                    sl_candidate = round(entry_price_s7 - (current_atr_s7_bt * self.SL_ATR_MULTI), self.PRICE_PRECISION_BT) # Fallback to standard ATR SL
+                                sl_to_use_s7 = sl_candidate
+                                if sl_to_use_s7 < entry_price_s7 : tp_to_use_s7 = round(entry_price_s7 + (entry_price_s7 - sl_to_use_s7) * self.RR, self.PRICE_PRECISION_BT)
+                            else: # down
+                                sl_candidate = round(sl_ref_price_s7_bt + atr_buffer_s7_bt, self.PRICE_PRECISION_BT)
+                                if sl_candidate <= entry_price_s7:
+                                    sl_candidate = round(entry_price_s7 + (current_atr_s7_bt * self.SL_ATR_MULTI), self.PRICE_PRECISION_BT)
+                                sl_to_use_s7 = sl_candidate
+                                if sl_to_use_s7 > entry_price_s7 : tp_to_use_s7 = round(entry_price_s7 - (sl_to_use_s7 - entry_price_s7) * self.RR, self.PRICE_PRECISION_BT)
+                        else: # No specific sl_ref_price from pattern, use standard ATR SL/TP
+                            if pattern_side_s7_bt == "up":
+                                sl_to_use_s7 = round(entry_price_s7 - (current_atr_s7_bt * self.SL_ATR_MULTI), self.PRICE_PRECISION_BT)
+                                if sl_to_use_s7 < entry_price_s7 : tp_to_use_s7 = round(entry_price_s7 + (entry_price_s7 - sl_to_use_s7) * self.RR, self.PRICE_PRECISION_BT)
+                            else: # down
+                                sl_to_use_s7 = round(entry_price_s7 + (current_atr_s7_bt * self.SL_ATR_MULTI), self.PRICE_PRECISION_BT)
+                                if sl_to_use_s7 > entry_price_s7 : tp_to_use_s7 = round(entry_price_s7 - (sl_to_use_s7 - entry_price_s7) * self.RR, self.PRICE_PRECISION_BT)
+                        
+                    elif self.sl_tp_mode_bt == "Percentage":
+                        sl_to_use_s7 = sl_long if pattern_side_s7_bt == "up" else sl_short
+                        tp_to_use_s7 = tp_long if pattern_side_s7_bt == "up" else tp_short
+                    elif self.sl_tp_mode_bt == "Fixed PnL":
+                        sl_to_use_s7 = sl_long if pattern_side_s7_bt == "up" else sl_short
+                        tp_to_use_s7 = tp_long if pattern_side_s7_bt == "up" else tp_short
+                    
+                    # Final validation of calculated SL/TP for S7
+                    if sl_to_use_s7 is None or tp_to_use_s7 is None or sl_to_use_s7 <= 0 or tp_to_use_s7 <= 0:
+                        # print(f"{log_prefix_bt_next} S7 BT: SL/TP calculation failed or invalid. SL={sl_to_use_s7}, TP={tp_to_use_s7}. Skipping."); 
+                        return
+                    if pattern_side_s7_bt == "up" and (sl_to_use_s7 >= entry_price_s7 or tp_to_use_s7 <= entry_price_s7):
+                        # print(f"{log_prefix_bt_next} S7 BT UP: Invalid SL/TP relation. SL={sl_to_use_s7}, TP={tp_to_use_s7}, Entry={entry_price_s7}. Skipping."); 
+                        return
+                    if pattern_side_s7_bt == "down" and (sl_to_use_s7 <= entry_price_s7 or tp_to_use_s7 >= entry_price_s7):
+                        # print(f"{log_prefix_bt_next} S7 BT DOWN: Invalid SL/TP relation. SL={sl_to_use_s7}, TP={tp_to_use_s7}, Entry={entry_price_s7}. Skipping."); 
+                        return
+
+                    # print(f"{log_prefix_bt_next} S7 BT Placing Trade: Side={pattern_side_s7_bt}, Entry={entry_price_s7:.{self.PRICE_PRECISION_BT}f}, SL={sl_to_use_s7:.{self.PRICE_PRECISION_BT}f}, TP={tp_to_use_s7:.{self.PRICE_PRECISION_BT}f}, Size={trade_size_to_use_in_order}")
+                    if pattern_side_s7_bt == "up": self.buy(sl=sl_to_use_s7, tp=tp_to_use_s7, size=trade_size_to_use_in_order)
+                    else: self.sell(sl=sl_to_use_s7, tp=tp_to_use_s7, size=trade_size_to_use_in_order)
+                # else:
+                    # print(f"{log_prefix_bt_next} S7 BT: Filters failed for {detected_pattern_name_s7_bt}. Volume Spike: {volume_spike_detected_s7_bt}, EMA Filter: {ema_filter_passed_s7_bt}")
+            # else:
+                # print(f"{log_prefix_bt_next} S7 BT: No candlestick pattern detected this bar.")
+
 
         # else: # Other strategies not yet updated for this new SL/TP structure
             # print(f"{log_prefix_bt_next} Strategy ID {self.current_strategy_id} not fully updated for new SL/TP modes in next().")
@@ -1443,7 +1864,8 @@ STRATEGIES = {
     3: "VWAP Breakout Momentum",
     4: "MACD Divergence + Pivot-Point",
     5: "New RSI-Based Strategy", # New strategy added
-    6: "Market Structure S/D" # New strategy for market structure and supply/demand
+    6: "Market Structure S/D", # New strategy for market structure and supply/demand
+    7: "Candlestick Patterns" # Strategy 7
 }
 ACTIVE_STRATEGY_ID = 0 # Default to original
 
@@ -1475,7 +1897,8 @@ strategy4_active_trade_info_default = {'symbol': None, 'entry_time': None, 'entr
 #        'entry_price_at_pending_start', 'potential_sl_price', 'potential_tp_price'
 g_conditional_pending_signals = {}
 
-TARGET_SYMBOLS = ["BTCUSDT", "ETHUSDT", "USDTUSDT", "XRPUSDT", "BNBUSDT", "SOLUSDT", "USDCUSDT", "DOGEUSDT", "TRXUSDT", "ADAUSDT"]
+TARGET_SYMBOLS = ["BTCUSDT", "ETHUSDT", "XRPUSDT", "BNBUSDT", "SOLUSDT", "TRXUSDT", "DOGEUSDT", "ADAUSDT", "HYPEUSDT", "BCHUSDT", "SUIUSDT", "LINKUSDT", "LEOUSDT", "AVAXUSDT", "XLMUSDT", "TONUSDT", "SHIBUSDT", "LTCUSDT", "HBARUSDT", "XMRUSDT", "BGBUSDT", "DOTUSDT", "UNIUSDT", "PIUSDT", "AAVEUSDT", "PEPEUSDT", "APTUSDT", "OKBUSDT", "TAOUSDT", "NEARUSDT", "ICPUSDT", "CROUSDT", "ETCUSDT", "ONDOUSDT", "MNTUSDT", "KASUSDT", "GTUSDT", "POLUSDT", "TRUMPUSDT", "VETUSDT", "SKYUSDT", "SEIUSDT", "FETUSDT", "RENDERUSDT", "ENAUSDT", "ATOMUSDT", "ARBUSDT", "ALGOUSDT", "FILUSDT", "WLDUSDT", "KCSUSDT", "QNTUSDT", "JUPUSDT", "FLRUSDT"
+]
 ACCOUNT_RISK_PERCENT = 0.005
 SCALPING_REQUIRED_BUY_CONDITIONS = 1
 SCALPING_REQUIRED_SELL_CONDITIONS = 1
@@ -4646,6 +5069,42 @@ def run_bot_logic():
                         else:
                             _activity_set(f"S6: No signal for {sym_to_check}. Next..."); sleep(0.1)
 
+                    elif current_active_strategy_id == 7: # Candlestick Patterns Strategy
+                        print(f"DEBUG: S7: Active for symbol: {sym_to_check}")
+                        _activity_set(f"S7: Scanning {sym_to_check}...")
+                        signal_data_s7 = strategy_candlestick_patterns_signal(sym_to_check)
+                        print(f"DEBUG: S7: Data for {sym_to_check}: {signal_data_s7}")
+
+                        if root and root.winfo_exists(): # Update UI with conditions
+                            root.after(0, update_conditions_display_content, sym_to_check, signal_data_s7.get('all_conditions_status'), signal_data_s7.get('error'))
+                        
+                        # Process S7 error: only continue to order if signal is present, even if there's a non-critical error string
+                        # Critical errors (like insufficient klines) should already return signal='none' from the strategy.
+                        # Non-critical errors (like "No specific pattern detected") might still accompany signal='none'.
+                        if signal_data_s7.get('error') and signal_data_s7.get('signal', 'none') == 'none':
+                            # Log the error if it's not one of the common "no signal" messages
+                            if signal_data_s7['error'] not in ["S7: No specific pattern detected.", f"S7: {signal_data_s7.get('all_conditions_status',{}).get('detected_pattern','N/A')} filters failed: No volume spike, EMA filter failed", f"S7: {signal_data_s7.get('all_conditions_status',{}).get('detected_pattern','N/A')} filters failed: No volume spike", f"S7: {signal_data_s7.get('all_conditions_status',{}).get('detected_pattern','N/A')} filters failed: EMA filter failed"]:
+                                print(f"S7 Error ({sym_to_check}): {signal_data_s7['error']}")
+                            sleep(0.1); continue # Move to next symbol
+                        
+                        current_signal_s7 = signal_data_s7.get('signal', 'none')
+                        if current_signal_s7 in ['up', 'down']:
+                            print(f"S7: {current_signal_s7.upper()} signal for {sym_to_check}. Pattern: {signal_data_s7.get('all_conditions_status', {}).get('detected_pattern', 'N/A')}. Ordering...")
+                            _status_set(f"S7: Ordering {sym_to_check} ({current_signal_s7.upper()})...")
+                            set_mode(sym_to_check, margin_type_setting); sleep(0.1)
+                            set_leverage(sym_to_check, leverage); sleep(0.1)
+                            
+                            open_order(sym_to_check, current_signal_s7, 
+                                       strategy_sl=signal_data_s7.get('sl_price'), 
+                                       strategy_tp=signal_data_s7.get('tp_price'), 
+                                       strategy_account_risk_percent=signal_data_s7.get('account_risk_percent'))
+                            
+                            _activity_set(f"S7: Trade initiated for {sym_to_check}.")
+                            # S7, like S5 and S6, might allow multiple trades across symbols.
+                            # No specific single-trade tracker for S7 implemented yet.
+                            sleep(1) 
+                        else: # No signal from S7 after evaluation
+                            _activity_set(f"S7: No signal for {sym_to_check}. Next..."); sleep(0.1)
 
                     elif current_active_strategy_id == 4:
                         if strategy4_active_trade_info['symbol'] is not None:
