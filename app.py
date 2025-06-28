@@ -13,78 +13,156 @@ import pandas as pd
 # The order here doesn't strictly matter as long as names are unique and findable.
 strategies = [
     {"name": "Original Scalping", # Corresponds to STRATEGIES ID 0 -> scalping_strategy_signal
-     "parameters": [
-         {"name": "S0_EMA_Short", "type": "int", "default": 9},
-         {"name": "S0_EMA_Long", "type": "int", "default": 21},
-         {"name": "S0_RSI_Period", "type": "int", "default": 14},
-         {"name": "S0_ST_ATR_Period", "type": "int", "default": 10},
-         {"name": "S0_ST_Multiplier", "type": "float", "default": 1.5}
+     "parameters": [ # Strategy-level parameters
+         {"name": "S0_EMA_Short", "id": "s0_ema_short", "type": "int", "default": 9},
+         {"name": "S0_EMA_Long", "id": "s0_ema_long", "type": "int", "default": 21},
+         {"name": "S0_RSI_Period", "id": "s0_rsi_period", "type": "int", "default": 14},
+         {"name": "S0_ST_ATR_Period", "id": "s0_st_atr_period", "type": "int", "default": 10},
+         {"name": "S0_ST_Multiplier", "id": "s0_st_multiplier", "type": "float", "default": 1.5},
+         {"name": "S0_Vol_MA_Period", "id": "s0_vol_ma_period", "type": "int", "default": 10},
+         {"name": "S0_Lookback_HL", "id": "s0_lookback_hl", "type": "int", "default": 20}
+     ],
+     "conditions": [
+         {"name": "EMA Crossover", "id": "s0_ema_cross", "enabled": True, "parameters": []},
+         {"name": "RSI Filter", "id": "s0_rsi_filter", "enabled": True, "parameters": [
+             {"name": "RSI Min Long", "id": "s0_rsi_min_long", "type": "int", "default": 50},
+             {"name": "RSI Max Long", "id": "s0_rsi_max_long", "type": "int", "default": 70},
+             {"name": "RSI Min Short", "id": "s0_rsi_min_short", "type": "int", "default": 30},
+             {"name": "RSI Max Short", "id": "s0_rsi_max_short", "type": "int", "default": 50}
+         ]},
+         {"name": "SuperTrend Filter", "id": "s0_st_filter", "enabled": True, "parameters": []}, # Uses S0_ST_ATR_Period, S0_ST_Multiplier
+         {"name": "Volume Spike", "id": "s0_vol_spike", "enabled": True, "parameters": []}, # Uses S0_Vol_MA_Period
+         {"name": "Price Breakout HL", "id": "s0_price_breakout", "enabled": True, "parameters": []} # Uses S0_Lookback_HL
      ]},
     {"name": "EMA Cross + SuperTrend", # Corresponds to STRATEGIES ID 1 -> strategy_ema_supertrend
      "parameters": [
-         {"name": "S1_EMA_Short", "type": "int", "default": 9},
-         {"name": "S1_EMA_Long", "type": "int", "default": 21},
-         {"name": "S1_RSI_Period", "type": "int", "default": 14},
-         {"name": "S1_ST_ATR_Period", "type": "int", "default": 10},
-         {"name": "S1_ST_Multiplier", "type": "float", "default": 3.0}
+         {"name": "S1_EMA_Short", "id": "s1_ema_short", "type": "int", "default": 9},
+         {"name": "S1_EMA_Long", "id": "s1_ema_long", "type": "int", "default": 21},
+         {"name": "S1_RSI_Period", "id": "s1_rsi_period", "type": "int", "default": 14},
+         {"name": "S1_ST_ATR_Period", "id": "s1_st_atr_period", "type": "int", "default": 10},
+         {"name": "S1_ST_Multiplier", "id": "s1_st_multiplier", "type": "float", "default": 3.0}
+     ],
+     "conditions": [
+        {"name": "EMA Crossover", "id": "s1_ema_cross", "enabled": True, "parameters": []},
+        {"name": "SuperTrend Confirmation", "id": "s1_st_confirm", "enabled": True, "parameters": []},
+        {"name": "RSI Filter", "id": "s1_rsi_filter", "enabled": True, "parameters": [
+             {"name": "RSI Min Long", "id": "s1_rsi_min_long", "type": "int", "default": 40},
+             {"name": "RSI Max Long", "id": "s1_rsi_max_long", "type": "int", "default": 70},
+             {"name": "RSI Min Short", "id": "s1_rsi_min_short", "type": "int", "default": 30},
+             {"name": "RSI Max Short", "id": "s1_rsi_max_short", "type": "int", "default": 60}
+        ]}
      ]},
     {"name": "Bollinger Band Mean-Reversion", # Corresponds to STRATEGIES ID 2 -> strategy_bollinger_band_mean_reversion
      "parameters": [
-         {"name": "S2_EMA_Slow", "type": "int", "default": 50},
-         {"name": "S2_EMA_Fast", "type": "int", "default": 30},
-         {"name": "S2_RSI_Period", "type": "int", "default": 10},
-         {"name": "S2_BB_Length", "type": "int", "default": 15},
-         {"name": "S2_BB_StdDev", "type": "float", "default": 1.5},
-         {"name": "S2_ATR_Period", "type": "int", "default": 7}
+         {"name": "S2_EMA_Slow", "id": "s2_ema_slow", "type": "int", "default": 50},
+         {"name": "S2_EMA_Fast", "id": "s2_ema_fast", "type": "int", "default": 30},
+         {"name": "S2_RSI_Period", "id": "s2_rsi_period", "type": "int", "default": 10},
+         {"name": "S2_BB_Length", "id": "s2_bb_length", "type": "int", "default": 15},
+         {"name": "S2_BB_StdDev", "id": "s2_bb_stddev", "type": "float", "default": 1.5},
+         {"name": "S2_ATR_Period", "id": "s2_atr_period", "type": "int", "default": 7},
+         {"name": "S2_EMA_Trend_Lookback", "id": "s2_ema_trend_lookback", "type": "int", "default": 7}
+     ],
+     "conditions": [
+        {"name": "EMA Trend Filter", "id": "s2_ema_trend", "enabled": True, "parameters": []}, # Uses S2_EMA_Fast, S2_EMA_Slow, S2_EMA_Trend_Lookback
+        {"name": "Price vs Bollinger Bands", "id": "s2_price_bb", "enabled": True, "parameters": []} # Uses S2_BB_Length, S2_BB_StdDev
+        # RSI is implicitly used by the original strategy logic, not directly as a configurable condition here yet
      ]},
     {"name": "VWAP Breakout Momentum", # Corresponds to STRATEGIES ID 3 -> strategy_vwap_breakout_momentum
      "parameters": [
-         {"name": "S3_ATR_Period", "type": "int", "default": 14},
-         {"name": "S3_MACD_Slow", "type": "int", "default": 26},
-         {"name": "S3_MACD_Fast", "type": "int", "default": 12},
-         {"name": "S3_MACD_Sign", "type": "int", "default": 9},
-         {"name": "S3_ATR_RollingAvgPeriod", "type": "int", "default": 20}
+         {"name": "S3_ATR_Period", "id": "s3_atr_period", "type": "int", "default": 14},
+         {"name": "S3_MACD_Slow", "id": "s3_macd_slow", "type": "int", "default": 26},
+         {"name": "S3_MACD_Fast", "id": "s3_macd_fast", "type": "int", "default": 12},
+         {"name": "S3_MACD_Sign", "id": "s3_macd_sign", "type": "int", "default": 9},
+         {"name": "S3_ATR_RollingAvgPeriod", "id": "s3_atr_rolling_avg_period", "type": "int", "default": 20}
+     ],
+     "conditions": [
+        {"name": "Price vs VWAP (2-bar)", "id": "s3_price_vwap", "enabled": True, "parameters": []},
+        {"name": "MACD Confirmation", "id": "s3_macd_confirm", "enabled": True, "parameters": []}, # Uses S3_MACD params
+        {"name": "ATR Volatility Filter", "id": "s3_atr_volatility", "enabled": True, "parameters": []} # Uses S3_ATR_Period, S3_ATR_RollingAvgPeriod
      ]},
     {"name": "MACD Divergence + Pivot-Point", # Corresponds to STRATEGIES ID 4 -> strategy_macd_divergence_pivot
      "parameters": [
-         {"name": "S4_MACD_Slow", "type": "int", "default": 26},
-         {"name": "S4_MACD_Fast", "type": "int", "default": 12},
-         {"name": "S4_MACD_Sign", "type": "int", "default": 9},
-         {"name": "S4_Stoch_K_Period", "type": "int", "default": 14},
-         {"name": "S4_Stoch_Smooth_Window", "type": "int", "default": 3},
-         {"name": "S4_ATR_Period", "type": "int", "default": 14},
-         {"name": "S4_Divergence_Lookback", "type": "int", "default": 15},
-         {"name": "S4_Stoch_Oversold", "type": "int", "default": 20},
-         {"name": "S4_Stoch_Overbought", "type": "int", "default": 80}
+         {"name": "S4_MACD_Slow", "id": "s4_macd_slow", "type": "int", "default": 26},
+         {"name": "S4_MACD_Fast", "id": "s4_macd_fast", "type": "int", "default": 12},
+         {"name": "S4_MACD_Sign", "id": "s4_macd_sign", "type": "int", "default": 9},
+         {"name": "S4_Stoch_K_Period", "id": "s4_stoch_k_period", "type": "int", "default": 14},
+         {"name": "S4_Stoch_Smooth_Window", "id": "s4_stoch_smooth_window", "type": "int", "default": 3},
+         {"name": "S4_ATR_Period", "id": "s4_atr_period", "type": "int", "default": 14},
+         {"name": "S4_Divergence_Lookback", "id": "s4_divergence_lookback", "type": "int", "default": 15},
+         {"name": "S4_Stoch_Oversold", "id": "s4_stoch_oversold", "type": "int", "default": 20},
+         {"name": "S4_Stoch_Overbought", "id": "s4_stoch_overbought", "type": "int", "default": 80}
+     ],
+     "conditions": [
+        {"name": "MACD Divergence", "id": "s4_macd_divergence", "enabled": True, "parameters": []}, # Uses S4_MACD params, S4_Divergence_Lookback
+        {"name": "Price at Pivot Support/Resistance", "id": "s4_pivot_price", "enabled": True, "parameters": []}, # Pivot points calculated daily
+        {"name": "Stochastic Confirmation", "id": "s4_stoch_confirm", "enabled": True, "parameters": []} # Uses S4_Stoch params
      ]},
     {"name": "New RSI-Based Strategy", # Corresponds to STRATEGIES ID 5 -> strategy_rsi_enhanced
      "parameters": [
-        {"name": "S5_RSI_Period", "type": "int", "default": 14},
-        {"name": "S5_SMA_Period", "type": "int", "default": 50},
-        {"name": "S5_Duration_Lookback", "type": "int", "default": 5},
-        {"name": "S5_Slope_Lookback_RSI", "type": "int", "default": 3},
-        {"name": "S5_Divergence_Candles", "type": "int", "default": 15}
+        {"name": "S5_RSI_Period", "id": "s5_rsi_period", "type": "int", "default": 14},
+        {"name": "S5_SMA_Period", "id": "s5_sma_period", "type": "int", "default": 50},
+        {"name": "S5_Duration_Lookback", "id": "s5_duration_lookback", "type": "int", "default": 5},
+        {"name": "S5_Slope_Lookback_RSI", "id": "s5_slope_lookback_rsi", "type": "int", "default": 3},
+        {"name": "S5_Divergence_Candles", "id": "s5_divergence_candles", "type": "int", "default": 15},
+        {"name": "S5_RSI_OB_Thresh", "id": "s5_rsi_ob_thresh", "type": "int", "default": 70},
+        {"name": "S5_RSI_OS_Thresh", "id": "s5_rsi_os_thresh", "type": "int", "default": 30},
+        {"name": "S5_RSI_Slope_Min", "id": "s5_rsi_slope_min", "type": "int", "default": 10}
+     ],
+     "conditions": [
+        {"name": "RSI Cross Threshold", "id": "s5_rsi_cross", "enabled": True, "parameters": []}, # Uses S5_RSI_OS_Thresh, S5_RSI_OB_Thresh
+        {"name": "Duration Over OS/OB", "id": "s5_duration_osob", "enabled": True, "parameters": []}, # Uses S5_Duration_Lookback
+        {"name": "RSI Slope Confirmation", "id": "s5_rsi_slope", "enabled": True, "parameters": []}, # Uses S5_Slope_Lookback_RSI, S5_RSI_Slope_Min
+        {"name": "Price vs SMA Filter", "id": "s5_price_sma", "enabled": True, "parameters": []}, # Uses S5_SMA_Period
+        {"name": "RSI Divergence", "id": "s5_rsi_divergence", "enabled": False, "parameters": []} # Uses S5_Divergence_Candles, disabled by default
      ]},
     {"name": "Market Structure S/D", # Corresponds to STRATEGIES ID 6 -> strategy_market_structure_sd
      "parameters": [
-        {"name": "S6_Swing_Order", "type": "int", "default": 5},
-        {"name": "S6_SD_ATR_Period", "type": "int", "default": 14},
-        {"name": "S6_SD_Lookback_Candles", "type": "int", "default": 10},
-        {"name": "S6_SD_Consol_ATR_Factor", "type": "float", "default": 0.7},
-        {"name": "S6_SD_Sharp_Move_ATR_Factor", "type": "float", "default": 1.5},
-        {"name": "S6_Min_RR", "type": "float", "default": 1.5}
+        {"name": "S6_Swing_Order", "id": "s6_swing_order", "type": "int", "default": 5},
+        {"name": "S6_SD_ATR_Period", "id": "s6_sd_atr_period", "type": "int", "default": 14},
+        {"name": "S6_SD_Lookback_Candles", "id": "s6_sd_lookback_candles", "type": "int", "default": 10},
+        {"name": "S6_SD_Consol_ATR_Factor", "id": "s6_sd_consol_atr_factor", "type": "float", "default": 0.7},
+        {"name": "S6_SD_Sharp_Move_ATR_Factor", "id": "s6_sd_sharp_move_atr_factor", "type": "float", "default": 1.5},
+        {"name": "S6_Min_RR", "id": "s6_min_rr", "type": "float", "default": 1.5}, # Changed from 2.5 to 1.5
+        {"name": "S6_SL_Zone_Buffer_Pct", "id": "s6_sl_zone_buffer_pct", "type": "float", "default": 0.10} # 10% of zone height for SL buffer
+     ],
+     "conditions": [ # S6 conditions are more about the overall setup evaluation
+        {"name": "Market Trend Alignment", "id": "s6_market_trend", "enabled": True, "parameters": []},
+        {"name": "Price in Valid S/D Zone", "id": "s6_price_in_zone", "enabled": True, "parameters": []},
+        {"name": "Risk/Reward Ratio Met", "id": "s6_rr_met", "enabled": True, "parameters": []} # Uses S6_Min_RR
      ]},
     {"name": "Candlestick Patterns", # Corresponds to STRATEGIES ID 7 -> strategy_candlestick_patterns_signal
-     "parameters": [
-        {"name": "S7_EMA_Trend_Period", "type": "int", "default": 200},
-        {"name": "S7_ATR_Period", "type": "int", "default": 14},
-        {"name": "S7_SL_ATR_Multiplier", "type": "float", "default": 1.5},
-        {"name": "S7_TP_ATR_Multiplier", "type": "float", "default": 2.0},
-        {"name": "S7_Volume_Lookback", "type": "int", "default": 20},
-        {"name": "S7_Volume_Multiplier", "type": "float", "default": 2.0},
-        {"name": "S7_Fallback_RSI_ATR_Period", "type": "int", "default": 14},
-        {"name": "S7_Fallback_RSI_SL_ATR_Multi", "type": "float", "default": 1.5},
-        {"name": "S7_Fallback_RSI_TP_ATR_Multi", "type": "float", "default": 1.5}
+     "parameters": [ # These are overall parameters for S7
+        {"name": "S7_EMA_Trend_Period", "id": "s7_ema_trend_period", "type": "int", "default": 200},
+        {"name": "S7_ATR_Period_SLTP", "id": "s7_atr_period_sltp", "type": "int", "default": 14}, # Renamed for clarity
+        {"name": "S7_SL_ATR_Multiplier", "id": "s7_sl_atr_multiplier", "type": "float", "default": 1.5},
+        {"name": "S7_TP_ATR_Multiplier", "id": "s7_tp_atr_multiplier", "type": "float", "default": 2.0},
+        # Parameters for the (now removed) Volume Filter (kept for potential re-addition)
+        # {"name": "S7_Volume_Lookback", "id": "s7_volume_lookback", "type": "int", "default": 20},
+        # {"name": "S7_Volume_Multiplier", "id": "s7_volume_multiplier", "type": "float", "default": 2.0},
+        # Parameters for the (now removed) RSI Entry Filter
+        # {"name": "S7_RSI_Period_Filter", "id": "s7_rsi_period_filter", "type": "int", "default": 14},
+        # {"name": "S7_RSI_Overbought_Filter", "id": "s7_rsi_overbought_filter", "type": "int", "default": 75},
+        # {"name": "S7_RSI_Oversold_Filter", "id": "s7_rsi_oversold_filter", "type": "int", "default": 25},
+        # Parameters for RSI Fallback
+        {"name": "S7_Fallback_RSI_Period", "id": "s7_fallback_rsi_period", "type": "int", "default": 14},
+        {"name": "S7_Fallback_RSI_OS", "id": "s7_fallback_rsi_os", "type": "int", "default": 30},
+        {"name": "S7_Fallback_RSI_OB", "id": "s7_fallback_rsi_ob", "type": "int", "default": 70},
+        {"name": "S7_Fallback_ATR_Period_SLTP", "id": "s7_fallback_atr_period_sltp", "type": "int", "default": 14},
+        {"name": "S7_Fallback_SL_ATR_Multi", "id": "s7_fallback_sl_atr_multi", "type": "float", "default": 1.5},
+        {"name": "S7_Fallback_TP_ATR_Multi", "id": "s7_fallback_tp_atr_multi", "type": "float", "default": 1.5}
+     ],
+     "conditions": [ # Individual patterns and filters can be conditions
+        # Pattern Groups (enable/disable groups of patterns)
+        {"name": "Enable Single Candle Patterns", "id": "s7_single_candle_patterns", "enabled": True, "parameters": [
+            # Example: Could add a min_body_ratio parameter for hammers/shooting_stars if desired
+        ]},
+        {"name": "Enable Two Candle Patterns", "id": "s7_two_candle_patterns", "enabled": True, "parameters": []},
+        {"name": "Enable Three+ Candle Patterns", "id": "s7_three_plus_candle_patterns", "enabled": True, "parameters": []},
+        # Filters (these were removed from live code, but can be re-added as configurable conditions)
+        # {"name": "EMA Trend Filter", "id": "s7_ema_trend_filter", "enabled": True, "parameters": []}, # Uses S7_EMA_Trend_Period
+        # {"name": "Volume Spike Filter", "id": "s7_volume_filter", "enabled": True, "parameters": []}, # Uses S7_Volume_Lookback, S7_Volume_Multiplier
+        # {"name": "RSI Entry Filter", "id": "s7_rsi_entry_filter", "enabled": True, "parameters": []}, # Uses S7_RSI_Period_Filter, S7_RSI_OB/OS_Filter
+        {"name": "Enable RSI Fallback Logic", "id": "s7_rsi_fallback", "enabled": True, "parameters": []} # Uses S7_Fallback params
      ]}
 ]
 
@@ -2474,6 +2552,10 @@ selected_strategy_var = None # For strategy selection
 # GUI Variables for Strategy Checkboxes
 strategy_checkbox_vars = {}
 global_strategy_param_vars = {} # To store StringVars for dynamic strategy parameters
+# New global to store tk.Vars for condition checkboxes and their parameters
+# Structure: global_strategy_condition_vars[strategy_name][condition_id]['enabled'] -> tk.BooleanVar
+#            global_strategy_condition_vars[strategy_name][condition_id]['parameters'][param_id] -> tk.StringVar
+global_strategy_condition_vars = {} 
 current_strategy_active_params = {} # To store the actual typed values of the current strategy's parameters
 
 # Entry widgets (to be made global for enabling/disabling)
@@ -7196,30 +7278,80 @@ def handle_strategy_checkbox_select(selected_id):
         if strategy_details and strategy_details["parameters"]:
             if selected_strategy_name not in global_strategy_param_vars:
                 global_strategy_param_vars[selected_strategy_name] = {}
+            
+            # Create a sub-frame for strategy-level parameters
+            strategy_level_params_frame = ttk.LabelFrame(strategy_specific_params_frame, text="Strategy Level Parameters")
+            strategy_level_params_frame.pack(fill="x", padx=5, pady=5, expand=True)
 
             for i, param_info in enumerate(strategy_details["parameters"]):
                 param_name = param_info["name"]
+                param_id = param_info["id"] # Use the new 'id' field
                 param_default = param_info["default"]
                 
-                # Create StringVar for this parameter if it doesn't exist or re-initialize
                 string_var = tk.StringVar(value=str(param_default))
-                global_strategy_param_vars[selected_strategy_name][param_name] = string_var
+                # Store with param_id for uniqueness and consistency
+                global_strategy_param_vars[selected_strategy_name][param_id] = string_var
                 
-                # Create Label and Entry
-                lbl = ttk.Label(strategy_specific_params_frame, text=f"{param_name}:")
+                lbl = ttk.Label(strategy_level_params_frame, text=f"{param_name}:")
                 lbl.grid(row=i, column=0, padx=2, pady=2, sticky='w')
-                
-                entry = ttk.Entry(strategy_specific_params_frame, textvariable=string_var, width=15)
+                entry = ttk.Entry(strategy_level_params_frame, textvariable=string_var, width=15)
                 entry.grid(row=i, column=1, padx=2, pady=2, sticky='w')
-                
-                # Add to params_widgets so they can be disabled/enabled with the bot state
-                params_widgets.append(lbl)
-                params_widgets.append(entry)
+                params_widgets.extend([lbl, entry])
         else:
-            # No parameters for this strategy or strategy details not found
-            lbl_no_params = ttk.Label(strategy_specific_params_frame, text="No specific parameters for this strategy.")
+            lbl_no_params = ttk.Label(strategy_specific_params_frame, text="No general parameters for this strategy.")
             lbl_no_params.pack(padx=5, pady=5)
             params_widgets.append(lbl_no_params)
+
+        # --- New: UI for Conditions ---
+        if strategy_details and "conditions" in strategy_details and strategy_details["conditions"]:
+            if selected_strategy_name not in global_strategy_condition_vars:
+                global_strategy_condition_vars[selected_strategy_name] = {}
+
+            conditions_main_frame = ttk.LabelFrame(strategy_specific_params_frame, text="Configurable Conditions")
+            conditions_main_frame.pack(fill="x", padx=5, pady=5, expand=True,  ipady=5)
+
+
+            for cond_idx, cond_info in enumerate(strategy_details["conditions"]):
+                cond_name = cond_info["name"]
+                cond_id = cond_info["id"]
+                cond_enabled_default = cond_info["enabled"]
+
+                if cond_id not in global_strategy_condition_vars[selected_strategy_name]:
+                    global_strategy_condition_vars[selected_strategy_name][cond_id] = {
+                        'enabled': tk.BooleanVar(value=cond_enabled_default),
+                        'parameters': {}
+                    }
+                
+                cond_frame = ttk.LabelFrame(conditions_main_frame, text=cond_name)
+                cond_frame.pack(fill="x", padx=3, pady=3, expand=True)
+
+                enabled_var = global_strategy_condition_vars[selected_strategy_name][cond_id]['enabled']
+                enabled_cb = ttk.Checkbutton(cond_frame, text="Enabled", variable=enabled_var)
+                enabled_cb.pack(anchor='nw', padx=5, pady=2)
+                params_widgets.append(enabled_cb)
+
+                if cond_info["parameters"]:
+                    params_sub_frame = ttk.Frame(cond_frame)
+                    params_sub_frame.pack(fill="x", expand=True, padx=5, pady=(0,5))
+                    for param_idx, cond_param_info in enumerate(cond_info["parameters"]):
+                        cond_param_name = cond_param_info["name"]
+                        cond_param_id = cond_param_info["id"]
+                        cond_param_default = cond_param_info["default"]
+                        
+                        # Initialize StringVar for this condition parameter
+                        cond_param_svar = tk.StringVar(value=str(cond_param_default))
+                        global_strategy_condition_vars[selected_strategy_name][cond_id]['parameters'][cond_param_id] = cond_param_svar
+                        
+                        cp_lbl = ttk.Label(params_sub_frame, text=f"{cond_param_name}:")
+                        cp_lbl.grid(row=param_idx, column=0, padx=2, pady=1, sticky='w')
+                        cp_entry = ttk.Entry(params_sub_frame, textvariable=cond_param_svar, width=12)
+                        cp_entry.grid(row=param_idx, column=1, padx=2, pady=1, sticky='w')
+                        params_widgets.extend([cp_lbl, cp_entry])
+        else:
+            lbl_no_conditions = ttk.Label(strategy_specific_params_frame, text="No configurable conditions for this strategy.")
+            lbl_no_conditions.pack(padx=5, pady=5)
+            params_widgets.append(lbl_no_conditions)
+        # --- End New: UI for Conditions ---
 
     else:
         # This logic prevents unchecking the *last* checked box
