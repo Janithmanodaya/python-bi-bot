@@ -310,6 +310,11 @@ def supertrend_numerical_bt(high_series, low_series, close_series, atr_period, m
 # --- Candlestick Pattern Helper Functions (Strategy 7) ---
 def get_candle_metrics(candle_series: pd.Series) -> dict:
     """Extracts OHLC and calculates body, wicks, and range from a candle series."""
+    # --- S7 DEBUG LOG ---
+    # print(f"DEBUG S7 get_candle_metrics: Input candle_series index: {candle_series.name if hasattr(candle_series, 'name') else 'N/A'}") # Keep this commented
+    # print(f"DEBUG S7 get_candle_metrics: Input candle_series data: {candle_series.to_dict()}") # Keep this commented
+    # --- END S7 DEBUG LOG ---
+
     o = float(candle_series['Open'])
     h = float(candle_series['High'])
     l = float(candle_series['Low'])
@@ -321,39 +326,67 @@ def get_candle_metrics(candle_series: pd.Series) -> dict:
     lower_wick = min(o, c) - l
     total_range = h - l
     
-    return {
+    metrics_result = {
         'o': o, 'h': h, 'l': l, 'c': c, 'v': v,
         'body': body, 'upper_wick': upper_wick, 'lower_wick': lower_wick, 'total_range': total_range,
         'is_bullish': c > o, 'is_bearish': c < o,
         'is_doji_shape': body <= total_range * 0.1 if total_range > 0 else body == 0 
     }
+    # --- S7 DEBUG LOG ---
+    print(f"DEBUG S7 get_candle_metrics: Output metrics for candle {candle_series.name if hasattr(candle_series, 'name') else 'N/A'}: {metrics_result}")
+    # --- END S7 DEBUG LOG ---
+    return metrics_result
 
 def check_volume_spike(kl_df: pd.DataFrame, lookback_period: int = 20, multiplier: float = 2.0) -> bool:
     if kl_df is None or len(kl_df) < lookback_period + 1:
+        # --- S7 DEBUG LOG ---
+        print(f"DEBUG S7 check_volume_spike: Not enough data. kl_df is None or len {len(kl_df) if kl_df is not None else 'N/A'} < {lookback_period + 1}")
+        # --- END S7 DEBUG LOG ---
         return False
     try:
         avg_volume = kl_df['Volume'].iloc[-(lookback_period + 1):-1].mean()
         current_volume = kl_df['Volume'].iloc[-1]
+        # --- S7 DEBUG LOG ---
+        print(f"DEBUG S7 check_volume_spike: Candle {kl_df.index[-1] if hasattr(kl_df, 'index') else 'N/A'} - Avg Vol (prev {lookback_period}): {avg_volume}, Current Vol: {current_volume}, Multiplier: {multiplier}")
+        # --- END S7 DEBUG LOG ---
         if pd.isna(avg_volume) or pd.isna(current_volume) or avg_volume == 0:
-            return current_volume > 0 if avg_volume == 0 else False
-        return current_volume > (avg_volume * multiplier)
+            result = current_volume > 0 if avg_volume == 0 else False
+            # --- S7 DEBUG LOG ---
+            print(f"DEBUG S7 check_volume_spike: NaN/zero avg_volume. Result: {result}")
+            # --- END S7 DEBUG LOG ---
+            return result
+        result = current_volume > (avg_volume * multiplier)
+        # --- S7 DEBUG LOG ---
+        print(f"DEBUG S7 check_volume_spike: Final result: {result}")
+        # --- END S7 DEBUG LOG ---
+        return result
     except Exception as e:
         print(f"Error in check_volume_spike: {e}")
         return False
 
 def is_hammer(metrics: dict) -> bool:
     if not metrics: return False
-    return metrics['body'] > 0 and metrics['lower_wick'] >= 2 * metrics['body'] and metrics['upper_wick'] < metrics['body'] * 0.8 
+    # --- S7 DEBUG LOG ---
+    result = metrics['body'] > 0 and metrics['lower_wick'] >= 2 * metrics['body'] and metrics['upper_wick'] < metrics['body'] * 0.8 
+    # print(f"DEBUG S7 is_hammer: Metrics: O={metrics['o']},H={metrics['h']},L={metrics['l']},C={metrics['c']} -> Result: {result}") # Keep commented unless specific debug needed
+    # --- END S7 DEBUG LOG ---
+    return result
 
 def is_inverted_hammer(metrics: dict) -> bool:
     if not metrics: return False
-    return metrics['body'] > 0 and metrics['upper_wick'] >= 2 * metrics['body'] and metrics['lower_wick'] < metrics['body'] * 0.8
+    result = metrics['body'] > 0 and metrics['upper_wick'] >= 2 * metrics['body'] and metrics['lower_wick'] < metrics['body'] * 0.8
+    # print(f"DEBUG S7 is_inverted_hammer: Metrics: O={metrics['o']},H={metrics['h']},L={metrics['l']},C={metrics['c']} -> Result: {result}") # Keep commented
+    return result
 
 def is_bullish_engulfing(prev_metrics: dict, curr_metrics: dict) -> bool:
     if not prev_metrics or not curr_metrics: return False
-    return prev_metrics['is_bearish'] and curr_metrics['is_bullish'] and \
+    # --- S7 DEBUG LOG ---
+    result = prev_metrics['is_bearish'] and curr_metrics['is_bullish'] and \
            curr_metrics['c'] > prev_metrics['o'] and curr_metrics['o'] < prev_metrics['c'] and \
            curr_metrics['body'] > prev_metrics['body']
+    # print(f"DEBUG S7 is_bullish_engulfing: Prev C={prev_metrics['c']}, Curr C={curr_metrics['c']} -> Result: {result}") # Keep commented
+    # --- END S7 DEBUG LOG ---
+    return result
 
 def is_piercing_line(prev_metrics: dict, curr_metrics: dict) -> bool:
     if not prev_metrics or not curr_metrics: return False
@@ -1498,113 +1531,174 @@ class BacktestStrategyWrapper(Strategy):
                  print(f"{log_prefix_bt_next} S6: No valid trade signal this bar based on refined conditions.")
         
         elif self.current_strategy_id == 7: # Candlestick Patterns Strategy (Backtesting Logic)
+            print(f"{log_prefix_bt_next} S7 BT: Entering Strategy 7 logic.")
             if self.position:
-                # print(f"{log_prefix_bt_next} S7 BT: Already in position. Skipping.")
+                print(f"{log_prefix_bt_next} S7 BT: Already in position. Skipping.")
                 return
 
             min_bars_s7 = 205 # Matches live strategy's min_klines_needed for EMA200 and volume lookback
+            print(f"{log_prefix_bt_next} S7 BT: Current bar index: {len(self.data.Close)-1}, Timestamp: {self.data.index[-1]}")
+            print(f"{log_prefix_bt_next} S7 BT: len(self.data.Close)={len(self.data.Close)}, min_bars_s7={min_bars_s7}")
+
             if len(self.data.Close) < min_bars_s7:
-                # print(f"{log_prefix_bt_next} S7 BT: Insufficient data length ({len(self.data.Close)} < {min_bars_s7}). Skipping.")
+                print(f"{log_prefix_bt_next} S7 BT: Insufficient data length ({len(self.data.Close)} < {min_bars_s7}). Skipping.")
                 return
             
+            print(f"{log_prefix_bt_next} S7 BT: Accessing self.ema200_s7. Length: {len(self.ema200_s7) if self.ema200_s7 is not None else 'None'}")
             if self.ema200_s7 is None or len(self.ema200_s7) < 1 or pd.isna(self.ema200_s7[-1]):
-                # print(f"{log_prefix_bt_next} S7 BT: EMA200 not available or NaN. Skipping.")
+                print(f"{log_prefix_bt_next} S7 BT: EMA200 not available or NaN (Value: {self.ema200_s7[-1] if self.ema200_s7 is not None and len(self.ema200_s7) > 0 else 'N/A'}). Skipping.")
                 return
             
             # Liquidity filter (simplified for backtesting - assuming data is for active hours)
             # We'll assume data provided for backtesting is within valid trading hours.
-
+            print(f"{log_prefix_bt_next} S7 BT: Preparing current_df_slice. len(self.data.Close)={len(self.data.Close)}")
             current_df_slice = self.data.df.iloc[len(self.data.Close)-5 : len(self.data.Close)] if len(self.data.Close) >=5 else self.data.df.iloc[:len(self.data.Close)]
+            print(f"{log_prefix_bt_next} S7 BT: current_df_slice shape: {current_df_slice.shape}. Head:\n{current_df_slice.head()}")
+            
             m_curr = get_candle_metrics(current_df_slice.iloc[-1]) if len(current_df_slice) >= 1 else None
             m_prev = get_candle_metrics(current_df_slice.iloc[-2]) if len(current_df_slice) >= 2 else None
             m_prev2 = get_candle_metrics(current_df_slice.iloc[-3]) if len(current_df_slice) >= 3 else None
-            if not m_curr: return
+            print(f"{log_prefix_bt_next} S7 BT: m_curr: {m_curr is not None}, m_prev: {m_prev is not None}, m_prev2: {m_prev2 is not None}")
+            if not m_curr: 
+                print(f"{log_prefix_bt_next} S7 BT: m_curr is None. Skipping.")
+                return
 
             # Volume Spike Check for Backtesting (using class attributes for params)
             volume_spike_detected_s7_bt = False
+            print(f"{log_prefix_bt_next} S7 BT: Checking volume spike. len(self.data.Volume)={len(self.data.Volume)}, s7_bt_volume_lookback={self.s7_bt_volume_lookback}")
             if len(self.data.Volume) < self.s7_bt_volume_lookback + 1:
                 volume_spike_detected_s7_bt = False
+                print(f"{log_prefix_bt_next} S7 BT: Not enough volume data for spike check.")
             else:
                 volume_data_slice_for_spike_check = self.data.df.iloc[len(self.data.Close) - (self.s7_bt_volume_lookback + 1) : len(self.data.Close)]
+                print(f"{log_prefix_bt_next} S7 BT: volume_data_slice_for_spike_check shape: {volume_data_slice_for_spike_check.shape}")
                 volume_spike_detected_s7_bt = check_volume_spike(volume_data_slice_for_spike_check, lookback_period=self.s7_bt_volume_lookback, multiplier=self.s7_bt_volume_multiplier)
+            print(f"{log_prefix_bt_next} S7 BT: volume_spike_detected_s7_bt: {volume_spike_detected_s7_bt}")
 
             # EMA Filter (using class attribute for period, though ema200_s7 is already calculated with 200)
             last_ema200_s7_bt = self.ema200_s7[-1]
             prev_ema200_s7_bt = self.ema200_s7[-2] if len(self.ema200_s7) >=2 else None
             current_price_s7_bt = price 
+            print(f"{log_prefix_bt_next} S7 BT: EMA Filter: Price={current_price_s7_bt}, EMA200={last_ema200_s7_bt}, PrevEMA200={prev_ema200_s7_bt}")
             
             ema200_slope_up_bt = False
             ema200_slope_down_bt = False
             if prev_ema200_s7_bt is not None and not pd.isna(last_ema200_s7_bt) and not pd.isna(prev_ema200_s7_bt):
                 if last_ema200_s7_bt > prev_ema200_s7_bt: ema200_slope_up_bt = True
                 elif last_ema200_s7_bt < prev_ema200_s7_bt: ema200_slope_down_bt = True
+            print(f"{log_prefix_bt_next} S7 BT: EMA Slope: Up={ema200_slope_up_bt}, Down={ema200_slope_down_bt}")
 
             detected_pattern_name_s7_bt = "None"; pattern_side_s7_bt = "none"; sl_ref_price_s7_bt = None
+            print(f"{log_prefix_bt_next} S7 BT: Detecting patterns...")
             # ... (pattern detection logic remains the same) ...
-            if m_prev2 and m_prev and is_morning_star(m_prev2, m_prev, m_curr): detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Morning Star", "up", min(m_prev2['l'], m_prev['l'], m_curr['l'])
-            elif m_prev2 and m_prev and is_evening_star(m_prev2, m_prev, m_curr): detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Evening Star", "down", max(m_prev2['h'], m_prev['h'], m_curr['h'])
-            elif m_prev and is_bullish_engulfing(m_prev, m_curr): detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Bullish Engulfing", "up", m_curr['l']
-            elif m_prev and is_bearish_engulfing(m_prev, m_curr): detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Bearish Engulfing", "down", m_curr['h']
-            elif is_hammer(m_curr): detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Hammer", "up", m_curr['l']
-            elif is_hanging_man(m_curr): detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Hanging Man", "down", m_curr['h']
-            elif is_inverted_hammer(m_curr): detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Inverted Hammer", "up", m_curr['l']
-            elif is_shooting_star(m_curr): detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Shooting Star", "down", m_curr['h']
-            elif m_prev and is_piercing_line(m_prev, m_curr): detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Piercing Line", "up", m_curr['l']
-            elif m_prev and is_dark_cloud_cover(m_prev, m_curr): detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Dark Cloud Cover", "down", m_curr['h']
-            elif m_prev2 and m_prev and is_three_white_soldiers(m_prev2, m_prev, m_curr): detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Three White Soldiers", "up", m_prev2['l']
-            elif m_prev2 and m_prev and is_three_black_crows(m_prev2, m_prev, m_curr): detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Three Black Crows", "down", m_prev2['h']
-            elif len(current_df_slice) >= 5 and is_rising_three_methods(current_df_slice): detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Rising Three Methods", "up", current_df_slice.iloc[0]['Low']
-            elif len(current_df_slice) >= 5 and is_falling_three_methods(current_df_slice): detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Falling Three Methods", "down", current_df_slice.iloc[0]['High']
+            if m_prev2 and m_prev and is_morning_star(m_prev2, m_prev, m_curr): 
+                detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Morning Star", "up", min(m_prev2['l'], m_prev['l'], m_curr['l'])
+                print(f"{log_prefix_bt_next} S7 BT: Detected Pattern: Morning Star")
+            elif m_prev2 and m_prev and is_evening_star(m_prev2, m_prev, m_curr): 
+                detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Evening Star", "down", max(m_prev2['h'], m_prev['h'], m_curr['h'])
+                print(f"{log_prefix_bt_next} S7 BT: Detected Pattern: Evening Star")
+            elif m_prev and is_bullish_engulfing(m_prev, m_curr): 
+                detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Bullish Engulfing", "up", m_curr['l']
+                print(f"{log_prefix_bt_next} S7 BT: Detected Pattern: Bullish Engulfing")
+            elif m_prev and is_bearish_engulfing(m_prev, m_curr): 
+                detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Bearish Engulfing", "down", m_curr['h']
+                print(f"{log_prefix_bt_next} S7 BT: Detected Pattern: Bearish Engulfing")
+            # ... (pattern detection logic remains the same) ...
+            if m_prev2 and m_prev and is_morning_star(m_prev2, m_prev, m_curr): 
+                detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Morning Star", "up", min(m_prev2['l'], m_prev['l'], m_curr['l'])
+                print(f"{log_prefix_bt_next} S7 BT: Detected Pattern: Morning Star")
+            elif m_prev2 and m_prev and is_evening_star(m_prev2, m_prev, m_curr): 
+                detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Evening Star", "down", max(m_prev2['h'], m_prev['h'], m_curr['h'])
+                print(f"{log_prefix_bt_next} S7 BT: Detected Pattern: Evening Star")
+            elif m_prev and is_bullish_engulfing(m_prev, m_curr): 
+                detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Bullish Engulfing", "up", m_curr['l']
+                print(f"{log_prefix_bt_next} S7 BT: Detected Pattern: Bullish Engulfing")
+            elif m_prev and is_bearish_engulfing(m_prev, m_curr): 
+                detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Bearish Engulfing", "down", m_curr['h']
+                print(f"{log_prefix_bt_next} S7 BT: Detected Pattern: Bearish Engulfing")
+            elif is_hammer(m_curr): 
+                detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Hammer", "up", m_curr['l']
+                print(f"{log_prefix_bt_next} S7 BT: Detected Pattern: Hammer")
+            elif is_hanging_man(m_curr): 
+                detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Hanging Man", "down", m_curr['h']
+                print(f"{log_prefix_bt_next} S7 BT: Detected Pattern: Hanging Man")
+            elif is_inverted_hammer(m_curr): 
+                detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Inverted Hammer", "up", m_curr['l']
+                print(f"{log_prefix_bt_next} S7 BT: Detected Pattern: Inverted Hammer")
+            elif is_shooting_star(m_curr): 
+                detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Shooting Star", "down", m_curr['h']
+                print(f"{log_prefix_bt_next} S7 BT: Detected Pattern: Shooting Star")
+            elif m_prev and is_piercing_line(m_prev, m_curr): 
+                detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Piercing Line", "up", m_curr['l']
+                print(f"{log_prefix_bt_next} S7 BT: Detected Pattern: Piercing Line")
+            elif m_prev and is_dark_cloud_cover(m_prev, m_curr): 
+                detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Dark Cloud Cover", "down", m_curr['h']
+                print(f"{log_prefix_bt_next} S7 BT: Detected Pattern: Dark Cloud Cover")
+            elif m_prev2 and m_prev and is_three_white_soldiers(m_prev2, m_prev, m_curr): 
+                detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Three White Soldiers", "up", m_prev2['l']
+                print(f"{log_prefix_bt_next} S7 BT: Detected Pattern: Three White Soldiers")
+            elif m_prev2 and m_prev and is_three_black_crows(m_prev2, m_prev, m_curr): 
+                detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Three Black Crows", "down", m_prev2['h']
+                print(f"{log_prefix_bt_next} S7 BT: Detected Pattern: Three Black Crows")
+            elif len(current_df_slice) >= 5 and is_rising_three_methods(current_df_slice): 
+                detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Rising Three Methods", "up", current_df_slice.iloc[0]['Low']
+                print(f"{log_prefix_bt_next} S7 BT: Detected Pattern: Rising Three Methods")
+            elif len(current_df_slice) >= 5 and is_falling_three_methods(current_df_slice): 
+                detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Falling Three Methods", "down", current_df_slice.iloc[0]['High']
+                print(f"{log_prefix_bt_next} S7 BT: Detected Pattern: Falling Three Methods")
+            else:
+                print(f"{log_prefix_bt_next} S7 BT: No specific candlestick pattern detected by main checks.")
 
 
             if pattern_side_s7_bt != "none":
+                print(f"{log_prefix_bt_next} S7 BT: Pattern detected: {detected_pattern_name_s7_bt} ({pattern_side_s7_bt}). Evaluating filters...")
                 ema_filter_passed_s7_bt = False
                 if pattern_side_s7_bt == "up" and current_price_s7_bt > last_ema200_s7_bt and ema200_slope_up_bt:
                     ema_filter_passed_s7_bt = True
                 elif pattern_side_s7_bt == "down" and current_price_s7_bt < last_ema200_s7_bt and ema200_slope_down_bt:
                     ema_filter_passed_s7_bt = True
+                print(f"{log_prefix_bt_next} S7 BT: EMA Filter Passed: {ema_filter_passed_s7_bt}")
                 
-                rsi_filter_passed_s7_bt = True
-                # Calculate RSI for filter only if pattern and EMA filter passed
-                if ema_filter_passed_s7_bt and volume_spike_detected_s7_bt:
-                    # RSI indicator for S7 filter (using s7_bt_rsi_period)
-                    # This self.I call should ideally be in init, but for dynamic period use, it can be here.
-                    # For simplicity, if self.s7_rsi is not pre-calculated with the right period, this is an issue.
-                    # Let's assume self.I(rsi_bt, self.data.Close, self.s7_bt_rsi_period) is available as self.s7_rsi_filter_values
-                    # For now, re-calculating it on the fly for this specific logic:
-                    rsi_values_for_s7_filter = rsi_bt(self.data.Close, period=self.s7_bt_rsi_period)
+                rsi_filter_passed_s7_bt = True # Default to true, only set to false if condition met
+                print(f"{log_prefix_bt_next} S7 BT: Volume Spike Detected: {volume_spike_detected_s7_bt}")
+
+                if ema_filter_passed_s7_bt and volume_spike_detected_s7_bt: # RSI filter only if others pass
+                    print(f"{log_prefix_bt_next} S7 BT: Calculating RSI for filter. RSI Period: {self.s7_bt_rsi_period}")
+                    rsi_values_for_s7_filter = rsi_bt(self.data.Close, period=self.s7_bt_rsi_period) # rsi_bt returns a Series
+                    
                     if rsi_values_for_s7_filter is not None and len(rsi_values_for_s7_filter) > 0 and not pd.isna(rsi_values_for_s7_filter[-1]):
                         last_rsi_s7_bt = rsi_values_for_s7_filter[-1]
+                        print(f"{log_prefix_bt_next} S7 BT: Last RSI for filter: {last_rsi_s7_bt:.2f}. Side: {pattern_side_s7_bt}, OB: {self.s7_bt_rsi_overbought}, OS: {self.s7_bt_rsi_oversold}")
                         if pattern_side_s7_bt == "up" and last_rsi_s7_bt > self.s7_bt_rsi_overbought:
                             rsi_filter_passed_s7_bt = False
                         elif pattern_side_s7_bt == "down" and last_rsi_s7_bt < self.s7_bt_rsi_oversold:
                             rsi_filter_passed_s7_bt = False
-                    else: # RSI calculation failed for filter
+                    else: 
+                        print(f"{log_prefix_bt_next} S7 BT: RSI calculation for filter failed or returned NaN/empty.")
                         rsi_filter_passed_s7_bt = False 
+                    print(f"{log_prefix_bt_next} S7 BT: RSI Filter Passed: {rsi_filter_passed_s7_bt}")
+                else: # EMA or Volume filter failed, so RSI filter effectively fails too for pattern trade
+                    rsi_filter_passed_s7_bt = False # Ensure it's false if primary filters fail
+                    print(f"{log_prefix_bt_next} S7 BT: EMA or Volume filter failed, so RSI filter step skipped/failed for pattern trade.")
+
                 
                 if volume_spike_detected_s7_bt and ema_filter_passed_s7_bt and rsi_filter_passed_s7_bt:
-                    # --- S7 Confluence Factor Hook (Backtesting) ---
-                    # Future enhancement: If confluence factors are added to the live strategy,
-                    # corresponding checks should be implemented here for backtesting.
-                    # This might involve passing more data to pattern functions or having
-                    # dedicated confluence checking functions compatible with backtesting.py data.
-                    # confluence_passed_bt = self.check_s7_confluence_factors_bt(...)
-                    # if not confluence_passed_bt:
-                    #    return # Or skip trade placement
-                    # --- End S7 Confluence Factor Hook (Backtesting) ---
-
+                    print(f"{log_prefix_bt_next} S7 BT: All filters passed for pattern {detected_pattern_name_s7_bt}. Proceeding to SL/TP.")
                     entry_price_s7 = current_price_s7_bt
                     sl_to_use_s7, tp_to_use_s7 = None, None
                     sl_percentage_for_sizing_s7 = None
 
                     if self.sl_tp_mode_bt == "ATR/Dynamic":
+                        print(f"{log_prefix_bt_next} S7 BT: ATR/Dynamic SL/TP mode. ATR Period: {self.s7_bt_atr_period}, SL ATR Multi: {self.s7_bt_sl_atr_multiplier}, TP ATR Multi: {self.s7_bt_tp_atr_multiplier}")
                         if self.atr_s7 is None or len(self.atr_s7) < 1 or pd.isna(self.atr_s7[-1]) or self.atr_s7[-1] == 0:
+                            print(f"{log_prefix_bt_next} S7 BT: ATR data for SL/TP is None, too short, NaN, or zero ({self.atr_s7[-1] if self.atr_s7 is not None and len(self.atr_s7)>0 else 'N/A'}). Cannot place trade.")
                             return # Not enough ATR data
-                        current_atr_s7_bt = self.atr_s7[-1] # Use the ATR calculated in init with s7_bt_atr_period
+                        current_atr_s7_bt = self.atr_s7[-1] 
+                        print(f"{log_prefix_bt_next} S7 BT: Current ATR for SL/TP: {current_atr_s7_bt:.4f}")
                         
-                        # SL/TP logic using s7_bt_sl_atr_multiplier and s7_bt_tp_atr_multiplier
                         sl_distance = current_atr_s7_bt * self.s7_bt_sl_atr_multiplier
-                        tp_distance = current_atr_s7_bt * self.s7_bt_tp_atr_multiplier # Direct TP distance from entry
+                        tp_distance = current_atr_s7_bt * self.s7_bt_tp_atr_multiplier 
+                        print(f"{log_prefix_bt_next} S7 BT: SL Distance: {sl_distance:.4f}, TP Distance: {tp_distance:.4f}")
 
                         if pattern_side_s7_bt == "up":
                             sl_to_use_s7 = round(entry_price_s7 - sl_distance, self.PRICE_PRECISION_BT)
@@ -1612,64 +1706,89 @@ class BacktestStrategyWrapper(Strategy):
                         else: # down
                             sl_to_use_s7 = round(entry_price_s7 + sl_distance, self.PRICE_PRECISION_BT)
                             tp_to_use_s7 = round(entry_price_s7 - tp_distance, self.PRICE_PRECISION_BT)
+                        print(f"{log_prefix_bt_next} S7 BT: Calculated SL: {sl_to_use_s7}, TP: {tp_to_use_s7} for side {pattern_side_s7_bt}")
 
-                        if sl_to_use_s7 is not None and entry_price_s7 > 0: # Basic check for valid SL price
+                        if sl_to_use_s7 is not None and entry_price_s7 > 0: 
                             sl_diff = abs(entry_price_s7 - sl_to_use_s7)
                             if sl_diff > 0 : sl_percentage_for_sizing_s7 = sl_diff / entry_price_s7
-                            else: sl_to_use_s7 = None # Invalidate if SL is at entry
+                            else: 
+                                print(f"{log_prefix_bt_next} S7 BT: SL is at entry price. Invalidating SL.")
+                                sl_to_use_s7 = None 
+                        print(f"{log_prefix_bt_next} S7 BT: SL Pct for Sizing: {sl_percentage_for_sizing_s7*100 if sl_percentage_for_sizing_s7 is not None else 'N/A'}%")
+
 
                     elif self.sl_tp_mode_bt == "Percentage":
                         sl_to_use_s7 = sl_long if pattern_side_s7_bt == "up" else sl_short
                         tp_to_use_s7 = tp_long if pattern_side_s7_bt == "up" else tp_short
                         if self.user_sl > 0: sl_percentage_for_sizing_s7 = self.user_sl
+                        print(f"{log_prefix_bt_next} S7 BT: Percentage SL/TP mode. SL: {sl_to_use_s7}, TP: {tp_to_use_s7}")
                     elif self.sl_tp_mode_bt == "Fixed PnL":
                         sl_to_use_s7 = sl_long if pattern_side_s7_bt == "up" else sl_short
                         tp_to_use_s7 = tp_long if pattern_side_s7_bt == "up" else tp_short
                         sl_percentage_for_sizing_s7 = None 
+                        print(f"{log_prefix_bt_next} S7 BT: Fixed PnL SL/TP mode. SL: {sl_to_use_s7}, TP: {tp_to_use_s7}. Sizing uses default.")
                     
-                    if sl_to_use_s7 is None or tp_to_use_s7 is None or sl_to_use_s7 <= 0 or tp_to_use_s7 <= 0: return
-                    if pattern_side_s7_bt == "up" and (sl_to_use_s7 >= entry_price_s7 or tp_to_use_s7 <= entry_price_s7): return
-                    if pattern_side_s7_bt == "down" and (sl_to_use_s7 <= entry_price_s7 or tp_to_use_s7 >= entry_price_s7): return
+                    if sl_to_use_s7 is None or tp_to_use_s7 is None or sl_to_use_s7 <= 0 or tp_to_use_s7 <= 0: 
+                        print(f"{log_prefix_bt_next} S7 BT: SL/TP is None or non-positive. SL={sl_to_use_s7}, TP={tp_to_use_s7}. Skipping trade.")
+                        return
+                    if pattern_side_s7_bt == "up" and (sl_to_use_s7 >= entry_price_s7 or tp_to_use_s7 <= entry_price_s7): 
+                        print(f"{log_prefix_bt_next} S7 BT: Invalid SL/TP for UP signal. SL={sl_to_use_s7}, TP={tp_to_use_s7}, Entry={entry_price_s7}. Skipping trade.")
+                        return
+                    if pattern_side_s7_bt == "down" and (sl_to_use_s7 <= entry_price_s7 or tp_to_use_s7 >= entry_price_s7): 
+                        print(f"{log_prefix_bt_next} S7 BT: Invalid SL/TP for DOWN signal. SL={sl_to_use_s7}, TP={tp_to_use_s7}, Entry={entry_price_s7}. Skipping trade.")
+                        return
 
                     final_trade_size_s7 = 0.02 
                     if sl_percentage_for_sizing_s7 and sl_percentage_for_sizing_s7 > 0 and self.account_risk_percent_bt > 0:
                         calculated_size_s7 = self.account_risk_percent_bt / sl_percentage_for_sizing_s7
-                        final_trade_size_s7 = min(calculated_size_s7, 1.0)
-                        print(f"{log_prefix_bt_next} S7 Sizing: AccRisk={self.account_risk_percent_bt*100:.2f}%, SL%={sl_percentage_for_sizing_s7*100:.2f}%, CalcSize={calculated_size_s7:.4f}, FinalSize={final_trade_size_s7:.4f}")
+                        final_trade_size_s7 = min(calculated_size_s7, 1.0) # Cap at 100%
+                    print(f"{log_prefix_bt_next} S7 Sizing for Pattern: AccRisk={self.account_risk_percent_bt*100:.2f}%, SL%={sl_percentage_for_sizing_s7*100 if sl_percentage_for_sizing_s7 else 'N/A'}%, CalcSize={calculated_size_s7 if sl_percentage_for_sizing_s7 else 'N/A'}, FinalSize={final_trade_size_s7:.4f}")
 
+                    print(f"{log_prefix_bt_next} S7 BT: Placing Pattern Trade: Side={pattern_side_s7_bt}, Size={final_trade_size_s7}, SL={sl_to_use_s7}, TP={tp_to_use_s7}")
                     if pattern_side_s7_bt == "up": self.buy(sl=sl_to_use_s7, tp=tp_to_use_s7, size=final_trade_size_s7)
                     else: self.sell(sl=sl_to_use_s7, tp=tp_to_use_s7, size=final_trade_size_s7)
+                else: # Filters not passed for pattern
+                    print(f"{log_prefix_bt_next} S7 BT: Pattern {detected_pattern_name_s7_bt} detected, but filters (EMA, Volume, or RSI) not passed. No pattern trade.")
+
             # Fallback RSI logic for S7 (if no candlestick pattern)
             elif detected_pattern_name_s7_bt == "None": # No candlestick pattern
-                # Use self.I to get RSI values (assuming self.rsi_s7 is calculated in init with s7_bt_rsi_period)
-                # For now, re-calculating RSI here for clarity of using s7_bt_rsi_period
+                print(f"{log_prefix_bt_next} S7 BT: No candlestick pattern. Checking RSI fallback...")
                 rsi_values_for_s7_fallback = rsi_bt(self.data.Close, period=self.s7_bt_rsi_period)
                 if rsi_values_for_s7_fallback is not None and len(rsi_values_for_s7_fallback) > 0 and not pd.isna(rsi_values_for_s7_fallback[-1]):
                     last_rsi_s7_fallback = rsi_values_for_s7_fallback[-1]
+                    print(f"{log_prefix_bt_next} S7 BT RSI Fallback: Last RSI={last_rsi_s7_fallback:.2f}, OS={self.s7_bt_rsi_oversold}, OB={self.s7_bt_rsi_overbought}")
                     rsi_fallback_side = "none"
-                    if last_rsi_s7_fallback < self.s7_bt_rsi_oversold: # Using S7 specific threshold
+                    if last_rsi_s7_fallback < self.s7_bt_rsi_oversold: 
                         rsi_fallback_side = "buy"
-                    elif last_rsi_s7_fallback > self.s7_bt_rsi_overbought: # Using S7 specific threshold
+                    elif last_rsi_s7_fallback > self.s7_bt_rsi_overbought: 
                         rsi_fallback_side = "sell"
                     
                     if rsi_fallback_side != "none":
-                        # EMA trend alignment for RSI fallback
+                        print(f"{log_prefix_bt_next} S7 BT RSI Fallback: Potential side {rsi_fallback_side}. Checking EMA alignment...")
                         ema_aligned_for_rsi = False
                         if rsi_fallback_side == "buy" and current_price_s7_bt > last_ema200_s7_bt and ema200_slope_up_bt:
                             ema_aligned_for_rsi = True
                         elif rsi_fallback_side == "sell" and current_price_s7_bt < last_ema200_s7_bt and ema200_slope_down_bt:
                             ema_aligned_for_rsi = True
+                        print(f"{log_prefix_bt_next} S7 BT RSI Fallback: EMA Aligned: {ema_aligned_for_rsi}")
                         
-                        if ema_aligned_for_rsi: # Only take RSI fallback if aligned with EMA trend
+                        if ema_aligned_for_rsi: 
+                            print(f"{log_prefix_bt_next} S7 BT RSI Fallback: EMA aligned. Proceeding to SL/TP for RSI fallback.")
                             entry_price_s7_rsi = current_price_s7_bt
                             sl_rsi_fb, tp_rsi_fb = None, None
                             sl_percentage_for_sizing_s7_rsi = None
 
                             if self.sl_tp_mode_bt == "ATR/Dynamic":
-                                if self.atr_s7 is None or len(self.atr_s7) < 1 or pd.isna(self.atr_s7[-1]) or self.atr_s7[-1] == 0: return
+                                print(f"{log_prefix_bt_next} S7 BT RSI Fallback: ATR/Dynamic SL/TP. ATR Period: {self.s7_bt_atr_period}, SL Multi: {self.s7_bt_sl_atr_multiplier}, TP Multi: {self.s7_bt_tp_atr_multiplier}")
+                                if self.atr_s7 is None or len(self.atr_s7) < 1 or pd.isna(self.atr_s7[-1]) or self.atr_s7[-1] == 0: 
+                                    print(f"{log_prefix_bt_next} S7 BT RSI Fallback: ATR data for SL/TP is None, too short, NaN or zero. Cannot place trade.")
+                                    return
                                 current_atr_s7_bt_fb = self.atr_s7[-1]
-                                sl_dist_rsi = current_atr_s7_bt_fb * self.s7_bt_sl_atr_multiplier # Use S7 ATR params
+                                print(f"{log_prefix_bt_next} S7 BT RSI Fallback: Current ATR for SL/TP: {current_atr_s7_bt_fb:.4f}")
+                                sl_dist_rsi = current_atr_s7_bt_fb * self.s7_bt_sl_atr_multiplier 
                                 tp_dist_rsi = current_atr_s7_bt_fb * self.s7_bt_tp_atr_multiplier
+                                print(f"{log_prefix_bt_next} S7 BT RSI Fallback: SL Distance: {sl_dist_rsi:.4f}, TP Distance: {tp_dist_rsi:.4f}")
+
 
                                 if rsi_fallback_side == "buy":
                                     sl_rsi_fb = round(entry_price_s7_rsi - sl_dist_rsi, self.PRICE_PRECISION_BT)
@@ -1677,16 +1796,21 @@ class BacktestStrategyWrapper(Strategy):
                                 else: # sell
                                     sl_rsi_fb = round(entry_price_s7_rsi + sl_dist_rsi, self.PRICE_PRECISION_BT)
                                     tp_rsi_fb = round(entry_price_s7_rsi - tp_dist_rsi, self.PRICE_PRECISION_BT)
+                                print(f"{log_prefix_bt_next} S7 BT RSI Fallback: Calculated SL: {sl_rsi_fb}, TP: {tp_rsi_fb}")
                                 
                                 if sl_rsi_fb is not None and entry_price_s7_rsi > 0:
                                     sl_diff_rsi = abs(entry_price_s7_rsi - sl_rsi_fb)
                                     if sl_diff_rsi > 0: sl_percentage_for_sizing_s7_rsi = sl_diff_rsi / entry_price_s7_rsi
-                                    else: sl_rsi_fb = None
+                                    else: 
+                                        print(f"{log_prefix_bt_next} S7 BT RSI Fallback: SL is at entry. Invalidating SL.")
+                                        sl_rsi_fb = None
+                                print(f"{log_prefix_bt_next} S7 BT RSI Fallback: SL Pct for Sizing: {sl_percentage_for_sizing_s7_rsi*100 if sl_percentage_for_sizing_s7_rsi is not None else 'N/A'}%")
 
                             elif self.sl_tp_mode_bt == "Percentage":
                                 sl_rsi_fb = sl_long if rsi_fallback_side == "buy" else sl_short
                                 tp_rsi_fb = tp_long if rsi_fallback_side == "buy" else tp_short
                                 if self.user_sl > 0 : sl_percentage_for_sizing_s7_rsi = self.user_sl
+                                print(f"{log_prefix_bt_next} S7 BT RSI Fallback: Percentage SL/TP. SL: {sl_rsi_fb}, TP: {tp_rsi_fb}")
                             # Fixed PnL for RSI fallback not explicitly detailed, can use default sizing.
 
                             if sl_rsi_fb and tp_rsi_fb and sl_rsi_fb > 0 and tp_rsi_fb > 0:
@@ -1697,9 +1821,23 @@ class BacktestStrategyWrapper(Strategy):
                                     if sl_percentage_for_sizing_s7_rsi and sl_percentage_for_sizing_s7_rsi > 0 and self.account_risk_percent_bt > 0:
                                         calc_size_rsi = self.account_risk_percent_bt / sl_percentage_for_sizing_s7_rsi
                                         final_trade_size_s7_rsi = min(calc_size_rsi, 1.0)
+                                    print(f"{log_prefix_bt_next} S7 Sizing for RSI Fallback: AccRisk={self.account_risk_percent_bt*100:.2f}%, SL%={sl_percentage_for_sizing_s7_rsi*100 if sl_percentage_for_sizing_s7_rsi else 'N/A'}%, CalcSize={calc_size_rsi if sl_percentage_for_sizing_s7_rsi else 'N/A'}, FinalSize={final_trade_size_s7_rsi:.4f}")
                                     
+                                    print(f"{log_prefix_bt_next} S7 BT: Placing RSI Fallback Trade: Side={rsi_fallback_side}, Size={final_trade_size_s7_rsi}, SL={sl_rsi_fb}, TP={tp_rsi_fb}")
                                     if rsi_fallback_side == "buy": self.buy(sl=sl_rsi_fb, tp=tp_rsi_fb, size=final_trade_size_s7_rsi)
                                     else: self.sell(sl=sl_rsi_fb, tp=tp_rsi_fb, size=final_trade_size_s7_rsi)
+                                else:
+                                    print(f"{log_prefix_bt_next} S7 BT RSI Fallback: Invalid SL/TP relation for {rsi_fallback_side}. SL={sl_rsi_fb}, TP={tp_rsi_fb}, Entry={entry_price_s7_rsi}. No trade.")
+                            else:
+                                print(f"{log_prefix_bt_next} S7 BT RSI Fallback: SL/TP is None or non-positive. SL={sl_rsi_fb}, TP={tp_rsi_fb}. No trade.")
+                        else:
+                             print(f"{log_prefix_bt_next} S7 BT RSI Fallback: EMA not aligned for RSI signal. No trade.")
+                    else:
+                        print(f"{log_prefix_bt_next} S7 BT RSI Fallback: No RSI OS/OB condition met. No trade.")
+                else:
+                    print(f"{log_prefix_bt_next} S7 BT RSI Fallback: RSI calculation failed or returned NaN/empty. No trade.")
+            else: # Pattern detected but filters failed
+                print(f"{log_prefix_bt_next} S7 BT: Pattern {detected_pattern_name_s7_bt} was detected, but one or more filters (EMA, Volume, RSI) failed. No trade.")
 
 
         # else: # Other strategies not yet updated for this new SL/TP structure
@@ -3358,151 +3496,211 @@ def strategy_ema_supertrend(symbol):
         return base_return
 
 def strategy_bollinger_band_mean_reversion(symbol):
-    global strategy2_active_trades # Used to check concurrent trade limit
+    # Symbol is not used in this strategy as data is read from a CSV
+    # but kept for consistency with other strategy functions.
+    # The new strategy reads "EURUSD_Candlestick_5_M_ASK_30.09.2019-30.09.2022.csv"
+    # This will need to be adapted if the bot is to run this strategy live on different symbols.
+    # For now, it will always use the hardcoded CSV.
 
     base_return = {
-        'signal': 'none',
-        'conditions_met_count': 0,
-        'conditions_to_start_wait_threshold': 2,
-        'conditions_for_full_signal_threshold': 2, # Changed from 3 to 2
-        'all_conditions_status': {
-            'price_below_lower_bb': False, 'rsi_oversold': False, 'volume_confirms_long': False,
-            'price_above_upper_bb': False, 'rsi_overbought': False, 'volume_confirms_short': False,
+        'signal': 'none', # 'up' (buy), 'down' (sell), or 'none'
+        'conditions_met_count': 0, # Simplified for this strategy
+        'conditions_to_start_wait_threshold': 1, # Simplified
+        'conditions_for_full_signal_threshold': 1, # Simplified
+        'all_conditions_status': { # Provide some insight into the last calculated signals
+            'last_ema_signal': 0, # 0: No trend, 1: Bearish (buy opp), 2: Bullish (sell opp)
+            'last_total_signal': 0, # 0: No signal, 1: Buy, 2: Sell
+            'last_close_price': None,
+            'last_bbl': None,
+            'last_bbu': None,
+            'last_ema_fast': None,
+            'last_ema_slow': None,
         },
-        'sl_price': None,
+        'sl_price': None, # SL/TP will be handled by the global settings or ATR/Dynamic
         'tp_price': None,
         'error': None,
-        'account_risk_percent': 0.008 # Strategy 2 specific risk
+        'account_risk_percent': 0.008 # Default for S2, can be adjusted
     }
-    
-    # Max 2 Concurrent Trades Check for this strategy
-    if len(strategy2_active_trades) >= 2:
-        base_return['error'] = "Max 2 concurrent S2 trades reached"
-        if base_return['error'] == "Max 2 concurrent S2 trades reached": 
-             print(f"Strategy 2 ({symbol}): Skipped due to max concurrent trade limit (2).")
-             return base_return
-
-
-    kl = klines(symbol) # Default 5m interval
-    min_data_len = 20 # For BB and Volume SMA
-    if kl is None or len(kl) < min_data_len:
-        base_return['error'] = f"Insufficient kline data (need at least {min_data_len} candles)"
-        return base_return
 
     try:
-        # Calculate Indicators
-        bb_indicator = ta.volatility.BollingerBands(close=kl['Close'], window=20, window_dev=2)
-        rsi_indicator = ta.momentum.RSIIndicator(close=kl['Close'], window=14)
-        
-        upper_bb = bb_indicator.bollinger_hband()
-        lower_bb = bb_indicator.bollinger_lband()
-        middle_bb = bb_indicator.bollinger_mavg()
-        rsi = rsi_indicator.rsi()
-        volume_sma = kl['Volume'].rolling(window=20).mean()
-
-        if any(x is None for x in [upper_bb, lower_bb, middle_bb, rsi, volume_sma]) or \
-           any(x.empty for x in [upper_bb, lower_bb, middle_bb, rsi, volume_sma]):
-            base_return['error'] = "One or more core indicators (BB, RSI, Vol SMA) are None or empty"
-            return base_return
-        
-        if len(upper_bb) < 1 or len(lower_bb) < 1 or len(middle_bb) < 1 or len(rsi) < 1 or len(volume_sma.dropna()) < 1:
-            base_return['error'] = "Indicator series too short after calculation"
+        # 1 - Import and preprocess data
+        # This strategy uses a fixed CSV. This is problematic for a live bot.
+        # For demonstration, we'll load it. In a real bot, 'klines(symbol)' would be used.
+        try:
+            df = pd.read_csv("EURUSD_Candlestick_5_M_ASK_30.09.2019-30.09.2022.csv")
+        except FileNotFoundError:
+            base_return['error'] = "EURUSD CSV file not found. This strategy requires it."
+            print(base_return['error'])
             return base_return
 
-        # Extract latest values
-        current_price = kl['Close'].iloc[-1]
-        last_upper_bb = upper_bb.iloc[-1]
-        last_lower_bb = lower_bb.iloc[-1]
-        last_middle_bb = middle_bb.iloc[-1]
-        last_rsi_val = rsi.iloc[-1]
-        last_volume_val = kl['Volume'].iloc[-1]
-        last_volume_sma_val = volume_sma.iloc[-1] # This can be NaN if volume_sma window > available data points for it
+        df["Gmt time"] = df["Gmt time"].str.replace(".000", "", regex=False)
+        df['Gmt time'] = pd.to_datetime(df['Gmt time'], format='%d.%m.%Y %H:%M:%S')
+        df = df[df.High != df.Low]
+        df.set_index("Gmt time", inplace=True)
+        
+        # Ensure columns are named as expected by pandas_ta (Open, High, Low, Close, Volume)
+        # The CSV seems to have 'Open', 'High', 'Low', 'Close'. Volume might be missing or named differently.
+        # pandas_ta functions like ema, rsi, bbands primarily use 'Close'. atr uses H,L,C.
+        # If 'Volume' is needed by a specific pandas_ta function, ensure it's present and correctly named.
+        # For this strategy, Volume is not directly used by the indicators selected.
 
-        if any(pd.isna(v) for v in [current_price, last_upper_bb, last_lower_bb, last_middle_bb, last_rsi_val, last_volume_val]) or pd.isna(last_volume_sma_val):
-            base_return['error'] = "NaN value in critical indicator or price data for BB strategy"
+        if df.empty:
+            base_return['error'] = "DataFrame is empty after loading CSV."
+            return base_return
+
+        # 2 - Calculate Indicators
+        df["EMA_slow"] = ta.ema(df.Close, length=50)
+        df["EMA_fast"] = ta.ema(df.Close, length=30)
+        df['RSI'] = ta.rsi(df.Close, length=10)
+        my_bbands = ta.bbands(df.Close, length=15, std=1.5)
+        df['ATR'] = ta.atr(df.High, df.Low, df.Close, length=7)
+        
+        if my_bbands is None or my_bbands.empty:
+             base_return['error'] = "Bollinger Bands calculation failed or returned empty."
+             return base_return
+        df = df.join(my_bbands) # Joins BBL_15_1.5, BBM_15_1.5, BBU_15_1.5, BBB_15_1.5, BBP_15_1.5
+
+        # Check for required columns after join
+        required_bb_cols = ['BBL_15_1.5', 'BBU_15_1.5']
+        if not all(col in df.columns for col in required_bb_cols):
+            base_return['error'] = f"Required Bollinger Band columns missing after join. Got: {df.columns.tolist()}"
             return base_return
             
-        # --- Define Conditions ---
-        base_return['all_conditions_status']['price_below_lower_bb'] = current_price < last_lower_bb
-        base_return['all_conditions_status']['rsi_oversold'] = last_rsi_val < 30
-        base_return['all_conditions_status']['volume_confirms_long'] = last_volume_val > last_volume_sma_val
-        
-        base_return['all_conditions_status']['price_above_upper_bb'] = current_price > last_upper_bb
-        base_return['all_conditions_status']['rsi_overbought'] = last_rsi_val > 70
-        # For Strategy 2, volume_confirms_short is the same as volume_confirms_long
-        base_return['all_conditions_status']['volume_confirms_short'] = last_volume_val > last_volume_sma_val 
+        # Handle potential NaNs from indicator calculations, especially at the start of the DataFrame
+        df.dropna(inplace=True) # Drop rows with NaNs to ensure calculations work
+        if df.empty:
+            base_return['error'] = "DataFrame is empty after dropping NaNs from indicator calculations."
+            return base_return
 
-        met_buy_conditions = sum([base_return['all_conditions_status']['price_below_lower_bb'],
-                                  base_return['all_conditions_status']['rsi_oversold'],
-                                  base_return['all_conditions_status']['volume_confirms_long']])
-        met_sell_conditions = sum([base_return['all_conditions_status']['price_above_upper_bb'],
-                                   base_return['all_conditions_status']['rsi_overbought'],
-                                   base_return['all_conditions_status']['volume_confirms_short']])
-
-        final_signal_str = 'none'
-        calculated_sl, calculated_tp = None, None
-
-        if met_buy_conditions >= 2: # Changed from == base_return['conditions_for_full_signal_threshold']
-            final_signal_str = 'up'
-            base_return['conditions_met_count'] = met_buy_conditions
-        elif met_sell_conditions >= 2: # Changed from == base_return['conditions_for_full_signal_threshold']
-            final_signal_str = 'down'
-            base_return['conditions_met_count'] = met_sell_conditions
-        else: # Not a full signal
-            if met_buy_conditions >= met_sell_conditions: 
-                 base_return['conditions_met_count'] = met_buy_conditions
+        # 3 - Define EMA Signal Function (Adapted to work with DataFrame directly)
+        # For live trading, current_candle would be the latest completed candle.
+        # backcandles is how many previous candles to check for the trend.
+        def ema_signal_local(df_subset): # df_subset is df.iloc[start:end]
+            if df_subset.empty: return 0
+            if all(df_subset["EMA_fast"] < df_subset["EMA_slow"]):
+                return 1  # Bearish trend (potential buy opportunity for this strategy's logic)
+            elif all(df_subset["EMA_fast"] > df_subset["EMA_slow"]):
+                return 2  # Bullish trend (potential sell opportunity for this strategy's logic)
             else:
-                 base_return['conditions_met_count'] = met_sell_conditions
-            base_return['signal'] = 'none' # Ensure signal is none
-            return base_return # Exit early if no initial signal
+                return 0  # No clear trend
 
-        # If a signal ('up' or 'down') is determined, proceed to calculate SL/TP based on mode
-        if final_signal_str != 'none':
-            if SL_TP_MODE == "ATR/Dynamic":
-                entry_price = current_price
-                # S2 specifics for calculate_dynamic_sl_tp (if any, like RR or ATR Multiplier)
-                # Using defaults from calculate_dynamic_sl_tp for now.
-                dynamic_sl_tp_result = calculate_dynamic_sl_tp(symbol, entry_price, final_signal_str, atr_multiplier=1.0) # Use 1.0x ATR
+        # 4 - Define Total Signal Function (Entry Logic - Adapted)
+        # For live trading, this would operate on the latest candle's data.
+        def total_signal_local(current_close, current_bbl, current_bbu, ema_trend_signal):
+            # Short Entry Condition (Sell Signal = 2)
+            if (ema_trend_signal == 2  # Bullish trend
+                and current_close <= current_bbl # Close price at or below lower BB
+               ):
+                return 2  # Sell signal (as per sample code logic, though counter-intuitive for "bullish trend")
+            # Long Entry Condition (Buy Signal = 1)
+            if (ema_trend_signal == 1  # Bearish trend
+                and current_close >= current_bbu # Close price at or above upper BB
+               ):
+                return 1  # Buy signal (as per sample code logic)
+            return 0  # No signal
 
-                if dynamic_sl_tp_result['error']:
-                    error_msg = f"S2 ATR SL/TP Error ({symbol}, {final_signal_str}): {dynamic_sl_tp_result['error']}"
-                    print(error_msg)
-                    final_signal_str = 'none'
-                    if base_return['error'] is None: base_return['error'] = error_msg
-                    else: base_return['error'] += f"; {error_msg}"
-                else:
-                    calculated_sl = dynamic_sl_tp_result['sl_price']
-                    calculated_tp = dynamic_sl_tp_result['tp_price']
-                    if calculated_sl is None or calculated_tp is None:
-                        error_msg = f"S2 ATR SL/TP calc ({symbol}, {final_signal_str}) returned None. Orig. err: {dynamic_sl_tp_result.get('error', 'N/A')}"
-                        print(error_msg)
-                        final_signal_str = 'none'
-                        if base_return['error'] is None: base_return['error'] = error_msg
-                        else: base_return['error'] += f"; {error_msg}"
-
-                if final_signal_str != 'none':
-                    base_return['sl_price'] = calculated_sl
-                    base_return['tp_price'] = calculated_tp
-                else: 
-                    base_return['sl_price'] = None
-                    base_return['tp_price'] = None
-                    if not base_return['error']: base_return['error'] = f"S2 signal for {symbol} invalidated during ATR SL/TP processing."
-                    print(f"Strategy {STRATEGIES.get(2, 'S2')} for {symbol} (ATR Mode): Signal invalidated. Error: {base_return['error']}")
-            else: # "Percentage" or "Fixed PnL"
-                base_return['sl_price'] = None
-                base_return['tp_price'] = None
-                print(f"Strategy {STRATEGIES.get(2, 'S2')} for {symbol}: SL/TP calculation deferred to open_order (Mode: {SL_TP_MODE}).")
+        # For a live bot, we operate on the most recent data.
+        # The sample code's df.apply() iterates through the whole historical dataset.
+        # Here, we need the signal for the *current* moment based on the *latest* data.
         
-        base_return['signal'] = final_signal_str
+        # Get data for the latest completed candle
+        # The number of backcandles for EMA signal trend check:
+        backcandles_ema_trend = 7 
+        if len(df) < backcandles_ema_trend:
+            base_return['error'] = f"Not enough data ({len(df)}) for EMA trend backlook ({backcandles_ema_trend})."
+            return base_return
+
+        # EMA trend for the latest segment
+        # The df is indexed by "Gmt time". We need the latest `backcandles_ema_trend` rows.
+        latest_segment_for_ema = df.iloc[-backcandles_ema_trend:]
+        current_ema_trend = ema_signal_local(latest_segment_for_ema)
+
+        # Current candle data for total_signal logic
+        latest_candle = df.iloc[-1]
+        current_close_price = latest_candle.Close
+        current_bbl_value = latest_candle['BBL_15_1.5']
+        current_bbu_value = latest_candle['BBU_15_1.5']
+        
+        # Get the total signal for the current latest candle
+        current_total_signal = total_signal_local(current_close_price, current_bbl_value, current_bbu_value, current_ema_trend)
+
+        # Update all_conditions_status for UI/logging
+        base_return['all_conditions_status'].update({
+            'last_ema_signal': current_ema_trend,
+            'last_total_signal': current_total_signal,
+            'last_close_price': current_close_price,
+            'last_bbl': current_bbl_value,
+            'last_bbu': current_bbu_value,
+            'last_ema_fast': latest_candle.EMA_fast if 'EMA_fast' in latest_candle else None,
+            'last_ema_slow': latest_candle.EMA_slow if 'EMA_slow' in latest_candle else None,
+        })
+        
+        # Map to base_return signal ('up'/'down')
+        if current_total_signal == 1: # Buy signal from sample
+            base_return['signal'] = 'up'
+            base_return['conditions_met_count'] = 1 # Simplified
+        elif current_total_signal == 2: # Sell signal from sample
+            base_return['signal'] = 'down'
+            base_return['conditions_met_count'] = 1 # Simplified
+        else:
+            base_return['signal'] = 'none'
+            base_return['conditions_met_count'] = 0
+
+        # SL/TP determination:
+        # This strategy, as provided, doesn't define its own SL/TP.
+        # It will rely on the global SL_TP_MODE settings:
+        # - "Percentage": Uses global SL_PERCENT, TP_PERCENT. open_order calculates.
+        # - "ATR/Dynamic": calculate_dynamic_sl_tp will be called by open_order or strategy caller.
+        #                    This strategy function needs to return sl_price=None, tp_price=None
+        #                    to let the caller handle it.
+        # - "Fixed PnL": Uses global SL_PNL_AMOUNT, TP_PNL_AMOUNT. open_order calculates.
+        
+        # If mode is ATR/Dynamic, the calling logic (e.g. in run_bot_logic or open_order)
+        # will use calculate_dynamic_sl_tp. This function should pass SL/TP as None.
+        if base_return['signal'] != 'none' and SL_TP_MODE == "ATR/Dynamic":
+            # For ATR/Dynamic, we need to calculate SL/TP here to pass to open_order
+            # Or, let open_order do it if it can take 'signal' and calculate.
+            # Current open_order expects strategy_sl, strategy_tp if mode is ATR/Dynamic.
+            # So, this strategy *must* calculate them if it wants ATR/Dynamic to work.
+            
+            # The sample code does not include dynamic SL/TP calculation based on ATR *for this strategy*.
+            # We will use the generic calculate_dynamic_sl_tp function.
+            # Parameters for calculate_dynamic_sl_tp for this strategy:
+            atr_period_for_sltp = 7 # From df['ATR'] = ta.atr(..., length=7)
+            # RR and ATR multiplier for SL are not defined in the sample for this strategy.
+            # We'll use defaults from calculate_dynamic_sl_tp (rr=1.5, atr_multiplier=DEFAULT_ATR_MULTIPLIER).
+            
+            dynamic_sl_tp_result = calculate_dynamic_sl_tp(
+                symbol=symbol, # Pass the bot's current symbol
+                entry_price=current_close_price,
+                side=base_return['signal'], # 'up' or 'down'
+                atr_period=atr_period_for_sltp, # Use the ATR period from the strategy
+                # rr and atr_multiplier will use defaults from calculate_dynamic_sl_tp
+            )
+
+            if dynamic_sl_tp_result['error']:
+                base_return['error'] = f"S2 ATR SL/TP calc error: {dynamic_sl_tp_result['error']}"
+                base_return['signal'] = 'none' # Invalidate signal if SL/TP fails
+            else:
+                base_return['sl_price'] = dynamic_sl_tp_result['sl_price']
+                base_return['tp_price'] = dynamic_sl_tp_result['tp_price']
+                if base_return['sl_price'] is None or base_return['tp_price'] is None:
+                    base_return['error'] = "S2 ATR SL/TP calc returned None values, invalidating signal."
+                    base_return['signal'] = 'none'
+        # For "Percentage" or "Fixed PnL", sl_price and tp_price remain None here;
+        # open_order will calculate them based on global settings.
+
         return base_return
 
+    except KeyError as ke:
+        base_return['error'] = f"KeyError in S2 Bollinger Strategy: {str(ke)}. Check CSV columns or indicator names."
+        print(base_return['error'])
+        return base_return
     except Exception as e:
-        base_return['error'] = f"Exception in strategy_bollinger_band_mean_reversion for {symbol}: {str(e)}"
-        # Ensure all_conditions_status is populated even in case of early exception
-        base_return['all_conditions_status'].update({
-            'price_below_lower_bb': False, 'rsi_oversold': False, 'volume_confirms_long': False,
-            'price_above_upper_bb': False, 'rsi_overbought': False, 'volume_confirms_short': False,
-        })
+        import traceback
+        print(traceback.format_exc())
+        base_return['error'] = f"Exception in S2 Bollinger Strategy: {str(e)}"
+        print(base_return['error'])
         return base_return
 
 # --- VWAP Calculation Helper ---
