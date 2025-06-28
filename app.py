@@ -1011,19 +1011,47 @@ def strategy_advance_ema_cross(symbol: str) -> dict:
     sell_cross = prev_ema100 > prev_ema200 and last_ema100 < last_ema200
     base_return['all_conditions_status']['buy_ema_cross'] = buy_cross
     base_return['all_conditions_status']['sell_ema_cross'] = sell_cross
+    
+    candles_since_cross = -1 # Default to invalid
 
-    signal_side = 'none'
-    if buy_cross:
+    if buy_cross: # Crossover just happened on the latest candle (-1 based on -2)
+        candles_since_cross = 0
         signal_side = 'up'
-    elif sell_cross:
+    elif sell_cross: # Crossover just happened on the latest candle (-1 based on -2)
+        candles_since_cross = 0
         signal_side = 'down'
+    
+    # If no cross on current, check if it happened on the previous candle
+    if candles_since_cross == -1 and len(ema100) >= 3 and len(ema200) >=3:
+        prev_buy_cross = ema100.iloc[-3] < ema200.iloc[-3] and ema100.iloc[-2] > ema200.iloc[-2]
+        prev_sell_cross = ema100.iloc[-3] > ema200.iloc[-3] and ema100.iloc[-2] < ema200.iloc[-2]
+        if prev_buy_cross:
+            candles_since_cross = 1
+            signal_side = 'up'
+            print(f"{s8_log_prefix} Buy Crossover detected on previous candle (1 new candle since).")
+        elif prev_sell_cross:
+            candles_since_cross = 1
+            signal_side = 'down'
+            print(f"{s8_log_prefix} Sell Crossover detected on previous candle (1 new candle since).")
+
+    base_return['all_conditions_status']['candles_since_cross'] = candles_since_cross
 
     if signal_side == 'none':
-        base_return['error'] = "S8: No EMA crossover detected."
-        # print(f"{s8_log_prefix} No EMA crossover.") # Can be noisy
+        base_return['error'] = "S8: No recent EMA crossover detected."
+        # print(f"{s8_log_prefix} No recent EMA crossover.")
+        return base_return
+
+    if candles_since_cross > 1 : # More than 1 NEW candle has passed since the crossover candle
+        base_return['error'] = f"S8: Signal stale. Crossover happened {candles_since_cross} candles ago (before current). Max 1 allowed."
+        print(f"{s8_log_prefix} {base_return['error']}")
+        base_return['all_conditions_status']['stale_signal_check_passed'] = False
+        base_return['all_conditions_status']['candles_since_cross'] = candles_since_cross # Also record the count
+        base_return['signal'] = 'none' # Invalidate signal
         return base_return
     
-    print(f"{s8_log_prefix} EMA Crossover detected: {signal_side}")
+    base_return['all_conditions_status']['stale_signal_check_passed'] = True
+    base_return['all_conditions_status']['candles_since_cross'] = candles_since_cross # Record the count
+    print(f"{s8_log_prefix} EMA Crossover detected: {signal_side} ({candles_since_cross} new candles since cross). Stale check passed.")
 
     # Clean Zone Check (last 20 candles before the signal candle)
     # We need to check candles from index -2 (candle before signal) down to -21
@@ -2542,6 +2570,24 @@ class BacktestStrategyWrapper(Strategy):
 
             if not signal_side_s8:
                 # print(f"{log_prefix_bt_next} S8 BT: No EMA crossover.")
+                return
+            
+            # Stale Signal Check (Max 1 new candle after crossover candle)
+            # Crossover on current bar means candles_since_cross = 0
+            # Crossover on previous bar means candles_since_cross = 1
+            candles_since_cross_s8_bt = -1
+            if buy_cross_s8 or sell_cross_s8: # Crossover on current bar
+                candles_since_cross_s8_bt = 0
+            elif len(self.s8_ema100) >=3 and len(self.s8_ema200) >=3: # Check previous bar
+                prev_bar_buy_cross = self.s8_ema100[-3] < self.s8_ema200[-3] and self.s8_ema100[-2] > self.s8_ema200[-2]
+                prev_bar_sell_cross = self.s8_ema100[-3] > self.s8_ema200[-3] and self.s8_ema100[-2] < self.s8_ema200[-2]
+                if prev_bar_buy_cross and signal_side_s8 == 'buy': # Ensure current signal direction matches past cross
+                    candles_since_cross_s8_bt = 1
+                elif prev_bar_sell_cross and signal_side_s8 == 'sell':
+                    candles_since_cross_s8_bt = 1
+            
+            if candles_since_cross_s8_bt > 1 or candles_since_cross_s8_bt == -1: # Stale if more than 1 new candle, or no recent cross aligned with signal
+                # print(f"{log_prefix_bt_next} S8 BT: Signal stale or no recent aligned crossover. Candles since cross: {candles_since_cross_s8_bt}")
                 return
 
             # Clean Zone Check (last 20 candles before the current one)
@@ -5932,7 +5978,7 @@ def get_trade_history(symbol_list=None, limit_per_symbol=15): # Default symbol_l
 
     for symbol in symbols_to_fetch_history_for:
         try:
-            trades = client.user_trades(symbol=symbol, limit=limit_per_symbol)
+            trades = client.futures_account_trades(symbol=symbol, limit=limit_per_symbol, recvWindow=6000) # Corrected method and added recvWindow
             if trades: all_trades_formatted.append(f"--- {symbol} (Last {len(trades)}) ---")
             for trade in trades:
                 trade_time = pd.to_datetime(trade['time'], unit='ms')
@@ -5981,7 +6027,7 @@ def get_last_7_days_profit(client_instance):
     print(f"Fetching trades for last 7 days for symbols: {TARGET_SYMBOLS}")
     for symbol in TARGET_SYMBOLS:
         try:
-            trades = client_instance.user_trades(symbol=symbol, startTime=seven_days_ago_ms, recvWindow=6000)
+            trades = client_instance.futures_account_trades(symbol=symbol, startTime=seven_days_ago_ms, recvWindow=6000) # Corrected method
             symbol_profit = 0.0
             for trade in trades:
                 price = float(trade['price'])
@@ -6019,7 +6065,7 @@ def get_overall_profit_loss(client_instance):
         try:
             # Fetch trades in batches if necessary, for now using limit=1000
             # To get ALL trades, one might need to loop with fromId parameter
-            trades = client_instance.user_trades(symbol=symbol, limit=1000, recvWindow=6000) # Max limit is 1000
+            trades = client_instance.futures_account_trades(symbol=symbol, limit=1000, recvWindow=6000) # Max limit is 1000 # Corrected method
             symbol_pnl = 0.0
             for trade in trades:
                 price = float(trade['price'])
@@ -7398,16 +7444,18 @@ def run_bot_logic():
                 pass # Explicitly do nothing here, cooldown remains active.
             
             loop_count +=1
-            wait_message = f"{current_balance_msg_for_status} Scan cycle {loop_count} done. Waiting..."
+            wait_message = f"{current_balance_msg_for_status} Scan cycle {loop_count} done."
             _status_set(wait_message)
             # Update activity status if it was just monitoring due to can_open_new_trade_overall being false
-            if not can_open_new_trade_overall: _activity_set(f"S{current_active_strategy_id}: Conditions not met for new trades. Waiting...")
-            else: _activity_set("Scan cycle complete. Waiting for next cycle...")
+            if not can_open_new_trade_overall and not g_conditional_pending_signals: # Also check if not managing pending signals
+                 _activity_set(f"S{current_active_strategy_id}: Conditions not met for new trades. Cycle {loop_count} done.")
+            elif not g_conditional_pending_signals: # If no pending signals, means scan is truly done for this iteration
+                 _activity_set(f"Scan cycle {loop_count} complete. Restarting scan shortly...")
+            # else: Activity status is likely showing pending signal management
 
-            for _ in range(180): 
-                if not bot_running: break
-                # Removed the specific try-except for ClientError and Exception from here,
-                # as they will be caught by the main loop's new try-except block.
+            # Replace 180-second wait with a short 1-second pause
+            if not bot_running: break
+            sleep(1) 
                 
         except ClientError as ce: # This will now be part of the outer try-except
             err_msg = f"API Error: {ce.error_message if hasattr(ce, 'error_message') and ce.error_message else ce}. Recovering and continuing..."
@@ -7979,8 +8027,8 @@ if __name__ == "__main__":
         sl_pnl_amount_entry, tp_pnl_amount_entry,
         leverage_entry, qty_concurrent_positions_entry,
         local_high_low_lookback_entry, margin_type_isolated_radio, margin_type_cross_radio,
-        
-        trailing_stop_enabled_checkbox, trailing_stop_atr_multiplier_entry # Added new widgets
+        # target_symbols_entry, # Removed
+        trailing_stop_enabled_checkbox, trailing_stop_atr_multiplier_entry
     ]
     params_input_frame.columnconfigure(1, weight=1) 
     params_input_frame.columnconfigure(3, weight=1) 
