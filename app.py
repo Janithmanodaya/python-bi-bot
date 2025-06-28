@@ -163,6 +163,13 @@ strategies = [
         # {"name": "Volume Spike Filter", "id": "s7_volume_filter", "enabled": True, "parameters": []}, # Uses S7_Volume_Lookback, S7_Volume_Multiplier
         # {"name": "RSI Entry Filter", "id": "s7_rsi_entry_filter", "enabled": True, "parameters": []}, # Uses S7_RSI_Period_Filter, S7_RSI_OB/OS_Filter
         {"name": "Enable RSI Fallback Logic", "id": "s7_rsi_fallback", "enabled": True, "parameters": []} # Uses S7_Fallback params
+     ]},
+    {"name": "Advance EMA cross", # Corresponds to STRATEGIES ID 8
+     "parameters": [], # Parameters are fixed for this strategy
+     "conditions": [ # Conditions are implemented directly in the strategy function
+        {"name": "EMA Cross (100/200)", "id": "s8_ema_cross", "enabled": True, "parameters": []},
+        {"name": "Clean Zone (Last 20 Candles)", "id": "s8_clean_zone", "enabled": True, "parameters": []},
+        {"name": "SL Proximity (Max 1% from 100EMA)", "id": "s8_sl_proximity", "enabled": True, "parameters": []}
      ]}
 ]
 
@@ -946,6 +953,192 @@ def strategy_candlestick_patterns_signal(symbol: str) -> dict:
 
     return base_return
 
+# --- Strategy 8: Advance EMA Cross ---
+def strategy_advance_ema_cross(symbol: str) -> dict:
+    base_return = {
+        'signal': 'none', 'sl_price': None, 'tp_price': None, 'error': None,
+        'account_risk_percent': 0.01, # Default risk for this strategy, can be adjusted if made configurable
+        'all_conditions_status': {}, # For UI display of condition checks
+        'signal_candle_timestamp': None
+    }
+    s8_log_prefix = f"[S8 {symbol}]"
+    print(f"{s8_log_prefix} Evaluating strategy...")
+
+    # Parameters
+    ema_short_period = 100
+    ema_long_period = 200
+    clean_zone_candles = 20
+    min_klines_needed = ema_long_period + clean_zone_candles + 5 # EMA long + lookback + buffer
+
+    kl_df = klines(symbol)
+    if kl_df is None or len(kl_df) < min_klines_needed:
+        base_return['error'] = f"S8: Insufficient klines (need {min_klines_needed}, got {len(kl_df) if kl_df is not None else 0})"
+        print(f"{s8_log_prefix} {base_return['error']}")
+        return base_return
+    
+    base_return['signal_candle_timestamp'] = kl_df.index[-1]
+    current_price = kl_df['Close'].iloc[-1]
+    price_precision = get_price_precision(symbol)
+
+    try:
+        ema100 = ta.trend.EMAIndicator(close=kl_df['Close'], window=ema_short_period).ema_indicator()
+        ema200 = ta.trend.EMAIndicator(close=kl_df['Close'], window=ema_long_period).ema_indicator()
+
+        if ema100 is None or ema200 is None or ema100.empty or ema200.empty or \
+           len(ema100) < 2 or len(ema200) < 2:
+            base_return['error'] = "S8: EMA calculation failed or insufficient data"
+            print(f"{s8_log_prefix} {base_return['error']}")
+            return base_return
+
+        last_ema100, prev_ema100 = ema100.iloc[-1], ema100.iloc[-2]
+        last_ema200, prev_ema200 = ema200.iloc[-1], ema200.iloc[-2]
+
+        if pd.isna(last_ema100) or pd.isna(prev_ema100) or pd.isna(last_ema200) or pd.isna(prev_ema200):
+            base_return['error'] = "S8: NaN in EMA values"
+            print(f"{s8_log_prefix} {base_return['error']}")
+            return base_return
+            
+        base_return['all_conditions_status']['last_ema100'] = f"{last_ema100:.{price_precision}f}"
+        base_return['all_conditions_status']['last_ema200'] = f"{last_ema200:.{price_precision}f}"
+
+    except Exception as e:
+        base_return['error'] = f"S8: EMA calculation exception: {str(e)}"
+        print(f"{s8_log_prefix} {base_return['error']}")
+        return base_return
+
+    # EMA Crossover Check
+    buy_cross = prev_ema100 < prev_ema200 and last_ema100 > last_ema200
+    sell_cross = prev_ema100 > prev_ema200 and last_ema100 < last_ema200
+    base_return['all_conditions_status']['buy_ema_cross'] = buy_cross
+    base_return['all_conditions_status']['sell_ema_cross'] = sell_cross
+
+    signal_side = 'none'
+    if buy_cross:
+        signal_side = 'up'
+    elif sell_cross:
+        signal_side = 'down'
+
+    if signal_side == 'none':
+        base_return['error'] = "S8: No EMA crossover detected."
+        # print(f"{s8_log_prefix} No EMA crossover.") # Can be noisy
+        return base_return
+    
+    print(f"{s8_log_prefix} EMA Crossover detected: {signal_side}")
+
+    # Clean Zone Check (last 20 candles before the signal candle)
+    # We need to check candles from index -2 (candle before signal) down to -21
+    if len(kl_df) < clean_zone_candles + 2: # Ensure enough candles for the lookback before signal
+        base_return['error'] = f"S8: Not enough candles for clean zone check (need {clean_zone_candles + 2}, have {len(kl_df)})"
+        print(f"{s8_log_prefix} {base_return['error']}")
+        return base_return
+
+    clean_zone_passed = True
+    # Lookback period: kl_df.iloc[-(clean_zone_candles + 1) : -1] (from 21st candle ago to 2nd candle ago)
+    # EMAs for these candles: ema100.iloc[-(clean_zone_candles + 1) : -1], ema200.iloc[-(clean_zone_candles + 1) : -1]
+    
+    # Ensure EMA series are long enough for this slicing
+    if len(ema100) < clean_zone_candles + 1 or len(ema200) < clean_zone_candles + 1:
+        base_return['error'] = f"S8: EMA series too short for clean zone check (EMA100: {len(ema100)}, EMA200: {len(ema200)}, Need: {clean_zone_candles+1})"
+        print(f"{s8_log_prefix} {base_return['error']}")
+        return base_return
+
+    for i in range(2, clean_zone_candles + 2): # Check candles from index -2 to -21
+        candle_idx = -i
+        candle_high = kl_df['High'].iloc[candle_idx]
+        candle_low = kl_df['Low'].iloc[candle_idx]
+        
+        # Corresponding EMA values for that candle.
+        # Note: ta library EMA values are typically aligned with the close of the candle they represent.
+        # So, ema100.iloc[candle_idx] is the EMA value at the close of kl_df.iloc[candle_idx]
+        ema100_val_at_candle = ema100.iloc[candle_idx]
+        ema200_val_at_candle = ema200.iloc[candle_idx]
+
+        if pd.isna(ema100_val_at_candle) or pd.isna(ema200_val_at_candle):
+            base_return['error'] = f"S8: NaN EMA value in clean zone check at index {candle_idx}"
+            print(f"{s8_log_prefix} {base_return['error']}")
+            return base_return
+
+        # Check if candle low crossed below EMA100 or EMA200
+        # Check if candle high crossed above EMA100 or EMA200
+        # Simplified: if the candle's range [low, high] overlaps with [min(ema100, ema200), max(ema100, ema200)]
+        # More precisely: if low <= emaX <= high for either EMA
+        if (candle_low <= ema100_val_at_candle <= candle_high) or \
+           (candle_low <= ema200_val_at_candle <= candle_high):
+            clean_zone_passed = False
+            print(f"{s8_log_prefix} Clean zone failed. Candle {kl_df.index[candle_idx]} (H:{candle_high}, L:{candle_low}) touched/crossed EMA100({ema100_val_at_candle:.{price_precision}f}) or EMA200({ema200_val_at_candle:.{price_precision}f}).")
+            break
+    
+    base_return['all_conditions_status']['clean_zone_passed'] = clean_zone_passed
+    if not clean_zone_passed:
+        base_return['error'] = "S8: Signal invalid, price touched EMAs in the last 20 candles."
+        return base_return
+    
+    print(f"{s8_log_prefix} Clean zone check passed.")
+
+    # SL/TP Logic
+    entry_price = current_price # Signal candle's close price
+    sl_price = None
+    tp_price = None
+
+    # SL calculation
+    max_sl_distance = entry_price * 0.01
+    
+    if signal_side == 'up': # Buy signal
+        # SL slightly below 100 EMA
+        potential_sl = last_ema100 * (1 - 0.0005) # Example: 0.05% buffer below 100 EMA
+        potential_sl = round(potential_sl, price_precision)
+        
+        if (entry_price - potential_sl) > max_sl_distance:
+            base_return['error'] = f"S8 BUY SL Invalid: Distance to 100EMA SL ({entry_price - potential_sl:.{price_precision}f}) > Max 1% ({max_sl_distance:.{price_precision}f}). EMA100 SL: {potential_sl}"
+            print(f"{s8_log_prefix} {base_return['error']}")
+            base_return['all_conditions_status']['sl_proximity_valid'] = False
+            return base_return
+        if potential_sl >= entry_price : # SL must be below entry for a buy
+             base_return['error'] = f"S8 BUY SL Invalid: EMA100 SL ({potential_sl}) >= Entry Price ({entry_price})."
+             print(f"{s8_log_prefix} {base_return['error']}")
+             base_return['all_conditions_status']['sl_proximity_valid'] = False
+             return base_return
+        sl_price = potential_sl
+    
+    elif signal_side == 'down': # Sell signal
+        # SL slightly above 100 EMA
+        potential_sl = last_ema100 * (1 + 0.0005) # Example: 0.05% buffer above 100 EMA
+        potential_sl = round(potential_sl, price_precision)
+
+        if (potential_sl - entry_price) > max_sl_distance:
+            base_return['error'] = f"S8 SELL SL Invalid: Distance to 100EMA SL ({potential_sl - entry_price:.{price_precision}f}) > Max 1% ({max_sl_distance:.{price_precision}f}). EMA100 SL: {potential_sl}"
+            print(f"{s8_log_prefix} {base_return['error']}")
+            base_return['all_conditions_status']['sl_proximity_valid'] = False
+            return base_return
+        if potential_sl <= entry_price: # SL must be above entry for a sell
+             base_return['error'] = f"S8 SELL SL Invalid: EMA100 SL ({potential_sl}) <= Entry Price ({entry_price})."
+             print(f"{s8_log_prefix} {base_return['error']}")
+             base_return['all_conditions_status']['sl_proximity_valid'] = False
+             return base_return
+        sl_price = potential_sl
+
+    base_return['all_conditions_status']['sl_proximity_valid'] = True
+    print(f"{s8_log_prefix} SL proximity check passed. SL: {sl_price}")
+
+    # TP calculation (1% of open price)
+    if signal_side == 'up':
+        tp_price = round(entry_price * (1 + 0.01), price_precision)
+    elif signal_side == 'down':
+        tp_price = round(entry_price * (1 - 0.01), price_precision)
+    
+    print(f"{s8_log_prefix} TP calculated: {tp_price}")
+
+    # Final signal assignment
+    base_return['signal'] = signal_side
+    base_return['sl_price'] = sl_price
+    base_return['tp_price'] = tp_price
+    # The trailing SL logic (move SL to +0.2% profit when price moves +0.5% profit)
+    # will be handled by the main bot loop's position management, not directly in this signal function.
+    # This function returns the initial SL and TP.
+    
+    print(f"{s8_log_prefix} Strategy evaluation complete. Signal: {base_return['signal']}, SL: {base_return['sl_price']}, TP: {base_return['tp_price']}")
+    return base_return
+
 
 # --- New Exit Strategy Functions ---
 
@@ -1280,6 +1473,16 @@ class BacktestStrategyWrapper(Strategy):
             # Candlestick pattern recognition will be done in next() using helper functions
             # on self.data.df slices. No specific self.I needed for the patterns themselves here.
             # Volume data is self.data.Volume
+
+        elif self.current_strategy_id == 8: # Advance EMA cross
+            print(f"DEBUG BacktestStrategyWrapper.init: Initializing for Strategy ID 8 (Advance EMA Cross)")
+            self.s8_ema100 = self.I(ema_bt, self.data.Close, 100, name='S8_EMA100')
+            self.s8_ema200 = self.I(ema_bt, self.data.Close, 200, name='S8_EMA200')
+            # Generic ATR for potential use, e.g., for SL buffer if not using fixed percentage
+            self.s8_atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, getattr(self, 'ATR_PERIOD', 14), name='S8_ATR')
+            # Ensure a generic self.atr is also available if other parts of the backtester expect it
+            if not hasattr(self, 'atr'):
+                self.atr = self.s8_atr
         
         elif self.current_strategy_id == 2: # Bollinger Band Mean-Reversion
             print(f"DEBUG BacktestStrategyWrapper.init: Initializing for Strategy ID 2 (Bollinger Bands)")
@@ -2310,6 +2513,161 @@ class BacktestStrategyWrapper(Strategy):
             
             else: # Pattern detected but filters failed
                 print(f"{log_prefix_bt_next} S7 BT: Pattern {detected_pattern_name_s7_bt} was detected, but one or more filters (EMA, Volume, RSI) failed. No trade.")
+        
+        elif self.current_strategy_id == 8: # Advance EMA Cross
+            if self.position:
+                return # Already in position
+
+            # Ensure indicators have enough data
+            if len(self.s8_ema100) < 2 or len(self.s8_ema200) < 2:
+                # print(f"{log_prefix_bt_next} S8 BT: Not enough EMA data. EMA100 len: {len(self.s8_ema100)}, EMA200 len: {len(self.s8_ema200)}")
+                return
+
+            current_price_s8 = self.data.Close[-1]
+            last_ema100 = self.s8_ema100[-1]
+            prev_ema100 = self.s8_ema100[-2]
+            last_ema200 = self.s8_ema200[-1]
+            prev_ema200 = self.s8_ema200[-2]
+
+            if any(pd.isna(v) for v in [last_ema100, prev_ema100, last_ema200, prev_ema200, current_price_s8]):
+                # print(f"{log_prefix_bt_next} S8 BT: NaN in critical EMA/price values.")
+                return
+
+            buy_cross_s8 = prev_ema100 < prev_ema200 and last_ema100 > last_ema200
+            sell_cross_s8 = prev_ema100 > prev_ema200 and last_ema100 < last_ema200
+            
+            signal_side_s8 = None
+            if buy_cross_s8: signal_side_s8 = 'buy'
+            elif sell_cross_s8: signal_side_s8 = 'sell'
+
+            if not signal_side_s8:
+                # print(f"{log_prefix_bt_next} S8 BT: No EMA crossover.")
+                return
+
+            # Clean Zone Check (last 20 candles before the current one)
+            clean_zone_candles = 20
+            # Need at least clean_zone_candles + current candle + previous candle for EMAs
+            # self.data.Close includes the current forming candle. len(self.data.Close) is current bar index + 1
+            # We need to check candles from index -2 (candle before signal) down to -(clean_zone_candles + 1)
+            required_len_for_clean_zone = clean_zone_candles + 2 
+            if len(self.data.Close) < required_len_for_clean_zone or \
+               len(self.s8_ema100) < required_len_for_clean_zone or \
+               len(self.s8_ema200) < required_len_for_clean_zone:
+                # print(f"{log_prefix_bt_next} S8 BT: Insufficient data for clean zone check. Data len: {len(self.data.Close)}, EMA100 len: {len(self.s8_ema100)}")
+                return
+
+            clean_zone_passed_s8 = True
+            for i in range(1, clean_zone_candles + 1): # Check from current_bar-1 down to current_bar-20
+                candle_idx_lookback = -1 - i # Index relative to current bar (e.g., -2 is prev, -3 is prev-prev etc.)
+                
+                # Ensure we don't go out of bounds for very short histories (though min_len check above should help)
+                if abs(candle_idx_lookback) >= len(self.data.Close): break 
+
+                candle_high = self.data.High[candle_idx_lookback]
+                candle_low = self.data.Low[candle_idx_lookback]
+                ema100_val_at_candle = self.s8_ema100[candle_idx_lookback]
+                ema200_val_at_candle = self.s8_ema200[candle_idx_lookback]
+
+                if pd.isna(ema100_val_at_candle) or pd.isna(ema200_val_at_candle):
+                    # print(f"{log_prefix_bt_next} S8 BT: NaN EMA in clean zone at index {candle_idx_lookback}.")
+                    clean_zone_passed_s8 = False; break 
+
+                if (candle_low <= ema100_val_at_candle <= candle_high) or \
+                   (candle_low <= ema200_val_at_candle <= candle_high):
+                    clean_zone_passed_s8 = False
+                    # print(f"{log_prefix_bt_next} S8 BT: Clean zone fail at index {candle_idx_lookback}. H:{candle_high}, L:{candle_low}, E100:{ema100_val_at_candle}, E200:{ema200_val_at_candle}")
+                    break
+            
+            if not clean_zone_passed_s8:
+                # print(f"{log_prefix_bt_next} S8 BT: Clean zone check failed.")
+                return
+
+            # SL/TP Calculation
+            entry_price_s8 = current_price_s8
+            sl_price_s8, tp_price_s8 = None, None
+            sl_percentage_for_sizing_s8 = None
+            max_sl_distance_pct = 0.01 # 1%
+
+            if signal_side_s8 == 'buy':
+                # SL slightly below 100 EMA (e.g. 0.05% buffer, or use ATR if desired)
+                # Using a small fixed buffer for simplicity matching live strategy description.
+                # self.s8_atr[-1] could be used for a more dynamic buffer.
+                potential_sl = last_ema100 * (1 - 0.0005) 
+                potential_sl = round(potential_sl, self.PRICE_PRECISION_BT)
+
+                if (entry_price_s8 - potential_sl) > (entry_price_s8 * max_sl_distance_pct):
+                    # print(f"{log_prefix_bt_next} S8 BT BUY: SL distance to 100EMA too large.")
+                    return
+                if potential_sl >= entry_price_s8:
+                    # print(f"{log_prefix_bt_next} S8 BT BUY: Calculated SL {potential_sl} >= entry {entry_price_s8}.")
+                    return
+                sl_price_s8 = potential_sl
+                tp_price_s8 = round(entry_price_s8 * (1 + 0.01), self.PRICE_PRECISION_BT)
+                if entry_price_s8 > 0 and sl_price_s8 > 0: sl_percentage_for_sizing_s8 = (entry_price_s8 - sl_price_s8) / entry_price_s8
+
+            elif signal_side_s8 == 'sell':
+                potential_sl = last_ema100 * (1 + 0.0005)
+                potential_sl = round(potential_sl, self.PRICE_PRECISION_BT)
+
+                if (potential_sl - entry_price_s8) > (entry_price_s8 * max_sl_distance_pct):
+                    # print(f"{log_prefix_bt_next} S8 BT SELL: SL distance to 100EMA too large.")
+                    return
+                if potential_sl <= entry_price_s8:
+                    # print(f"{log_prefix_bt_next} S8 BT SELL: Calculated SL {potential_sl} <= entry {entry_price_s8}.")
+                    return
+                sl_price_s8 = potential_sl
+                tp_price_s8 = round(entry_price_s8 * (1 - 0.01), self.PRICE_PRECISION_BT)
+                if entry_price_s8 > 0 and sl_price_s8 > 0: sl_percentage_for_sizing_s8 = (sl_price_s8 - entry_price_s8) / entry_price_s8
+            
+            if sl_price_s8 is None or tp_price_s8 is None or sl_price_s8 <= 0 or tp_price_s8 <= 0:
+                # print(f"{log_prefix_bt_next} S8 BT: Invalid SL/TP prices after calculation. SL:{sl_price_s8}, TP:{tp_price_s8}")
+                return
+
+            # Trade Sizing
+            final_trade_size_s8 = 0.02 # Default
+            if sl_percentage_for_sizing_s8 and sl_percentage_for_sizing_s8 > 0 and self.account_risk_percent_bt > 0:
+                calculated_size_s8 = self.account_risk_percent_bt / sl_percentage_for_sizing_s8
+                final_trade_size_s8 = min(calculated_size_s8, 1.0) # Cap at 100% of cash
+                # print(f"{log_prefix_bt_next} S8 Sizing: AccRisk={self.account_risk_percent_bt*100:.2f}%, SL%={sl_percentage_for_sizing_s8*100:.2f}%, CalcSize={calculated_size_s8:.4f}, FinalSize={final_trade_size_s8:.4f}")
+            
+            # Place Order
+            if signal_side_s8 == 'buy':
+                # print(f"{log_prefix_bt_next} S8 BT BUY Order: Entry={entry_price_s8}, SL={sl_price_s8}, TP={tp_price_s8}, Size={final_trade_size_s8}")
+                self.buy(sl=sl_price_s8, tp=tp_price_s8, size=final_trade_size_s8)
+            elif signal_side_s8 == 'sell':
+                # print(f"{log_prefix_bt_next} S8 BT SELL Order: Entry={entry_price_s8}, SL={sl_price_s8}, TP={tp_price_s8}, Size={final_trade_size_s8}")
+                self.sell(sl=sl_price_s8, tp=tp_price_s8, size=final_trade_size_s8)
+            
+            # After placing order, or if already in position, check for S8 trailing SL
+        elif self.current_strategy_id == 8 and self.position: # Check if a Strategy 8 trade is active
+            trade = self.trades[-1]
+            entry_price_s8_active = trade.entry_price 
+            # TP is 1% of entry, so profit target distance is entry_price * 0.01
+            profit_target_distance_s8 = abs(entry_price_s8_active * 0.01) 
+            
+            current_price_s8_active = self.data.Close[-1]
+            current_profit_s8 = 0
+            
+            if trade.is_long:
+                current_profit_s8 = current_price_s8_active - entry_price_s8_active
+            elif trade.is_short:
+                current_profit_s8 = entry_price_s8_active - current_price_s8_active
+
+            # Check if price moved 0.5% in profit (50% of the 1% TP target)
+            if current_profit_s8 >= (profit_target_distance_s8 * 0.5):
+                new_sl_s8 = None
+                if trade.is_long:
+                    new_sl_s8 = round(entry_price_s8_active * (1 + 0.002), self.PRICE_PRECISION_BT) # Lock 0.2% profit
+                    # Ensure new SL is better and valid
+                    if new_sl_s8 > trade.sl and new_sl_s8 < current_price_s8_active:
+                        print(f"{log_prefix_bt_next} S8 BT TRAIL SL (LONG): Profit {current_profit_s8:.{self.PRICE_PRECISION_BT}f} >= 0.5% target. Old SL: {trade.sl}, New SL: {new_sl_s8}")
+                        trade.sl = new_sl_s8
+                elif trade.is_short:
+                    new_sl_s8 = round(entry_price_s8_active * (1 - 0.002), self.PRICE_PRECISION_BT) # Lock 0.2% profit
+                    # Ensure new SL is better and valid
+                    if new_sl_s8 < trade.sl and new_sl_s8 > current_price_s8_active:
+                        print(f"{log_prefix_bt_next} S8 BT TRAIL SL (SHORT): Profit {current_profit_s8:.{self.PRICE_PRECISION_BT}f} >= 0.5% target. Old SL: {trade.sl}, New SL: {new_sl_s8}")
+                        trade.sl = new_sl_s8
 
 
         # else: # Other strategies not yet updated for this new SL/TP structure
@@ -2570,7 +2928,7 @@ sl_tp_mode_combobox = None
 leverage_entry = None
 qty_concurrent_positions_entry = None
 local_high_low_lookback_entry = None
-target_symbols_entry = None # For Target Symbols CSV Entry
+# target_symbols_entry = None # For Target Symbols CSV Entry - REMOVED
 margin_type_isolated_radio = None # For Margin Type Radio
 margin_type_cross_radio = None # For Margin Type Radio
 strategy_radio_buttons = [] # List to hold strategy radio buttons
@@ -2998,7 +3356,8 @@ STRATEGIES = {
     4: "MACD Divergence + Pivot-Point",
     5: "New RSI-Based Strategy", # New strategy added
     6: "Market Structure S/D", # New strategy for market structure and supply/demand
-    7: "Candlestick Patterns" # Strategy 7
+    7: "Candlestick Patterns", # Strategy 7
+    8: "Advance EMA cross" # Strategy 8
 }
 ACTIVE_STRATEGY_ID = 0 # Default to original
 
@@ -3718,15 +4077,34 @@ def get_balance_usdt():
 
 def get_tickers_usdt():
     global client
-    if not client: return []
-    tickers = []
+    if not client: 
+        print("Error: Client not initialized in get_tickers_usdt.")
+        return []
+    
+    usdt_futures_symbols = []
     try:
-        resp = client.ticker_price()
-        for elem in resp:
-            if 'USDT' in elem['symbol']: tickers.append(elem['symbol'])
-    except ClientError as error: print(f"Error get_tickers_usdt: {error}")
-    except Exception as e: print(f"Unexpected error get_tickers_usdt: {e}")
-    return tickers
+        exchange_info = client.exchange_info()
+        if exchange_info and 'symbols' in exchange_info:
+            for item in exchange_info['symbols']:
+                # Check for USDT-margined perpetual futures
+                if item.get('contractType') == 'PERPETUAL' and \
+                   item.get('quoteAsset') == 'USDT' and \
+                   item.get('status') == 'TRADING': # Ensure the symbol is actively trading
+                    usdt_futures_symbols.append(item['symbol'])
+            
+            if not usdt_futures_symbols:
+                print("No USDT perpetual futures symbols found or exchange_info format unexpected.")
+            else:
+                print(f"Found {len(usdt_futures_symbols)} USDT perpetual futures symbols.")
+        else:
+            print("Error: Could not fetch or parse exchange_info for symbols.")
+            
+    except ClientError as error:
+        print(f"ClientError in get_tickers_usdt (exchange_info): {error}")
+    except Exception as e:
+        print(f"Unexpected error in get_tickers_usdt (exchange_info): {e}")
+        
+    return usdt_futures_symbols
 
 def klines(symbol):
     global client
@@ -5530,14 +5908,29 @@ def format_positions_for_display(positions_data_list, open_orders_by_symbol=None
         )
     return formatted_strings
 
-def get_trade_history(symbol_list=['BTCUSDT', 'ETHUSDT'], limit_per_symbol=15):
+def get_trade_history(symbol_list=None, limit_per_symbol=15): # Default symbol_list to None
     global client, status_var, root
     if not client: return ["Client not initialized. Cannot fetch trade history."]
 
     all_trades_formatted = []
-    if not isinstance(symbol_list, list): symbol_list = [symbol_list]
+    
+    symbols_to_fetch_history_for = []
+    if symbol_list: # If a specific list is provided, use it
+        if not isinstance(symbol_list, list):
+            symbols_to_fetch_history_for = [symbol_list]
+        else:
+            symbols_to_fetch_history_for = symbol_list
+    else: # If no list provided, fetch dynamic symbols
+        print("get_trade_history: No specific symbol_list provided, fetching dynamic USDT futures symbols.")
+        symbols_to_fetch_history_for = get_tickers_usdt()
+        if not symbols_to_fetch_history_for:
+            return ["No symbols found to fetch trade history (dynamic fetch failed or returned empty)."]
+        # Optionally, limit the number of symbols for history if get_tickers_usdt() returns too many
+        # For example: symbols_to_fetch_history_for = symbols_to_fetch_history_for[:20] # Limit to first 20
+        print(f"get_trade_history: Will fetch history for {len(symbols_to_fetch_history_for)} dynamically found symbols (showing first few: {symbols_to_fetch_history_for[:5]}).")
 
-    for symbol in symbol_list:
+
+    for symbol in symbols_to_fetch_history_for:
         try:
             trades = client.user_trades(symbol=symbol, limit=limit_per_symbol)
             if trades: all_trades_formatted.append(f"--- {symbol} (Last {len(trades)}) ---")
@@ -6520,8 +6913,21 @@ def run_bot_logic():
             
             # --- Signal Detection and Pending State Initiation (Part 1) ---
             if can_open_new_trade_overall : 
-                symbols_to_check = TARGET_SYMBOLS 
-                print(f"DEBUG: Symbols to check for trading: {symbols_to_check}") # Debug log for symbols
+                _activity_set("Fetching available USDT futures symbols...")
+                symbols_to_check = get_tickers_usdt() # Dynamically fetch symbols
+                sleep(0.2) # Small delay after API call
+
+                if not symbols_to_check:
+                    _activity_set("No symbols found or API error. Retrying cycle.")
+                    print("Warning: get_tickers_usdt() returned no symbols. Bot will pause and retry.")
+                    for _ in range(60): # Wait for 60 seconds before retrying cycle
+                        if not bot_running: break
+                        sleep(1)
+                    if not bot_running: break
+                    continue # Skip to next iteration of the main while loop
+
+                print(f"DEBUG: Symbols to check for trading ({len(symbols_to_check)}): {symbols_to_check[:10]}...") # Log first 10
+                
                 for sym_to_check in symbols_to_check:
                     if not bot_running: break
 
@@ -6735,6 +7141,63 @@ def run_bot_logic():
                             sleep(1) 
                         else: # No signal from S7 after evaluation
                             _activity_set(f"S7: No signal for {sym_to_check}. Next..."); sleep(0.1)
+                    
+                    elif current_active_strategy_id == 8: # Advance EMA Cross
+                        print(f"DEBUG: S8: Active for symbol: {sym_to_check}")
+                        _activity_set(f"S8: Scanning {sym_to_check}...")
+                        signal_data_s8 = strategy_advance_ema_cross(sym_to_check)
+                        print(f"DEBUG: S8: Data for {sym_to_check}: {signal_data_s8}")
+
+                        if root and root.winfo_exists() and conditions_text_widget:
+                            param_display_content_s8 = get_formatted_strategy_parameters_and_conditions(
+                                strategy_id=current_active_strategy_id,
+                                symbol=sym_to_check,
+                                conditions_data=signal_data_s8.get('all_conditions_status'),
+                                error_message=signal_data_s8.get('error')
+                            )
+                            root.after(0, update_text_widget_content, conditions_text_widget, param_display_content_s8)
+
+                        if signal_data_s8.get('error') and signal_data_s8.get('signal', 'none') == 'none':
+                            # Avoid logging common "no signal" messages too verbosely
+                            if signal_data_s8['error'] not in ["S8: No EMA crossover detected.", "S8: Signal invalid, price touched EMAs in the last 20 candles."]:
+                                print(f"S8 Error ({sym_to_check}): {signal_data_s8['error']}")
+                            sleep(0.1); continue
+
+                        current_signal_s8 = signal_data_s8.get('signal', 'none')
+                        if current_signal_s8 in ['up', 'down']:
+                            print(f"S8: {current_signal_s8.upper()} signal for {sym_to_check}. Ordering...")
+                            _status_set(f"S8: Ordering {sym_to_check} ({current_signal_s8.upper()})...")
+                            set_mode(sym_to_check, margin_type_setting); sleep(0.1)
+                            set_leverage(sym_to_check, leverage); sleep(0.1)
+                            
+                            order_outcome_s8 = open_order(sym_to_check, current_signal_s8, 
+                                       strategy_sl=signal_data_s8.get('sl_price'), 
+                                       strategy_tp=signal_data_s8.get('tp_price'), 
+                                       strategy_account_risk_percent=signal_data_s8.get('account_risk_percent'))
+                            
+                            if order_outcome_s8:
+                                g_active_positions_details[sym_to_check] = {
+                                    'sl_order_id': order_outcome_s8.get('sl_order_id'),
+                                    'sl_price': order_outcome_s8.get('sl_price'),
+                                    'tp_order_id': order_outcome_s8.get('tp_order_id'),
+                                    'tp_price': order_outcome_s8.get('tp_price'),
+                                    'entry_price': order_outcome_s8.get('entry_price'),
+                                    'qty': order_outcome_s8.get('qty'),
+                                    'side': order_outcome_s8.get('side'),
+                                    'entry_order_id': order_outcome_s8.get('entry_order_id'),
+                                    'strategy_id': 8, # Strategy ID for S8
+                                    'entry_candle_timestamp': signal_data_s8.get('signal_candle_timestamp'), # For time-based exits
+                                    'initial_tp_price': order_outcome_s8.get('tp_price') # For candlestick trailing SL
+                                }
+                                print(f"DEBUG: Stored in g_active_positions_details for S8 {sym_to_check}: {g_active_positions_details[sym_to_check]}")
+                                _activity_set(f"S8: Trade initiated for {sym_to_check}.")
+                                # S8, like other direct-trade strategies, might allow multiple trades across symbols.
+                                sleep(1) 
+                            else: # Order placement failed
+                                _activity_set(f"S8: Order failed for {sym_to_check}.")
+                                sleep(0.1) # Small delay if order failed
+                        else: # No signal from S8 after evaluation
+                            _activity_set(f"S8: No signal for {sym_to_check}. Next..."); sleep(0.1)
 
                     elif current_active_strategy_id == 4:
                         if strategy4_active_trade_info['symbol'] is not None:
@@ -7047,17 +7510,9 @@ def apply_settings():
             messagebox.showerror("Settings Error", f"Invalid strategy ID selected: {selected_id}")
             return False
 
-        # Target Symbols
-        raw_symbols_str = target_symbols_var.get()
-        if not raw_symbols_str.strip():
-            messagebox.showerror("Settings Error", "Target Symbols list cannot be empty.")
-            return False
-        
-        symbols_list = [s.strip().upper() for s in raw_symbols_str.split(',') if s.strip()]
-        if not symbols_list: # Handles case where input was just commas or whitespace
-            messagebox.showerror("Settings Error", "Target Symbols list cannot be empty after parsing. Ensure valid symbols separated by commas.")
-            return False
-        TARGET_SYMBOLS = symbols_list
+        # Target Symbols - REMOVED UI INPUT. Bot will use dynamically fetched symbols.
+        # The global TARGET_SYMBOLS might still be used by get_trade_history or other parts initially.
+        # For run_bot_logic, symbols are fetched dynamically.
 
         # Account Risk Percent
         arp_val = float(account_risk_percent_var.get())
@@ -7508,12 +7963,7 @@ if __name__ == "__main__":
     margin_type_cross_radio = ttk.Radiobutton(margin_type_frame, text="CROSS", variable=margin_type_var, value="CROSS")
     margin_type_cross_radio.pack(side=tk.LEFT, padx=(5,0))
 
-
-    # Row 5: Target Symbols Entry
-    ttk.Label(params_input_frame, text="Target Symbols (CSV):").grid(row=5, column=0, padx=2, pady=2, sticky='w')
-    target_symbols_var = tk.StringVar(value=",".join(TARGET_SYMBOLS))
-    target_symbols_entry = ttk.Entry(params_input_frame, textvariable=target_symbols_var, width=40) 
-    target_symbols_entry.grid(row=5, column=1, columnspan=3, padx=2, pady=2, sticky='we')
+    # Row 5 is now free due to removal of Target Symbols Entry
 
     # Row 6: Trailing Stop Configuration
     trailing_stop_enabled_checkbox = ttk.Checkbutton(params_input_frame, text="Enable Trailing Stop", variable=trailing_stop_enabled_var)
@@ -7529,7 +7979,7 @@ if __name__ == "__main__":
         sl_pnl_amount_entry, tp_pnl_amount_entry,
         leverage_entry, qty_concurrent_positions_entry,
         local_high_low_lookback_entry, margin_type_isolated_radio, margin_type_cross_radio,
-        target_symbols_entry,
+        
         trailing_stop_enabled_checkbox, trailing_stop_atr_multiplier_entry # Added new widgets
     ]
     params_input_frame.columnconfigure(1, weight=1) 
@@ -7935,7 +8385,7 @@ if __name__ == "__main__":
             sl_pnl_amount_entry, tp_pnl_amount_entry,
             leverage_entry, qty_concurrent_positions_entry,
             local_high_low_lookback_entry, margin_type_isolated_radio, margin_type_cross_radio,
-            target_symbols_entry,
+    # target_symbols_entry, # REMOVED from params_widgets
             trailing_stop_enabled_checkbox, trailing_stop_atr_multiplier_entry # Added new widgets
         ]
         params_input_frame.columnconfigure(1, weight=1) 
