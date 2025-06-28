@@ -2996,22 +2996,79 @@ def update_conditions_display_content(symbol, conditions_data, error_message):
     if not (conditions_text_widget and root and root.winfo_exists() and conditions_text_widget.winfo_exists()): # Check root as well
         return
 
-    conditions_text_widget.config(state=tk.NORMAL)
-    conditions_text_widget.delete('1.0', tk.END)
+    # This function is now simplified as formatting is handled by get_formatted_strategy_parameters_and_conditions
+    # and content_list is passed to update_text_widget_content.
+    # The call to this function from run_bot_logic was already replaced.
+    # This function can be removed or kept if there are other simpler use cases for it.
+    # For now, let's assume it's still used by some parts for simple condition display.
+    # However, the plan is to make the new display richer.
+
+    # Fallback formatting if conditions_data is passed directly (old usage)
+    display_list = []
+    if isinstance(conditions_data, list) and all(isinstance(item, str) for item in conditions_data):
+        # This means get_formatted_strategy_parameters_and_conditions was already called
+        display_list = conditions_data
+    else: # Original formatting logic if raw conditions_data dict is passed
+        display_list.append(f"Symbol: {symbol}")
+        display_list.append("--------------------")
+        if error_message:
+            display_list.append(f"Error: {error_message}")
+        elif conditions_data:
+            for cond, status in conditions_data.items():
+                formatted_cond_name = cond.replace('_', ' ').title()
+                display_list.append(f"{formatted_cond_name}: {status}")
+        else:
+            display_list.append("No conditions data available.")
+
+    update_text_widget_content(conditions_text_widget, display_list)
+
+
+# --- New Helper function to format strategy parameters and conditions ---
+def get_formatted_strategy_parameters_and_conditions(strategy_id, symbol, conditions_data, error_message):
+    global STRATEGIES, current_strategy_active_params, strategies # strategies list for param definitions
+
+    content_lines = []
+    strategy_name = STRATEGIES.get(strategy_id, "Unknown Strategy")
+    content_lines.append(f"Strategy: {strategy_name} (ID: {strategy_id})")
+    content_lines.append(f"Symbol: {symbol}")
+    content_lines.append("--- Parameters ---")
+
+    # Fetch and display parameters for the strategy_id
+    # Parameters are stored in current_strategy_active_params if it's the globally selected ACTIVE_STRATEGY_ID
+    # Or from the `strategies` definition list for defaults if it's a different strategy_id being evaluated (e.g. by pending signals)
     
-    display_text = f"Symbol: {symbol}\n--------------------\n"
+    params_to_display = {}
+    if strategy_id == ACTIVE_STRATEGY_ID: # If it's the currently active strategy in UI
+        params_to_display = current_strategy_active_params
+    else: # For other strategies (e.g. if a pending signal for non-active strategy is being evaluated)
+        strategy_def = next((s for s in strategies if s["name"] == strategy_name), None)
+        if strategy_def and strategy_def["parameters"]:
+            for param_info in strategy_def["parameters"]:
+                params_to_display[param_info["name"]] = param_info["default"] # Show defaults
+
+    if params_to_display:
+        for p_name, p_val in params_to_display.items():
+            content_lines.append(f"{p_name.replace('_', ' ').title()}: {p_val}")
+    else:
+        content_lines.append("No parameters loaded or defined for this strategy.")
+
+    content_lines.append("--- Conditions ---")
     if error_message:
-        display_text += f"Error: {error_message}\n"
+        content_lines.append(f"Error: {error_message}")
     elif conditions_data:
         for cond, status in conditions_data.items():
-            # Format condition name: replace underscores with spaces and title case
             formatted_cond_name = cond.replace('_', ' ').title()
-            display_text += f"{formatted_cond_name}: {status}\n"
+            # Try to format boolean status nicely
+            if isinstance(status, bool):
+                status_str = "✅ True" if status else "❌ False"
+            else:
+                status_str = str(status) # Handle non-boolean values (e.g. counts, numbers)
+            content_lines.append(f"{formatted_cond_name}: {status_str}")
     else:
-        display_text += "No conditions data available.\n"
-        
-    conditions_text_widget.insert(tk.END, display_text)
-    conditions_text_widget.config(state=tk.DISABLED)
+        content_lines.append("No conditions data available or strategy not evaluated yet.")
+    
+    return content_lines
+
 
 # --- SuperTrend Calculation Functions ---
 def calculate_supertrend_manual(kl_df, atr_period=10, multiplier=1.5):
@@ -6332,8 +6389,14 @@ def run_bot_logic():
                                  conditions_for_full_signal_threshold = g_conditional_pending_signals[key]['conditions_for_full_signal_threshold']
                     remaining_seconds = max(0, 300 - time_elapsed_seconds)
                     _activity_set(f"S{strategy_id} {symbol} ({side}): {current_met_count}/{conditions_for_full_signal_threshold} cond. {int(remaining_seconds)}s left.")
-                    if root and root.winfo_exists() and current_strategy_output:
-                         root.after(0, update_conditions_display_content, symbol, current_strategy_output.get('all_conditions_status'), current_strategy_output.get('error'))
+                    if root and root.winfo_exists() and current_strategy_output and conditions_text_widget:
+                        param_display_content_pending = get_formatted_strategy_parameters_and_conditions(
+                            strategy_id=strategy_id, # Use item's strategy_id
+                            symbol=symbol,
+                            conditions_data=current_strategy_output.get('all_conditions_status'),
+                            error_message=current_strategy_output.get('error')
+                        )
+                        root.after(0, update_text_widget_content, conditions_text_widget, param_display_content_pending)
                     if current_met_count >= conditions_for_full_signal_threshold and not current_strategy_output.get('error'):
                         print(f"CONFIRMED: {STRATEGIES[strategy_id]} for {symbol} ({side}). Met {current_met_count}/{conditions_for_full_signal_threshold}.")
                         _status_set(f"Ordering {symbol} ({side}) via {STRATEGIES[strategy_id]}...")
@@ -6414,8 +6477,14 @@ def run_bot_logic():
                         signal_data_s5 = strategy_rsi_enhanced(sym_to_check)
                         print(f"DEBUG: S5: Data for {sym_to_check}: {signal_data_s5}")
 
-                        if root and root.winfo_exists():
-                            root.after(0, update_conditions_display_content, sym_to_check, signal_data_s5.get('all_conditions_status'), signal_data_s5.get('error'))
+                        if root and root.winfo_exists() and conditions_text_widget:
+                            param_display_content_s5 = get_formatted_strategy_parameters_and_conditions(
+                                strategy_id=current_active_strategy_id,
+                                symbol=sym_to_check,
+                                conditions_data=signal_data_s5.get('all_conditions_status'),
+                                error_message=signal_data_s5.get('error')
+                            )
+                            root.after(0, update_text_widget_content, conditions_text_widget, param_display_content_s5)
                         
                         if signal_data_s5.get('error'):
                             print(f"S5 Error ({sym_to_check}): {signal_data_s5['error']}")
@@ -6464,8 +6533,14 @@ def run_bot_logic():
                         signal_data_s6 = strategy_market_structure_sd(sym_to_check) # Call the new strategy function
                         print(f"DEBUG: S6: Data for {sym_to_check}: {signal_data_s6}")
 
-                        if root and root.winfo_exists(): # Update UI with conditions
-                            root.after(0, update_conditions_display_content, sym_to_check, signal_data_s6.get('all_conditions_status'), signal_data_s6.get('error'))
+                        if root and root.winfo_exists() and conditions_text_widget: # Update UI with conditions
+                            param_display_content_s6 = get_formatted_strategy_parameters_and_conditions(
+                                strategy_id=current_active_strategy_id,
+                                symbol=sym_to_check,
+                                conditions_data=signal_data_s6.get('all_conditions_status'),
+                                error_message=signal_data_s6.get('error')
+                            )
+                            root.after(0, update_text_widget_content, conditions_text_widget, param_display_content_s6)
                         
                         if signal_data_s6.get('error'):
                             # Error message already printed by strategy_market_structure_sd if it's significant
@@ -6521,8 +6596,14 @@ def run_bot_logic():
                         signal_data_s7 = strategy_candlestick_patterns_signal(sym_to_check)
                         print(f"DEBUG: S7: Data for {sym_to_check}: {signal_data_s7}")
 
-                        if root and root.winfo_exists(): # Update UI with conditions
-                            root.after(0, update_conditions_display_content, sym_to_check, signal_data_s7.get('all_conditions_status'), signal_data_s7.get('error'))
+                        if root and root.winfo_exists() and conditions_text_widget: # Update UI with conditions
+                            param_display_content_s7 = get_formatted_strategy_parameters_and_conditions(
+                                strategy_id=current_active_strategy_id,
+                                symbol=sym_to_check,
+                                conditions_data=signal_data_s7.get('all_conditions_status'),
+                                error_message=signal_data_s7.get('error')
+                            )
+                            root.after(0, update_text_widget_content, conditions_text_widget, param_display_content_s7)
                         
                         # Process S7 error: only continue to order if signal is present, even if there's a non-critical error string
                         # Critical errors (like insufficient klines) should already return signal='none' from the strategy.
@@ -6585,8 +6666,14 @@ def run_bot_logic():
                         current_signal_s4 = signal_data_s4.get('signal', 'none')
                         error_message_s4 = signal_data_s4.get('error')
 
-                        if root and root.winfo_exists():
-                            root.after(0, update_conditions_display_content, sym_to_check, signal_data_s4.get('conditions'), error_message_s4)
+                        if root and root.winfo_exists() and conditions_text_widget:
+                            param_display_content_s4 = get_formatted_strategy_parameters_and_conditions(
+                                strategy_id=current_active_strategy_id,
+                                symbol=sym_to_check,
+                                conditions_data=signal_data_s4.get('conditions'), # S4 uses 'conditions' key
+                                error_message=error_message_s4
+                            )
+                            root.after(0, update_text_widget_content, conditions_text_widget, param_display_content_s4)
 
                         if error_message_s4:
                             print(f"Error from Strategy 4 for {sym_to_check}: {error_message_s4}")
@@ -6679,11 +6766,23 @@ def run_bot_logic():
                         if not strategy_output: 
                             sleep(0.1); continue
 
-                        if root and root.winfo_exists():
-                            root.after(0, update_conditions_display_content, sym_to_check, strategy_output.get('all_conditions_status'), strategy_output.get('error'))
+                        if root and root.winfo_exists() and conditions_text_widget: # Ensure conditions_text_widget exists
+                            # Prepare detailed content for the new display
+                            # This will include strategy parameters and condition states
+                            param_display_content = get_formatted_strategy_parameters_and_conditions(
+                                strategy_id=current_active_strategy_id,
+                                symbol=sym_to_check,
+                                conditions_data=strategy_output.get('all_conditions_status'),
+                                error_message=strategy_output.get('error')
+                            )
+                            root.after(0, update_text_widget_content, conditions_text_widget, param_display_content)
+                        # The old update_conditions_display_content might be too simple. 
+                        # We need a new function or enhance the existing one to show parameters as well.
+                        # For now, let's assume update_conditions_display_content is enhanced or replaced by update_text_widget_content with formatted data.
 
                         if strategy_output.get('error'):
                             print(f"Error from {STRATEGIES[current_active_strategy_id]} for {sym_to_check}: {strategy_output['error']}")
+                            # Display error in the conditions widget as well, handled by get_formatted_strategy_parameters_and_conditions
                             sleep(0.1); continue
 
                         side_to_consider = None
@@ -7434,14 +7533,23 @@ if __name__ == "__main__":
     positions_text_widget = scrolledtext.ScrolledText(positions_display_frame, height=6, width=70, state=tk.DISABLED, wrap=tk.WORD); positions_text_widget.pack(pady=5, padx=5, fill="both", expand=True)
     history_display_frame = ttk.LabelFrame(data_frame, text="Recent Trade History (BTC, ETH)"); history_display_frame.pack(pady=(2,5), padx=5, fill="both", expand=True)
     history_text_widget = scrolledtext.ScrolledText(history_display_frame, height=10, width=70, state=tk.DISABLED, wrap=tk.WORD); history_text_widget.pack(pady=5, padx=5, fill="both", expand=True)
-    
-    conditions_frame = ttk.LabelFrame(data_frame, text="Signal Conditions")
-    conditions_frame.pack(pady=5, padx=5, fill="both", expand=True)
-    conditions_text_widget = scrolledtext.ScrolledText(conditions_frame, height=8, width=70, state=tk.DISABLED, wrap=tk.WORD)
-    conditions_text_widget.pack(pady=5, padx=5, fill="both", expand=True)
 
-    backtest_results_frame = ttk.LabelFrame(backtesting_frame, text="Backtest Results") 
-    backtest_results_frame.pack(pady=(2,5), padx=5, fill="both", expand=True) 
+    # Frame for Live Strategy Conditions Display
+    live_conditions_display_frame = ttk.LabelFrame(data_frame, text="Live Strategy Conditions & Parameters")
+    live_conditions_display_frame.pack(pady=5, padx=5, fill="both", expand=True)
+    # Renaming conditions_text_widget to live_conditions_text_widget for clarity
+    live_conditions_text_widget = scrolledtext.ScrolledText(live_conditions_display_frame, height=10, width=70, state=tk.DISABLED, wrap=tk.WORD)
+    live_conditions_text_widget.pack(pady=5, padx=5, fill="both", expand=True)
+    # The old conditions_text_widget is now live_conditions_text_widget.
+    # The old conditions_frame is now live_conditions_display_frame.
+    # The variable conditions_text_widget will be assigned to this new widget.
+    # This ensures that existing calls to update_conditions_display_content will target this new widget.
+    #globalconditions_text_widget 
+    conditions_text_widget = live_conditions_text_widget
+
+
+    backtest_results_frame = ttk.LabelFrame(backtesting_frame, text="Backtest Results")
+    backtest_results_frame.pack(pady=(2,5), padx=5, fill="both", expand=True)
     backtest_results_text_widget = scrolledtext.ScrolledText(backtest_results_frame, height=10, width=70, state=tk.DISABLED, wrap=tk.WORD)
     backtest_results_text_widget.pack(pady=5, padx=5, fill="both", expand=True)
 
