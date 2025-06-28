@@ -8457,21 +8457,6 @@ def run_optuna_optimization_command():
         if optuna_run_button: optuna_run_button.config(state=tk.NORMAL)
 
 
-    def launch_dashboard():
-        # This function will be called when the "View Dashboard" button is clicked.
-        # It should open the dashboard URL in the default web browser.
-        # The dashboard.py script needs to be running for this to work.
-        # Users will need to run `python dashboard.py` separately.
-        dashboard_url = "http://127.0.0.1:8050/"
-        try:
-            webbrowser.open_new_tab(dashboard_url)
-            print(f"Attempted to open dashboard at {dashboard_url}")
-            messagebox.showinfo("Dashboard", f"Attempting to open dashboard at {dashboard_url}.\nEnsure dashboard.py is running.")
-        except Exception as e:
-            print(f"Error opening dashboard: {e}")
-            messagebox.showerror("Dashboard Error", f"Could not open web browser: {e}")
-
-
     def on_closing():
         global bot_running, bot_thread, root
         if bot_running:
@@ -8503,6 +8488,20 @@ def run_streamlit_ui():
                     st.text(param)
             else:
                 st.text("No parameters defined for this strategy.")
+
+def launch_dashboard():
+    # This function will be called when the "View Dashboard" button is clicked.
+    # It should open the dashboard URL in the default web browser.
+    # The dashboard.py script needs to be running for this to work.
+    # Users will need to run `python dashboard.py` separately.
+    dashboard_url = "http://127.0.0.1:8050/"
+    try:
+        webbrowser.open_new_tab(dashboard_url)
+        print(f"Attempted to open dashboard at {dashboard_url}")
+        messagebox.showinfo("Dashboard", f"Attempting to open dashboard at {dashboard_url}.\nEnsure dashboard.py is running.")
+    except Exception as e:
+        print(f"Error opening dashboard: {e}")
+        messagebox.showerror("Dashboard Error", f"Could not open web browser: {e}")
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == 'streamlit':
@@ -8583,7 +8582,7 @@ if __name__ == "__main__":
         backtest_trailing_stop_atr_multiplier_var = tk.StringVar(value="1.5") # Default ATR multiplier for backtesting
 
     # Optuna Progress Var
-    optuna_progress_var = tk.StringVar(value="Optuna: Idle") # Initialized here
+        optuna_progress_var = tk.StringVar(value="Optuna: Idle") # Initialized here
 
         backtest_selected_strategy_var = tk.StringVar()
 
