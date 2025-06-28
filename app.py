@@ -4,14 +4,10 @@ import streamlit as st
 import sys # Import sys for command-line arguments
 import threading
 from time import sleep
-import webbrowser # Added for opening web browser
 from binance.um_futures import UMFutures
 from binance.error import ClientError
 import ta
 import pandas as pd
-import os # Added for path operations
-import pickle # Added for saving/loading stats objects
-import optuna # Added for hyperparameter optimization
 
 # This list's "name" must match the values in the STRATEGIES dictionary (ID-to-name map)
 # The order here doesn't strictly matter as long as names are unique and findable.
@@ -471,85 +467,6 @@ def supertrend_numerical_bt(high_series, low_series, close_series, atr_period, m
     return numerical_signal.values # self.I expects a numpy array or list
 
 # --- Candlestick Pattern Helper Functions (Strategy 7) ---
-
-# --- BEGIN CORE STRATEGY ENHANCEMENT HELPER FUNCTIONS ---
-def validate_confluence(rsi_value: float, ema_value: float, current_price: float) -> str | None:
-    """
-    Checks for confluence between RSI, EMA, and price.
-    Args:
-        rsi_value: The current RSI value.
-        ema_value: The current EMA (e.g., EMA50) value.
-        current_price: The current closing price.
-    Returns:
-        "Bullish Confluence", "Bearish Confluence", or None.
-    """
-    if rsi_value < 30 and current_price > ema_value:
-        return "Bullish Confluence"
-    elif rsi_value > 70 and current_price < ema_value:
-        return "Bearish Confluence"
-    return None
-
-def is_volume_valid(kl_df: pd.DataFrame, threshold_multiplier: float = 2.0) -> bool:
-    """
-    Checks if the current volume is significantly higher than the recent average volume.
-    Args:
-        kl_df: Pandas DataFrame with kline data, must include 'Volume'.
-        threshold_multiplier: Multiplier for average volume to define "significant".
-    Returns:
-        True if volume is valid (high), False otherwise.
-    """
-    if kl_df is None or 'Volume' not in kl_df.columns or len(kl_df['Volume']) < 21: # Need 20 for rolling mean + 1 current
-        print("is_volume_valid: Insufficient data or Volume column missing.")
-        return False 
-    try:
-        # Calculate average volume of the 20 candles *before* the latest one
-        avg_volume = kl_df['Volume'].iloc[-21:-1].mean() 
-        current_volume = kl_df['Volume'].iloc[-1]
-        
-        if pd.isna(avg_volume) or pd.isna(current_volume):
-            print("is_volume_valid: NaN value in volume data.")
-            return False
-        if avg_volume == 0: # Avoid division by zero or issues if avg volume is zero
-            return current_volume > 0 # Consider valid if current volume is positive and avg was zero
-            
-        return current_volume > (avg_volume * threshold_multiplier)
-    except Exception as e:
-        print(f"Error in is_volume_valid: {e}")
-        return False
-
-def calculate_position_size(account_balance: float, risk_pct: float, entry_price: float, sl_price: float) -> float:
-    """
-    Calculates position size based on account balance, risk percentage, entry price, and stop-loss price.
-    Args:
-        account_balance: Total account balance.
-        risk_pct: Account risk percentage (e.g., 0.01 for 1%).
-        entry_price: The intended entry price for the trade.
-        sl_price: The intended stop-loss price for the trade.
-    Returns:
-        The calculated position size in terms of the asset quantity. Returns 0 if inputs are invalid.
-    """
-    if account_balance <= 0 or risk_pct <= 0 or risk_pct >= 1:
-        print("calculate_position_size: Invalid account_balance or risk_pct.")
-        return 0.0
-    if entry_price <= 0 or sl_price <= 0:
-        print("calculate_position_size: Entry price or SL price cannot be zero or negative.")
-        return 0.0
-    if entry_price == sl_price:
-        print("calculate_position_size: Entry price and SL price cannot be the same.")
-        return 0.0
-
-    risk_amount_per_trade = account_balance * risk_pct
-    stop_distance_per_unit = abs(entry_price - sl_price)
-
-    if stop_distance_per_unit == 0: # Should be caught by entry_price == sl_price, but as a safeguard
-        print("calculate_position_size: Stop distance is zero.")
-        return 0.0
-        
-    position_size_asset_qty = risk_amount_per_trade / stop_distance_per_unit
-    return position_size_asset_qty
-
-# --- END CORE STRATEGY ENHANCEMENT HELPER FUNCTIONS ---
-
 def get_candle_metrics(candle_series: pd.Series) -> dict:
     """Extracts OHLC and calculates body, wicks, and range from a candle series."""
     # --- S7 DEBUG LOG ---
@@ -1223,157 +1140,213 @@ def check_volume_driven_exit_new(symbol: str, kl_df: pd.DataFrame, volume_lookba
 
 # Backtest Strategy Wrapper Class
 class BacktestStrategyWrapper(Strategy):
-    # These will be set by execute_backtest or Optuna trial
-    # Parameters that are common across many strategies or globally configurable for backtest
-    user_tp_bt: float = 0.03  # Default TP percentage
-    user_sl_bt: float = 0.02  # Default SL percentage
-    current_strategy_id_bt: int = 0
-    RR_bt: float = 1.5
-    SL_ATR_MULTI_bt: float = 1.0
-    PRICE_PRECISION_BT_dyn: int = 4 # Dynamic precision, set by get_price_precision
-    sl_tp_mode_bt_dyn: str = "ATR/Dynamic"
-    sl_pnl_amount_bt_dyn: float = 0.0
-    tp_pnl_amount_bt_dyn: float = 0.0
-    leverage_bt_dyn: float = 1.0
-    account_risk_percent_bt_dyn: float = 0.01
-    trailing_stop_enabled_bt_dyn: bool = False
-    trailing_stop_atr_multiplier_bt_dyn: float = 1.5
-    min_rr_backtest_dyn: float = 1.5
+    # Default parameters, will be overridden by UI inputs later
+    user_tp = 0.03  # Default, will be set from UI
+    user_sl = 0.02  # Default, will be set from UI
     
-    # Generic parameter placeholders for Optuna - these names must match what Optuna suggests
-    # And also what is passed to bt.run()
-    # Strategy 0 ("Original Scalping") Parameters
-    S0_EMA_Short: int = 9
-    S0_EMA_Long: int = 21
-    S0_RSI_Period: int = 14
-    S0_ST_ATR_Period: int = 10
-    S0_ST_Multiplier: float = 1.5
-    # S0_Vol_MA_Period: int = 10 # Not directly used in ST indicator, but in logic
-    # S0_Lookback_HL: int = 20 # Used in logic
+    # Strategy-specific parameters (example for the provided strategy)
+    ema_period = 200
+    rsi_period = 14
+    ATR_PERIOD = 14 # New class variable for ATR period
+    ST_ATR_PERIOD_S0 = 10 # Strategy 0 Supertrend ATR Period
+    ST_MULTIPLIER_S0 = 1.5  # Strategy 0 Supertrend Multiplier
+    
+    # Strategy S1 ("EMA Cross + SuperTrend") Parameters
+    EMA_SHORT_S1 = 9
+    EMA_LONG_S1 = 21
+    RSI_PERIOD_S1 = 14
+    ST_ATR_PERIOD_S1 = 10 
+    ST_MULTIPLIER_S1 = 3.0
+    
+    current_strategy_id = 5 # Defaulting to 5 for "New RSI-Based Strategy"
+    RR = 1.5  # Risk/Reward ratio
+    SL_ATR_MULTI = 1.0 # Multiplier for ATR to determine SL distance - SET TO 1.0
+    PRICE_PRECISION_BT = 4 # Default rounding precision for backtesting
 
-    # Strategy 1 ("EMA Cross + SuperTrend") Parameters
-    S1_EMA_Short: int = 9
-    S1_EMA_Long: int = 21
-    S1_RSI_Period: int = 14
-    S1_ST_ATR_Period: int = 10
-    S1_ST_Multiplier: float = 3.0
+    # Attributes for new SL/TP modes, to be set by execute_backtest
+    sl_tp_mode_bt = "ATR/Dynamic"  # Renamed to avoid conflict with global SL_TP_MODE
+    sl_pnl_amount_bt = 0.0
+    tp_pnl_amount_bt = 0.0
+    # user_sl and user_tp (percentages) are already class attributes
+    leverage = 1.0 # Default leverage for backtesting
+    account_risk_percent_bt = 0.01 # Default 1% account risk for backtesting
 
-    # Strategy 5 ("New RSI-Based Strategy") Parameters
-    S5_RSI_Period: int = 14
-    S5_SMA_Period: int = 50
-    S5_Duration_Lookback: int = 5
-    S5_Slope_Lookback_RSI: int = 3
-    S5_Divergence_Candles: int = 15
-    # S5_RSI_OB_Thresh, S5_RSI_OS_Thresh, S5_RSI_Slope_Min are used in logic
+    # Attributes for Backtesting Trailing Stop, to be set by execute_backtest
+    trailing_stop_enabled_bt = False
+    trailing_stop_atr_multiplier_bt = 1.5
 
-    # Strategy 6 ("Market Structure S/D") Parameters
-    S6_Swing_Order: int = 5
-    S6_SD_ATR_Period: int = 14
-    S6_SD_Lookback_Candles: int = 10
-    S6_SD_Consol_ATR_Factor: float = 0.7
-    S6_SD_Sharp_Move_ATR_Factor: float = 1.5
-    S6_Min_RR: float = 1.5 # This is specific to S6 logic
-    # S6_SL_Zone_Buffer_Pct: float = 0.10 # Used in logic
-
-    # Strategy 7 ("Candlestick Patterns") Parameters
-    S7_EMA_Trend_Period: int = 200
-    S7_ATR_Period: int = 14 # For SL/TP
-    S7_SL_ATR_Multiplier: float = 1.5
-    S7_TP_ATR_Multiplier: float = 2.0
-    S7_Volume_Lookback: int = 20
-    S7_Volume_Multiplier: float = 2.0
-    S7_RSI_Period_Filter: int = 14 # For the (removed) RSI filter
-    S7_RSI_Overbought_Filter: int = 75
-    S7_RSI_Oversold_Filter: int = 25
-    # Fallback params for S7 are also part of its logic but might be tuned
-    S7_Fallback_RSI_Period: int = 14
-    # ... other S7 Fallback params ...
-
-    # Common ATR period for dynamic SL/TP if not strategy-specific
-    ATR_PERIOD_Generic: int = 14
+    # --- Strategy 7 (Candlestick Patterns) Specific Parameters for Backtesting ---
+    # These mirror the tunable parameters in the live strategy_candlestick_patterns_signal
+    s7_bt_ema_trend_period = 200 # Typically fixed, but listed for completeness
+    s7_bt_atr_period = 14
+    s7_bt_sl_atr_multiplier = 1.5
+    s7_bt_tp_atr_multiplier = 2.0 
+    # s7_bt_rr_for_dynamic_calc will be derived from the multipliers above in init/next
+    
+    s7_bt_volume_lookback = 20
+    s7_bt_volume_multiplier = 2.0
+    
+    s7_bt_rsi_period = 14
+    s7_bt_rsi_overbought = 75
+    s7_bt_rsi_oversold = 25
+    # s7_bt_cooldown_bars would be relevant if simulating cooldown in backtest
+    # --- End of S7 Backtesting Parameters ---
 
 
     def init(self):
-        # Parameters are now expected to be set on the instance by backtesting.py if passed to bt.run()
-        # The getattr calls will fetch these instance parameters.
-        # The defaults provided in the class definition are fallbacks if not passed via bt.run().
-
-        print(f"DEBUG BacktestStrategyWrapper.init: Initializing for strategy ID {self.current_strategy_id_bt}, SL/TP Mode: {self.sl_tp_mode_bt_dyn}, Leverage: {self.leverage_bt_dyn}")
-        print(f"DEBUG BacktestStrategyWrapper.init: Trailing Stop Enabled (BT): {self.trailing_stop_enabled_bt_dyn}, Trailing ATR Multi (BT): {self.trailing_stop_atr_multiplier_bt_dyn}")
-        
-        if hasattr(self.data, 'df') and self.data.df is not None and not self.data.df.empty:
-            symbol_for_log = self.data.symbol if hasattr(self.data, 'symbol') else 'N/A'
-            print(f"[BT Strategy LOG for {symbol_for_log}] init() called.")
-            print(f"[BT Strategy LOG for {symbol_for_log}] Data received by strategy: self.data.df shape: {self.data.df.shape}")
-            print(f"[BT Strategy LOG for {symbol_for_log}] Data head:\n{self.data.df.head()}")
-            print(f"[BT Strategy LOG for {symbol_for_log}] Data tail:\n{self.data.df.tail()}")
-            print(f"[BT Strategy LOG for {symbol_for_log}] Data NaN sum:\n{self.data.df.isnull().sum()}")
-        else:
-            print(f"[BT Strategy LOG for {self.data.symbol if hasattr(self.data, 'symbol') else 'N/A'}] init() called, but self.data.df is None, empty, or not available.")
-
+        # Use self.sl_tp_mode_bt (or whatever name is chosen for the class attribute)
+        print(f"DEBUG BacktestStrategyWrapper.init: Initializing for strategy ID {self.current_strategy_id}, SL/TP Mode: {getattr(self, 'sl_tp_mode_bt', 'N/A')}, Leverage: {self.leverage}")
+        print(f"DEBUG BacktestStrategyWrapper.init: Trailing Stop Enabled (BT): {getattr(self, 'trailing_stop_enabled_bt', 'N/A')}, Trailing ATR Multi (BT): {getattr(self, 'trailing_stop_atr_multiplier_bt', 'N/A')}")
+        # --- Jules's Logging ---
+        print(f"[BT Strategy LOG for {self.data.symbol if hasattr(self.data, 'symbol') else 'N/A'}] init() called.")
+        print(f"[BT Strategy LOG for {self.data.symbol if hasattr(self.data, 'symbol') else 'N/A'}] Data received by strategy: self.data.df shape: {self.data.df.shape}")
         print(f"[BT Strategy LOG for {self.data.symbol if hasattr(self.data, 'symbol') else 'N/A'}] Data head:\n{self.data.df.head()}")
         print(f"[BT Strategy LOG for {self.data.symbol if hasattr(self.data, 'symbol') else 'N/A'}] Data tail:\n{self.data.df.tail()}")
         print(f"[BT Strategy LOG for {self.data.symbol if hasattr(self.data, 'symbol') else 'N/A'}] Data NaN sum:\n{self.data.df.isnull().sum()}")
+        # --- End Jules's Logging ---
+        if self.current_strategy_id == 5: # New RSI-Based Strategy
+            s5_rsi_period = getattr(self, 'S5_RSI_Period', 14)
+            # S5_SMA_Period, S5_Duration_Lookback, S5_Slope_Lookback_RSI, S5_Divergence_Candles are used in next()
+            self.rsi = self.I(rsi_bt, self.data.Close, s5_rsi_period, name='RSI_S5')
+            self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, getattr(self, 'ATR_PERIOD', 14), name='ATR_dynSLTP_S5') # Generic ATR
         
-        # Use instance attributes (set by bt.run() or defaults)
-        if self.current_strategy_id_bt == 5: 
-            self.rsi = self.I(rsi_bt, self.data.Close, self.S5_RSI_Period, name='RSI_S5')
-            self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, self.ATR_PERIOD_Generic, name='ATR_dynSLTP_S5')
-        
-        elif self.current_strategy_id_bt == 1: 
+        elif self.current_strategy_id == 1: # EMA Cross + SuperTrend
             print(f"DEBUG BacktestStrategyWrapper.init: Initializing indicators for Strategy ID 1 (EMA Cross + SuperTrend)")
-            self.ema_short_s1 = self.I(ema_bt, self.data.Close, self.S1_EMA_Short, name='EMA_S_S1')
-            self.ema_long_s1 = self.I(ema_bt, self.data.Close, self.S1_EMA_Long, name='EMA_L_S1')
-            self.rsi_s1 = self.I(rsi_bt, self.data.Close, self.S1_RSI_Period, name='RSI_S1')
-            self.st_s1 = self.I(supertrend_numerical_bt, self.data.High, self.data.Low, self.data.Close, self.S1_ST_ATR_Period, self.S1_ST_Multiplier, name='ST_S1', overlay=True)
-            self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, self.ATR_PERIOD_Generic, name='ATR_dynSLTP_S1')
+            s1_ema_short = getattr(self, 'S1_EMA_Short', 9)
+            s1_ema_long = getattr(self, 'S1_EMA_Long', 21)
+            s1_rsi_period = getattr(self, 'S1_RSI_Period', 14)
+            s1_st_atr_period = getattr(self, 'S1_ST_ATR_Period', 10)
+            s1_st_multiplier = getattr(self, 'S1_ST_Multiplier', 3.0)
+            
+            self.ema_short_s1 = self.I(ema_bt, self.data.Close, s1_ema_short, name='EMA_S_S1')
+            self.ema_long_s1 = self.I(ema_bt, self.data.Close, s1_ema_long, name='EMA_L_S1')
+            self.rsi_s1 = self.I(rsi_bt, self.data.Close, s1_rsi_period, name='RSI_S1')
+            self.st_s1 = self.I(supertrend_numerical_bt, self.data.High, self.data.Low, self.data.Close, s1_st_atr_period, s1_st_multiplier, name='ST_S1', overlay=True)
+            self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, getattr(self, 'ATR_PERIOD', 14), name='ATR_dynSLTP_S1') # Generic ATR
 
-        elif self.current_strategy_id_bt == 0: 
+        elif self.current_strategy_id == 0: # Original Scalping
             print(f"DEBUG BacktestStrategyWrapper.init: Initializing indicators for Strategy ID 0 (Original Scalping)")
-            self.ema9_s0 = self.I(ema_bt, self.data.Close, self.S0_EMA_Short, name='EMA9_S0')
-            self.ema21_s0 = self.I(ema_bt, self.data.Close, self.S0_EMA_Long, name='EMA21_S0')
-            self.rsi_s0 = self.I(rsi_bt, self.data.Close, self.S0_RSI_Period, name='RSI_S0')
-            # S0_Vol_MA_Period is used in next() logic, not as a direct self.I indicator here.
-            # For Volume MA, if it's needed as a series for plotting or direct access:
-            s0_vol_ma_period_val = getattr(self, 'S0_Vol_MA_Period', 10) # Get if passed, else default
-            self.volume_ma10_s0 = self.I(lambda series, window: pd.Series(series).rolling(window).mean(), self.data.Volume, s0_vol_ma_period_val, name='VolumeMA_S0', overlay=False)
-            self.st_s0 = self.I(supertrend_numerical_bt, self.data.High, self.data.Low, self.data.Close, self.S0_ST_ATR_Period, self.S0_ST_Multiplier, name='Supertrend_S0', overlay=True) 
-            self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, self.ATR_PERIOD_Generic, name='ATR_dynSLTP_S0')
+            s0_ema_short = getattr(self, 'S0_EMA_Short', 9)
+            s0_ema_long = getattr(self, 'S0_EMA_Long', 21)
+            s0_rsi_period = getattr(self, 'S0_RSI_Period', 14)
+            s0_st_atr_period = getattr(self, 'S0_ST_ATR_Period', 10)
+            s0_st_multiplier = getattr(self, 'S0_ST_Multiplier', 1.5)
+            # LOCAL_HIGH_LOW_LOOKBACK_PERIOD and volume_ma10 period (10) are still hardcoded in S0's live logic & here for vol_ma.
+
+            self.ema9_s0 = self.I(ema_bt, self.data.Close, s0_ema_short, name='EMA9_S0')
+            self.ema21_s0 = self.I(ema_bt, self.data.Close, s0_ema_long, name='EMA21_S0')
+            self.rsi_s0 = self.I(rsi_bt, self.data.Close, s0_rsi_period, name='RSI_S0')
+            self.volume_ma10_s0 = self.I(lambda series, window: pd.Series(series).rolling(window).mean(), self.data.Volume, 10, name='VolumeMA10_S0', overlay=False) 
+            self.st_s0 = self.I(supertrend_numerical_bt, self.data.High, self.data.Low, self.data.Close, s0_st_atr_period, s0_st_multiplier, name='Supertrend_S0', overlay=True) 
+            self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, getattr(self, 'ATR_PERIOD', 14), name='ATR_dynSLTP_S0') # Generic ATR
         
-        elif self.current_strategy_id_bt == 6: 
+        elif self.current_strategy_id == 6: # Market Structure S/D Strategy
             print(f"DEBUG BacktestStrategyWrapper.init: Initializing for Strategy ID 6 (Market Structure S/D)")
+            s6_swing_order = getattr(self, 'S6_Swing_Order', 5)
+            s6_sd_atr_period = getattr(self, 'S6_SD_ATR_Period', 14) # Used for identify_supply_demand_zones call
+            # Other S6 params (lookback_candles, consol_factor, sharp_move_factor, min_rr) are used in next() or by helper functions directly.
+            
+            # For backtesting, pre-calculate swing points and S/D zones on the entire dataset once.
+            # Market structure itself will be evaluated dynamically in next() or based on these points.
             try:
-                self.bt_swing_highs_bool, self.bt_swing_lows_bool = find_swing_points(self.data.df, order=self.S6_Swing_Order)
-                self.bt_sd_zones = identify_supply_demand_zones(self.data.df, atr_period=self.S6_SD_ATR_Period, 
-                                                                lookback_candles=self.S6_SD_Lookback_Candles,
-                                                                consolidation_atr_factor=self.S6_SD_Consol_ATR_Factor,
-                                                                sharp_move_atr_factor=self.S6_SD_Sharp_Move_ATR_Factor)
-                print(f"DEBUG BT S6: Pre-calculated {len(self.bt_sd_zones)} S/D zones using ATR period {self.S6_SD_ATR_Period}.")
-                self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, self.S6_SD_ATR_Period, name='ATR_S6') 
+                self.bt_swing_highs_bool, self.bt_swing_lows_bool = find_swing_points(self.data.df, order=s6_swing_order)
+                # S/D zones also depend on the whole dataset for accurate historical identification
+                # Pass S6 specific ATR period to this helper if it's meant to use it
+                self.bt_sd_zones = identify_supply_demand_zones(self.data.df, atr_period=s6_sd_atr_period, 
+                                                                lookback_candles=getattr(self, 'S6_SD_Lookback_Candles', 10),
+                                                                consolidation_atr_factor=getattr(self, 'S6_SD_Consol_ATR_Factor', 0.7),
+                                                                sharp_move_atr_factor=getattr(self, 'S6_SD_Sharp_Move_ATR_Factor', 1.5))
+                print(f"DEBUG BT S6: Pre-calculated {len(self.bt_sd_zones)} S/D zones using ATR period {s6_sd_atr_period}.")
+                # ATR is useful for some dynamic calculations or fallbacks, ensure it's available.
+                # Use a generic ATR_PERIOD or S6 specific if defined for this self.atr
+                self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, getattr(self,'S6_ATR_Period', 14), name='ATR_S6') # Fallback if S6_ATR_Period not specifically set for this
             except Exception as e:
                 print(f"ERROR BT S6 init: Failed to pre-calculate swings or S/D zones: {e}")
+                # Potentially raise this or handle it to prevent backtest from running with faulty setup
                 self.bt_swing_highs_bool = pd.Series([False]*len(self.data.df), index=self.data.df.index)
                 self.bt_swing_lows_bool = pd.Series([False]*len(self.data.df), index=self.data.df.index)
                 self.bt_sd_zones = []
-                self.atr = None 
+                self.atr = None # Invalidate ATR if setup fails critically
         
-        elif self.current_strategy_id_bt == 7: 
+        elif self.current_strategy_id == 7: # Candlestick Patterns Strategy
             print(f"DEBUG BacktestStrategyWrapper.init: Initializing for Strategy ID 7 (Candlestick Patterns)")
-            self.ema200_s7 = self.I(ema_bt, self.data.Close, self.S7_EMA_Trend_Period, name='EMA200_S7')
-            self.atr_s7 = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, self.S7_ATR_Period, name='ATR_S7')
-            # Other S7 params (RSI period for filter, volume lookback/multi) are used in next() logic
-        
-        # Placeholder for other strategies (2, 3, 4) - they would need similar getattr logic for their params
-        # For brevity, only S0, S1, S5, S6, S7 are detailed here for parameterization.
-        # It's assumed that if other strategies are optimized, their parameters (e.g. S2_EMA_Slow, S3_ATR_Period)
-        # would be added to the class variable list and accessed via getattr(self, 'ParamName', default_value) here.
+            s7_ema_trend_period_bt = getattr(self, 'S7_EMA_Trend_Period', self.s7_bt_ema_trend_period) # self.s7_bt_ema_trend_period is the old hardcoded default
+            s7_atr_period_bt = getattr(self, 'S7_ATR_Period', self.s7_bt_atr_period)
+            # Other S7 params like multipliers, volume lookbacks, RSI thresholds are used in next() via getattr.
 
-        else: 
-            print(f"DEBUG BacktestStrategyWrapper.init: Strategy ID {self.current_strategy_id_bt} - Using generic RSI and ATR.")
-            default_rsi_period = getattr(self, 'RSI_Period_Generic', 14) 
-            self.rsi = self.I(rsi_bt, self.data.Close, default_rsi_period, name=f'RSI_default_{self.current_strategy_id_bt}')
-            self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, self.ATR_PERIOD_Generic, name=f'ATR_default_{self.current_strategy_id_bt}')
-            print(f"DEBUG BacktestStrategyWrapper.init: Defaulted ATR indicator for strategy ID {self.current_strategy_id_bt}.")
+            self.ema200_s7 = self.I(ema_bt, self.data.Close, s7_ema_trend_period_bt, name='EMA200_S7')
+            self.atr_s7 = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, s7_atr_period_bt, name='ATR_S7')
+            # RSI for S7 filter is calculated on the fly in next() if needed.
+            # Candlestick pattern recognition will be done in next() using helper functions
+            # on self.data.df slices. No specific self.I needed for the patterns themselves here.
+            # Volume data is self.data.Volume
+        
+        elif self.current_strategy_id == 2: # Bollinger Band Mean-Reversion
+            print(f"DEBUG BacktestStrategyWrapper.init: Initializing for Strategy ID 2 (Bollinger Bands)")
+            s2_ema_slow = getattr(self, 'S2_EMA_Slow', 50)
+            s2_ema_fast = getattr(self, 'S2_EMA_Fast', 30)
+            s2_rsi_period = getattr(self, 'S2_RSI_Period', 10)
+            s2_bb_length = getattr(self, 'S2_BB_Length', 15)
+            s2_bb_stddev = getattr(self, 'S2_BB_StdDev', 1.5)
+            s2_atr_period = getattr(self, 'S2_ATR_Period', 7)
+
+            self.ema_slow_s2 = self.I(ema_bt, self.data.Close, s2_ema_slow, name='EMA_Slow_S2')
+            self.ema_fast_s2 = self.I(ema_bt, self.data.Close, s2_ema_fast, name='EMA_Fast_S2')
+            self.rsi_s2 = self.I(rsi_bt, self.data.Close, s2_rsi_period, name='RSI_S2')
+            # BollingerBands from `ta` library are used directly in `next` for S2, not as `self.I`
+            # However, ATR might be needed for dynamic SL/TP if that mode is selected.
+            self.atr_s2 = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, s2_atr_period, name='ATR_S2')
+            # self.atr is the generic one, ensure it's also available if S2 uses ATR/Dynamic SLTP
+            if not hasattr(self, 'atr'): # If not already set by a prior strategy's generic ATR init
+                 self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, getattr(self, 'ATR_PERIOD', 14), name='ATR_dynSLTP_S2')
+
+
+        elif self.current_strategy_id == 3: # VWAP Breakout Momentum
+            print(f"DEBUG BacktestStrategyWrapper.init: Initializing for Strategy ID 3 (VWAP Breakout)")
+            s3_atr_period = getattr(self, 'S3_ATR_Period', 14)
+            s3_macd_slow = getattr(self, 'S3_MACD_Slow', 26)
+            s3_macd_fast = getattr(self, 'S3_MACD_Fast', 12)
+            s3_macd_sign = getattr(self, 'S3_MACD_Sign', 9)
+            # S3_ATR_RollingAvgPeriod is used in next()
+
+            self.atr_s3 = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, s3_atr_period, name='ATR_S3')
+            # MACD lines for S3 (macd_line, macd_signal_line, macd_hist are often used)
+            # self.I can only return one series. MACD object needs to be handled carefully.
+            # For simplicity, if specific lines are needed, they might be calculated in next or via multiple self.I calls if ta lib supports it.
+            # For now, let's assume MACD is primarily evaluated via its histogram or direct calculation in next().
+            # We'll initialize a generic ATR if needed for SL/TP.
+            if not hasattr(self, 'atr'):
+                 self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, getattr(self, 'ATR_PERIOD', 14), name='ATR_dynSLTP_S3')
+
+
+        elif self.current_strategy_id == 4: # MACD Divergence + Pivot-Point
+            print(f"DEBUG BacktestStrategyWrapper.init: Initializing for Strategy ID 4 (MACD Div Pivot)")
+            s4_macd_slow = getattr(self, 'S4_MACD_Slow', 26)
+            s4_macd_fast = getattr(self, 'S4_MACD_Fast', 12)
+            s4_macd_sign = getattr(self, 'S4_MACD_Sign', 9)
+            s4_stoch_k_period = getattr(self, 'S4_Stoch_K_Period', 14)
+            s4_stoch_smooth_window = getattr(self, 'S4_Stoch_Smooth_Window', 3)
+            s4_atr_period = getattr(self, 'S4_ATR_Period', 14)
+            # S4_Divergence_Lookback, S4_Stoch_Oversold, S4_Stoch_Overbought are used in next()
+            
+            # For MACD, typically the histogram (diff) is used for divergence.
+            # Stochastic %K is ta.momentum.StochasticOscillator().stoch()
+            # ATR for SL/TP
+            self.atr_s4 = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, s4_atr_period, name='ATR_S4')
+            if not hasattr(self, 'atr'):
+                 self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, getattr(self, 'ATR_PERIOD', 14), name='ATR_dynSLTP_S4')
+
+
+        else: # Default for any other (new/unspecified) strategy ID, ensure ATR is available
+            print(f"DEBUG BacktestStrategyWrapper.init: Strategy ID {self.current_strategy_id} - Defaulting to RSI and ATR.")
+            # Try to get a generic RSI_Period if set, else default to 14
+            default_rsi_period = getattr(self, 'RSI_Period', 14) # Example: "RSI_Period" might be a common name
+            self.rsi = self.I(rsi_bt, self.data.Close, default_rsi_period, name=f'RSI_default_{self.current_strategy_id}')
+            
+            # Use a generic ATR_PERIOD if set, else default to 14
+            default_atr_period = getattr(self, 'ATR_PERIOD', 14) # This is already a class attribute
+            self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, default_atr_period, name=f'ATR_default_{self.current_strategy_id}')
+            print(f"DEBUG BacktestStrategyWrapper.init: Defaulted ATR indicator for strategy ID {self.current_strategy_id}.")
 
     def next(self):
         price = float(self.data.Close[-1]) 
@@ -1382,47 +1355,61 @@ class BacktestStrategyWrapper(Strategy):
         
         # --- ATR-Scaled Trailing Stop Logic for Backtesting ---
         if self.position and getattr(self, 'trailing_stop_enabled_bt', False):
-            atr_value_for_trailing_bt = None
-            # Determine which ATR series to use. Prioritize strategy-specific ATR if available.
-            if hasattr(self, f"atr_s{self.current_strategy_id}"): # e.g., self.atr_s7
-                specific_atr_series = getattr(self, f"atr_s{self.current_strategy_id}")
-                if specific_atr_series is not None and len(specific_atr_series) > 0 and not pd.isna(specific_atr_series[-1]):
-                    atr_value_for_trailing_bt = specific_atr_series[-1]
-                    # print(f"{log_prefix_bt_next} TRAIL_SL_BT: Using specific self.atr_s{self.current_strategy_id} value: {atr_value_for_trailing_bt:.4f}")
+            # Determine which ATR series to use based on current strategy
+            # This assumes each strategy that might use ATR trailing stop has 'self.atr' or 'self.atr_sX'
+            atr_to_use_for_trailing = None
+            if self.current_strategy_id == 7 and hasattr(self, 'atr_s7') and self.atr_s7 is not None and len(self.atr_s7) > 0:
+                atr_to_use_for_trailing = self.atr_s7[-1]
+                print(f"{log_prefix_bt_next} TRAIL_SL_BT: Strategy 7 using self.atr_s7 for trailing.")
+            elif self.current_strategy_id == 0 and hasattr(self, 'atr') and self.atr is not None and len(self.atr) > 0: # Assuming S0 uses self.atr
+                atr_to_use_for_trailing = self.atr[-1]
+                print(f"{log_prefix_bt_next} TRAIL_SL_BT: Strategy 0 using self.atr for trailing.")
+            elif self.current_strategy_id == 1 and hasattr(self, 'atr') and self.atr is not None and len(self.atr) > 0: # Assuming S1 uses self.atr
+                atr_to_use_for_trailing = self.atr[-1]
+                print(f"{log_prefix_bt_next} TRAIL_SL_BT: Strategy 1 using self.atr for trailing.")
+            elif self.current_strategy_id == 5 and hasattr(self, 'atr') and self.atr is not None and len(self.atr) > 0: # Assuming S5 uses self.atr
+                atr_to_use_for_trailing = self.atr[-1]
+                print(f"{log_prefix_bt_next} TRAIL_SL_BT: Strategy 5 using self.atr for trailing.")
+            # Add other strategies here if they have their own ATR indicators (e.g., self.atr_s6 for S6 if it were to use this)
+            # Example for S6 if it had self.atr_s6:
+            # elif self.current_strategy_id == 6 and hasattr(self, 'atr_s6') and self.atr_s6 is not None and len(self.atr_s6) > 0:
+            #     atr_to_use_for_trailing = self.atr_s6[-1]
+            #     print(f"{log_prefix_bt_next} TRAIL_SL_BT: Strategy 6 using self.atr_s6 for trailing.")
+            elif hasattr(self, 'atr') and self.atr is not None and len(self.atr) > 0: # Generic fallback
+                atr_to_use_for_trailing = self.atr[-1]
+                print(f"{log_prefix_bt_next} TRAIL_SL_BT: Strategy {self.current_strategy_id} - using generic self.atr for trailing (fallback).")
             
-            if atr_value_for_trailing_bt is None and hasattr(self, 'atr') and self.atr is not None and len(self.atr) > 0 and not pd.isna(self.atr[-1]):
-                atr_value_for_trailing_bt = self.atr[-1] # Fallback to generic self.atr
-                # print(f"{log_prefix_bt_next} TRAIL_SL_BT: Using generic self.atr value: {atr_value_for_trailing_bt:.4f}")
-
-            if atr_value_for_trailing_bt is not None and atr_value_for_trailing_bt > 0:
-                current_trade_bt = self.trades[-1]
-                current_sl_bt = current_trade_bt.sl
+            if atr_to_use_for_trailing is not None and not pd.isna(atr_to_use_for_trailing) and atr_to_use_for_trailing > 0:
+                current_trade = self.trades[-1] # Get the current active trade
+                current_sl = current_trade.sl 
                 
-                trail_distance_bt = atr_value_for_trailing_bt * getattr(self, 'trailing_stop_atr_multiplier_bt', 1.5)
-                new_trailing_sl_bt = None
+                new_trailing_sl = None
+                atr_offset = atr_to_use_for_trailing * getattr(self, 'trailing_stop_atr_multiplier_bt', 1.5)
 
                 if self.position.is_long:
-                    potential_new_sl_bt = price - trail_distance_bt
-                    if current_sl_bt is None or potential_new_sl_bt > current_sl_bt:
-                        new_trailing_sl_bt = round(potential_new_sl_bt, self.PRICE_PRECISION_BT)
+                    potential_new_sl = price - atr_offset
+                    if current_sl is None or potential_new_sl > current_sl:
+                        new_trailing_sl = round(potential_new_sl, self.PRICE_PRECISION_BT)
                 elif self.position.is_short:
-                    potential_new_sl_bt = price + trail_distance_bt
-                    if current_sl_bt is None or potential_new_sl_bt < current_sl_bt:
-                        new_trailing_sl_bt = round(potential_new_sl_bt, self.PRICE_PRECISION_BT)
+                    potential_new_sl = price + atr_offset
+                    if current_sl is None or potential_new_sl < current_sl:
+                         new_trailing_sl = round(potential_new_sl, self.PRICE_PRECISION_BT)
                 
-                if new_trailing_sl_bt is not None:
-                    is_valid_new_sl_bt = False
-                    if self.position.is_long and new_trailing_sl_bt < price: is_valid_new_sl_bt = True
-                    elif self.position.is_short and new_trailing_sl_bt > price: is_valid_new_sl_bt = True
+                if new_trailing_sl is not None:
+                    # Validate new_trailing_sl: For long, must be < price. For short, must be > price.
+                    is_valid_new_sl = False
+                    if self.position.is_long and new_trailing_sl < price:
+                        is_valid_new_sl = True
+                    elif self.position.is_short and new_trailing_sl > price:
+                        is_valid_new_sl = True
                     
-                    if is_valid_new_sl_bt:
-                        # print(f"{log_prefix_bt_next} TRAIL_SL_BT: Modifying SL for {trade_symbol}. Old: {current_sl_bt}, New: {new_trailing_sl_bt}, Price: {price}, ATR: {atr_value_for_trailing_bt:.4f}")
-                        current_trade_bt.sl = new_trailing_sl_bt
-            # else:
-                # if atr_value_for_trailing_bt is None:
-                #     print(f"{log_prefix_bt_next} TRAIL_SL_BT: ATR not available for Strategy {self.current_strategy_id}. Cannot trail.")
-                # elif atr_value_for_trailing_bt <= 0:
-                #     print(f"{log_prefix_bt_next} TRAIL_SL_BT: Invalid ATR value ({atr_value_for_trailing_bt}) for {trade_symbol}. Cannot trail.")
+                    if is_valid_new_sl:
+                        print(f"{log_prefix_bt_next} TRAIL_SL_BT: Modifying SL for {trade_symbol}. Old SL: {current_sl}, New SL: {new_trailing_sl}, Price: {price}, ATR used: {atr_to_use_for_trailing:.4f}")
+                        current_trade.sl = new_trailing_sl
+            elif atr_to_use_for_trailing is None:
+                 print(f"{log_prefix_bt_next} TRAIL_SL_BT: ATR not available for strategy {self.current_strategy_id}. Cannot trail SL.")
+            elif pd.isna(atr_to_use_for_trailing) or atr_to_use_for_trailing <= 0:
+                 print(f"{log_prefix_bt_next} TRAIL_SL_BT: Invalid ATR value ({atr_to_use_for_trailing}) for {trade_symbol}. Cannot trail SL.")
         
         # --- SL/TP Price Calculation Block (Common for all strategies) ---
         sl_final_price = None # This seems unused, SL/TP are calculated per trade direction later
@@ -1655,20 +1642,8 @@ class BacktestStrategyWrapper(Strategy):
                     print(f"{log_prefix_bt_next} S0 Sizing: AccRisk={self.account_risk_percent_bt*100:.2f}%, SL%={sl_percentage_for_sizing_s0*100:.2f}%, CalcSize={calculated_size:.4f}, FinalSize={final_trade_size_s0:.4f}")
 
 
-                if trade_side_s0 == 'buy':
-                    if tp_price > entry_price_s0 and sl_price < entry_price_s0: # Basic check
-                        reward_s0 = tp_price - entry_price_s0
-                        risk_s0 = entry_price_s0 - sl_price
-                        if risk_s0 > 0 and (reward_s0 / risk_s0) >= self.min_rr_backtest:
-                            self.buy(sl=sl_price, tp=tp_price, size=final_trade_size_s0)
-                        # else: print(f"{log_prefix_bt_next} S0 BUY REJECTED: R:R { (reward_s0 / risk_s0) if risk_s0 > 0 else 'N/A' } < {self.min_rr_backtest}") # Verbose
-                elif trade_side_s0 == 'sell':
-                    if tp_price < entry_price_s0 and sl_price > entry_price_s0: # Basic check
-                        reward_s0 = entry_price_s0 - tp_price
-                        risk_s0 = sl_price - entry_price_s0
-                        if risk_s0 > 0 and (reward_s0 / risk_s0) >= self.min_rr_backtest:
-                            self.sell(sl=sl_price, tp=tp_price, size=final_trade_size_s0)
-                        # else: print(f"{log_prefix_bt_next} S0 SELL REJECTED: R:R { (reward_s0 / risk_s0) if risk_s0 > 0 else 'N/A' } < {self.min_rr_backtest}") # Verbose
+                if trade_side_s0 == 'buy': self.buy(sl=sl_price, tp=tp_price, size=final_trade_size_s0)
+                else: self.sell(sl=sl_price, tp=tp_price, size=final_trade_size_s0)
             # else:
                 # print(f"{log_prefix_bt_next} S0: No trade signal this bar.")
 
@@ -1746,20 +1721,8 @@ class BacktestStrategyWrapper(Strategy):
                     final_trade_size_s1 = min(calculated_size_s1, 1.0) 
                     print(f"{log_prefix_bt_next} S1 Sizing: AccRisk={self.account_risk_percent_bt*100:.2f}%, SL%={sl_percentage_for_sizing_s1*100:.2f}%, CalcSize={calculated_size_s1:.4f}, FinalSize={final_trade_size_s1:.4f}")
 
-                if trade_side_s1 == 'buy':
-                    if tp_to_use_s1 > entry_price_s1 and sl_to_use_s1 < entry_price_s1:
-                        reward_s1 = tp_to_use_s1 - entry_price_s1
-                        risk_s1 = entry_price_s1 - sl_to_use_s1
-                        if risk_s1 > 0 and (reward_s1 / risk_s1) >= self.min_rr_backtest:
-                            self.buy(sl=sl_to_use_s1, tp=tp_to_use_s1, size=final_trade_size_s1)
-                        # else: print(f"{log_prefix_bt_next} S1 BUY REJECTED: R:R { (reward_s1 / risk_s1) if risk_s1 > 0 else 'N/A' } < {self.min_rr_backtest}")
-                elif trade_side_s1 == 'sell':
-                    if tp_to_use_s1 < entry_price_s1 and sl_to_use_s1 > entry_price_s1:
-                        reward_s1 = entry_price_s1 - tp_to_use_s1
-                        risk_s1 = sl_to_use_s1 - entry_price_s1
-                        if risk_s1 > 0 and (reward_s1 / risk_s1) >= self.min_rr_backtest:
-                            self.sell(sl=sl_to_use_s1, tp=tp_to_use_s1, size=final_trade_size_s1)
-                        # else: print(f"{log_prefix_bt_next} S1 SELL REJECTED: R:R { (reward_s1 / risk_s1) if risk_s1 > 0 else 'N/A' } < {self.min_rr_backtest}")
+                if trade_side_s1 == 'buy': self.buy(sl=sl_to_use_s1, tp=tp_to_use_s1, size=final_trade_size_s1)
+                else: self.sell(sl=sl_to_use_s1, tp=tp_to_use_s1, size=final_trade_size_s1)
             # else:
                 # print(f"{log_prefix_bt_next} S1: No trade signal this bar.")
 
@@ -1828,26 +1791,12 @@ class BacktestStrategyWrapper(Strategy):
                     final_trade_size_s5 = min(calculated_size_s5, 1.0)
                     print(f"{log_prefix_bt_next} S5 Sizing: AccRisk={self.account_risk_percent_bt*100:.2f}%, SL%={sl_percentage_for_sizing_s5*100:.2f}%, CalcSize={calculated_size_s5:.4f}, FinalSize={final_trade_size_s5:.4f}")
                 
-                if trade_side_s5 == 'buy':
-                    if tp_to_use_s5 > entry_price_s5 and sl_to_use_s5 < entry_price_s5:
-                        reward_s5 = tp_to_use_s5 - entry_price_s5
-                        risk_s5 = entry_price_s5 - sl_to_use_s5
-                        if risk_s5 > 0 and (reward_s5 / risk_s5) >= self.min_rr_backtest:
-                            self.buy(sl=sl_to_use_s5, tp=tp_to_use_s5, size=final_trade_size_s5)
-                        # else: print(f"{log_prefix_bt_next} S5 BUY REJECTED: R:R { (reward_s5 / risk_s5) if risk_s5 > 0 else 'N/A' } < {self.min_rr_backtest}")
-                elif trade_side_s5 == 'sell':
-                    if tp_to_use_s5 < entry_price_s5 and sl_to_use_s5 > entry_price_s5:
-                        reward_s5 = entry_price_s5 - tp_to_use_s5
-                        risk_s5 = sl_to_use_s5 - entry_price_s5
-                        if risk_s5 > 0 and (reward_s5 / risk_s5) >= self.min_rr_backtest:
-                            self.sell(sl=sl_to_use_s5, tp=tp_to_use_s5, size=final_trade_size_s5)
-                        # else: print(f"{log_prefix_bt_next} S5 SELL REJECTED: R:R { (reward_s5 / risk_s5) if risk_s5 > 0 else 'N/A' } < {self.min_rr_backtest}")
+                if trade_side_s5 == 'buy': self.buy(sl=sl_to_use_s5, tp=tp_to_use_s5, size=final_trade_size_s5)
+                else: self.sell(sl=sl_to_use_s5, tp=tp_to_use_s5, size=final_trade_size_s5)
             # else:
                 # print(f"{log_prefix_bt_next} S5: No trade signal this bar.")
         
         elif self.current_strategy_id == 6: # Market Structure S/D Strategy
-            # S6 handles its own R:R internally via its parameter S6_Min_RR,
-            # so the generic self.min_rr_backtest is not applied here.
             # Ensure log_prefix_bt_next uses a dynamic precision based on self.PRICE_PRECISION_BT
             # However, price itself is already a float here. Formatting is for the print string.
             # For consistency, let's define precision for logging here.
@@ -2249,20 +2198,8 @@ class BacktestStrategyWrapper(Strategy):
                     print(f"{log_prefix_bt_next} S7 Sizing for Pattern: AccRisk={self.account_risk_percent_bt*100:.2f}%, SL%={sl_percentage_for_sizing_s7*100 if sl_percentage_for_sizing_s7 else 'N/A'}%, CalcSize={calculated_size_s7 if sl_percentage_for_sizing_s7 else 'N/A'}, FinalSize={final_trade_size_s7:.4f}")
 
                     print(f"{log_prefix_bt_next} S7 BT: Placing Pattern Trade: Side={pattern_side_s7_bt}, Size={final_trade_size_s7}, SL={sl_to_use_s7}, TP={tp_to_use_s7}")
-                    if pattern_side_s7_bt == "up":
-                        if tp_to_use_s7 > entry_price_s7 and sl_to_use_s7 < entry_price_s7:
-                            reward_s7p = tp_to_use_s7 - entry_price_s7
-                            risk_s7p = entry_price_s7 - sl_to_use_s7
-                            if risk_s7p > 0 and (reward_s7p / risk_s7p) >= self.min_rr_backtest:
-                                self.buy(sl=sl_to_use_s7, tp=tp_to_use_s7, size=final_trade_size_s7)
-                            # else: print(f"{log_prefix_bt_next} S7 PATTERN BUY REJECTED: R:R { (reward_s7p / risk_s7p) if risk_s7p > 0 else 'N/A' } < {self.min_rr_backtest}")
-                    elif pattern_side_s7_bt == "down":
-                        if tp_to_use_s7 < entry_price_s7 and sl_to_use_s7 > entry_price_s7:
-                            reward_s7p = entry_price_s7 - tp_to_use_s7
-                            risk_s7p = sl_to_use_s7 - entry_price_s7
-                            if risk_s7p > 0 and (reward_s7p / risk_s7p) >= self.min_rr_backtest:
-                                self.sell(sl=sl_to_use_s7, tp=tp_to_use_s7, size=final_trade_size_s7)
-                            # else: print(f"{log_prefix_bt_next} S7 PATTERN SELL REJECTED: R:R { (reward_s7p / risk_s7p) if risk_s7p > 0 else 'N/A' } < {self.min_rr_backtest}")
+                    if pattern_side_s7_bt == "up": self.buy(sl=sl_to_use_s7, tp=tp_to_use_s7, size=final_trade_size_s7)
+                    else: self.sell(sl=sl_to_use_s7, tp=tp_to_use_s7, size=final_trade_size_s7)
                 else: # Filters not passed for pattern
                     print(f"{log_prefix_bt_next} S7 BT: Pattern {detected_pattern_name_s7_bt} detected, but filters (EMA, Volume, or RSI) not passed. No pattern trade.")
 
@@ -2353,20 +2290,8 @@ class BacktestStrategyWrapper(Strategy):
                                     print(f"{log_prefix_bt_next} S7 Sizing for RSI Fallback: AccRisk={self.account_risk_percent_bt*100:.2f}%, SL%={sl_percentage_for_sizing_s7_rsi*100 if sl_percentage_for_sizing_s7_rsi else 'N/A'}%, CalcSize={calc_size_rsi if sl_percentage_for_sizing_s7_rsi else 'N/A'}, FinalSize={final_trade_size_s7_rsi:.4f}")
                                     
                                     print(f"{log_prefix_bt_next} S7 BT: Placing RSI Fallback Trade: Side={rsi_fallback_side}, Size={final_trade_size_s7_rsi}, SL={sl_rsi_fb}, TP={tp_rsi_fb}")
-                                    if rsi_fallback_side == "buy":
-                                        if tp_rsi_fb > entry_price_s7_rsi and sl_rsi_fb < entry_price_s7_rsi:
-                                            reward_s7r = tp_rsi_fb - entry_price_s7_rsi
-                                            risk_s7r = entry_price_s7_rsi - sl_rsi_fb
-                                            if risk_s7r > 0 and (reward_s7r / risk_s7r) >= self.min_rr_backtest:
-                                                self.buy(sl=sl_rsi_fb, tp=tp_rsi_fb, size=final_trade_size_s7_rsi)
-                                            # else: print(f"{log_prefix_bt_next} S7 RSI FB BUY REJECTED: R:R { (reward_s7r / risk_s7r) if risk_s7r > 0 else 'N/A' } < {self.min_rr_backtest}")
-                                    elif rsi_fallback_side == "sell":
-                                        if tp_rsi_fb < entry_price_s7_rsi and sl_rsi_fb > entry_price_s7_rsi:
-                                            reward_s7r = entry_price_s7_rsi - tp_rsi_fb
-                                            risk_s7r = sl_rsi_fb - entry_price_s7_rsi
-                                            if risk_s7r > 0 and (reward_s7r / risk_s7r) >= self.min_rr_backtest:
-                                                self.sell(sl=sl_rsi_fb, tp=tp_rsi_fb, size=final_trade_size_s7_rsi)
-                                            # else: print(f"{log_prefix_bt_next} S7 RSI FB SELL REJECTED: R:R { (reward_s7r / risk_s7r) if risk_s7r > 0 else 'N/A' } < {self.min_rr_backtest}")
+                                    if rsi_fallback_side == "buy": self.buy(sl=sl_rsi_fb, tp=tp_rsi_fb, size=final_trade_size_s7_rsi)
+                                    else: self.sell(sl=sl_rsi_fb, tp=tp_rsi_fb, size=final_trade_size_s7_rsi)
                                 else:
                                     print(f"{log_prefix_bt_next} S7 BT RSI Fallback: Invalid SL/TP relation for {rsi_fallback_side}. SL={sl_rsi_fb}, TP={tp_rsi_fb}, Entry={entry_price_s7_rsi}. No trade.")
                             else:
@@ -2407,13 +2332,9 @@ def execute_backtest(strategy_id_for_backtest, symbol, timeframe, interval_days,
                      starting_capital, # New parameter for starting capital
                      leverage_bt, # New parameter for leverage
                      account_risk_percent_bt, # New parameter for account risk %
-                     ts_enabled_bt_param, ts_atr_multiplier_bt_param, # Trailing Stop parameters for backtest
-                     min_rr_bt_param, # Min R:R for backtest
-                     optuna_params=None # For Optuna integration
+                     ts_enabled_bt_param, ts_atr_multiplier_bt_param # Trailing Stop parameters for backtest
                      ):
     print(f"Executing backtest for Strategy ID {strategy_id_for_backtest} on {symbol} ({timeframe}, {interval_days} days), Start Capital: ${starting_capital:.2f}, Leverage: {leverage_bt}x, Account Risk: {account_risk_percent_bt*100:.2f}%, Mode: {sl_tp_mode}")
-    if optuna_params:
-        print(f"  Optuna Params: {optuna_params}")
     if sl_tp_mode == "Percentage":
         print(f"  TP %: {ui_tp_percentage*100:.2f}%, SL %: {ui_sl_percentage*100:.2f}%")
     elif sl_tp_mode == "Fixed PnL":
@@ -2421,7 +2342,6 @@ def execute_backtest(strategy_id_for_backtest, symbol, timeframe, interval_days,
     elif sl_tp_mode == "ATR/Dynamic":
         print(f"  Using ATR/Dynamic SL/TP defined in strategy.")
     print(f"  Trailing Stop Enabled (BT): {ts_enabled_bt_param}, Trailing ATR Multiplier (BT): {ts_atr_multiplier_bt_param}")
-    print(f"  Minimum R:R (BT): {min_rr_bt_param}")
 
 
     kl_df, klines_error_msg = klines_extended(symbol, timeframe, interval_days)
@@ -2481,10 +2401,6 @@ def execute_backtest(strategy_id_for_backtest, symbol, timeframe, interval_days,
     print(f"DEBUG execute_backtest: Set BacktestStrategyWrapper.trailing_stop_enabled_bt to: {ts_enabled_bt_param}")
     print(f"DEBUG execute_backtest: Set BacktestStrategyWrapper.trailing_stop_atr_multiplier_bt to: {ts_atr_multiplier_bt_param}")
 
-    # Set Minimum R:R for BacktestStrategyWrapper
-    BacktestStrategyWrapper.min_rr_backtest = min_rr_bt_param
-    print(f"DEBUG execute_backtest: Set BacktestStrategyWrapper.min_rr_backtest to: {min_rr_bt_param}")
-
     # --- Set Strategy-Specific Parameters for Backtesting ---
     active_strategy_name_for_bt = STRATEGIES.get(strategy_id_for_backtest)
     if active_strategy_name_for_bt:
@@ -2531,42 +2447,9 @@ def execute_backtest(strategy_id_for_backtest, symbol, timeframe, interval_days,
     
     print(f"DEBUG execute_backtest: Calculated margin for Backtest: {margin_val} (from leverage: {leverage_bt}x)")
 
-    # Pass Optuna parameters to the strategy via Backtest instance
-    # These will be set as attributes on the Strategy instance by backtesting.py
-    
-    # Construct a dictionary of parameters to pass to Backtest.
-    # This includes both fixed parameters (like current_strategy_id_bt) and Optuna-tuned ones.
-    strategy_params_for_bt_run = {
-        'current_strategy_id_bt': strategy_id_for_backtest,
-        'user_tp_bt': ui_tp_percentage,
-        'user_sl_bt': ui_sl_percentage,
-        'sl_tp_mode_bt_dyn': sl_tp_mode,
-        'sl_pnl_amount_bt_dyn': sl_pnl_amount_val,
-        'tp_pnl_amount_bt_dyn': tp_pnl_amount_val,
-        'leverage_bt_dyn': leverage_bt,
-        'account_risk_percent_bt_dyn': account_risk_percent_bt,
-        'trailing_stop_enabled_bt_dyn': ts_enabled_bt_param,
-        'trailing_stop_atr_multiplier_bt_dyn': ts_atr_multiplier_bt_param,
-        'min_rr_backtest_dyn': min_rr_bt_param,
-        'PRICE_PRECISION_BT_dyn': get_price_precision(symbol) # Get live precision
-    }
-
-    if optuna_params:
-        strategy_params_for_bt_run.update(optuna_params)
-        print(f"DEBUG execute_backtest: Running with Optuna params: {optuna_params}")
-    else: # If not Optuna, use defaults from BacktestStrategyWrapper or UI-set ones if they were class vars
-          # For parameters that were dynamically set on BacktestStrategyWrapper class by apply_settings()
-          # we need to ensure they are also included if not overridden by Optuna.
-          # This is simpler if BacktestStrategyWrapper uses getattr(self, param, default)
-          # and optuna_params are directly passed to bt.run()
-        pass
-
-
     bt = Backtest(kl_df, BacktestStrategyWrapper, cash=starting_capital, margin=margin_val, commission=0.0007)
-    
     try:
-        # Pass all collected strategy parameters (fixed and tuned) to bt.run()
-        stats = bt.run(**strategy_params_for_bt_run)
+        stats = bt.run()
         print("Backtest completed.")
         # print(stats) # Stats can be very verbose, printed later or in UI
         print(f"DEBUG execute_backtest: Stats object type: {type(stats)}")
@@ -2590,51 +2473,14 @@ def execute_backtest(strategy_id_for_backtest, symbol, timeframe, interval_days,
         return f"Error during backtest simulation: {e}", None, None
 
     plot_error_msg = None
-    plot_filename = None # Initialize plot_filename
     try:
-        # Plotting might still fail even if simulation runs
-        # Save plot to a file instead of opening browser directly
-        timestamp_str = pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')
-        plot_filename = f"backtest_plot_{symbol}_{strategy_id_for_backtest}_{timestamp_str}.html"
-        bt.plot(filename=plot_filename, open_browser=False)
-        print(f"Backtest plot saved to {plot_filename}")
-
+        # Plotting might still fail even if simulation runs, e.g., due to Matplotlib issues or specific data conditions
+        bt.plot(open_browser=False) 
     except Exception as e_plot:
         print(f"Error during bt.plot(): {e_plot}")
         plot_error_msg = f"Plotting Error: {e_plot}. Statistics are still available."
-
-    # Save statistics and trades
-    if stats is not None:
-        try:
-            results_dir = "backtest_results"
-            if not os.path.exists(results_dir):
-                os.makedirs(results_dir)
-
-            # Save main stats object (which includes equity curve, trades, etc.)
-            stats_filename = os.path.join(results_dir, f"stats_{symbol}_{strategy_id_for_backtest}_{timestamp_str}.pkl")
-            with open(stats_filename, 'wb') as f:
-                pickle.dump(stats, f)
-            print(f"Backtest statistics saved to {stats_filename}")
-
-            # Optionally, save equity curve and trades as CSV for easier external access if needed
-            # equity_curve_df = stats._equity_curve
-            # trades_df = stats._trades
-            # equity_filename = os.path.join(results_dir, f"equity_{symbol}_{strategy_id_for_backtest}_{timestamp_str}.csv")
-            # trades_filename = os.path.join(results_dir, f"trades_{symbol}_{strategy_id_for_backtest}_{timestamp_str}.csv")
-            # equity_curve_df.to_csv(equity_filename)
-            # trades_df.to_csv(trades_filename)
-            # print(f"Equity curve saved to {equity_filename}")
-            # print(f"Trades saved to {trades_filename}")
-
-        except Exception as e_save:
-            print(f"Error saving backtest results: {e_save}")
-            # Optionally, append this error to plot_error_msg or handle differently
-            if plot_error_msg:
-                plot_error_msg += f"; Error saving results: {e_save}"
-            else:
-                plot_error_msg = f"Error saving results: {e_save}"
-
-    return stats, bt, plot_error_msg # bt object is returned for potential further inspection if needed
+        
+    return stats, bt, plot_error_msg
 
 
 # Attempt to import pandas_ta, will be checked in SuperTrend function
@@ -2680,7 +2526,6 @@ backtest_sl_var = None
 backtest_selected_strategy_var = None
 backtest_results_text_widget = None
 backtest_run_button = None # Added for enabling/disabling
-optuna_run_button = None # Added for Optuna
 
 
 # Tkinter StringVars for parameters
@@ -2751,8 +2596,6 @@ def run_backtest_command():
     global backtest_sl_pnl_amount_var, backtest_tp_pnl_amount_var, backtest_sl_tp_mode_var, backtest_starting_capital_var, backtest_leverage_var, backtest_account_risk_var
     # Add global vars for backtesting Trailing Stop
     global backtest_trailing_stop_enabled_var, backtest_trailing_stop_atr_multiplier_var
-    # Add global var for backtesting Min R:R
-    global backtest_min_rr_var # New global for Min R:R Entry
     global backtest_results_text_widget, STRATEGIES, root, status_var, backtest_run_button
 
     if backtest_run_button:
@@ -2782,10 +2625,6 @@ def run_backtest_command():
         ts_enabled_bt = backtest_trailing_stop_enabled_var.get()
         ts_atr_multiplier_str_bt = backtest_trailing_stop_atr_multiplier_var.get().strip()
         ts_atr_multiplier_bt = 1.5 # Default
-
-        # Get Min R:R for backtesting
-        min_rr_str_bt = backtest_min_rr_var.get().strip()
-        min_rr_bt = 1.5 # Default
 
         # Get SL/TP mode for backtesting
         current_backtest_sl_tp_mode = backtest_sl_tp_mode_var.get()
@@ -2864,22 +2703,6 @@ def run_backtest_command():
                 messagebox.showerror("Input Error", "Invalid number format for Trailing Stop ATR Multiplier for backtest.")
                 if backtest_run_button: backtest_run_button.config(state=tk.NORMAL)
                 return
-        
-        # Validate Min R:R for backtesting
-        if not min_rr_str_bt:
-            messagebox.showerror("Input Error", "Minimum R:R Ratio for backtest is required.")
-            if backtest_run_button: backtest_run_button.config(state=tk.NORMAL)
-            return
-        try:
-            min_rr_bt = float(min_rr_str_bt)
-            if min_rr_bt <= 0:
-                messagebox.showerror("Input Error", "Minimum R:R Ratio for backtest must be positive.")
-                if backtest_run_button: backtest_run_button.config(state=tk.NORMAL)
-                return
-        except ValueError:
-            messagebox.showerror("Input Error", "Invalid number format for Minimum R:R Ratio for backtest.")
-            if backtest_run_button: backtest_run_button.config(state=tk.NORMAL)
-            return
 
         if current_backtest_sl_tp_mode == "Percentage":
             tp_str = backtest_tp_var.get().strip() # TP %
@@ -2973,8 +2796,7 @@ def run_backtest_command():
                                         tp_percentage, sl_percentage,
                                         current_backtest_sl_tp_mode, sl_pnl, tp_pnl,
                                         starting_capital, leverage_val, account_risk_val,
-                                        ts_enabled_bt, ts_atr_multiplier_bt, # Trailing Stop params
-                                        min_rr_bt), # Min R:R param
+                                        ts_enabled_bt, ts_atr_multiplier_bt), # Added Trailing Stop params for BT
                                   daemon=True)
         thread.start()
 
@@ -2995,8 +2817,7 @@ def perform_backtest_for_multiple_symbols(symbols_list, strategy_id, timeframe, 
                                           tp_percentage_val, sl_percentage_val,
                                           passed_sl_tp_mode, sl_pnl_val, tp_pnl_val,
                                           starting_capital_val, leverage_val, account_risk_percentage_val,
-                                          ts_enabled_bt_val, ts_atr_multiplier_bt_val, # Trailing Stop params
-                                          min_rr_bt_val): # Min R:R param
+                                          ts_enabled_bt_val, ts_atr_multiplier_bt_val): # Added Trailing Stop params
     global backtest_results_text_widget, root, status_var, backtest_run_button
     all_symbols_completed = True
 
@@ -3030,8 +2851,7 @@ def perform_backtest_for_multiple_symbols(symbols_list, strategy_id, timeframe, 
             tp_percentage_val, sl_percentage_val,
             passed_sl_tp_mode, sl_pnl_val, tp_pnl_val,
             starting_capital_val, leverage_val, account_risk_percentage_val,
-            ts_enabled_bt_val, ts_atr_multiplier_bt_val, # Pass Trailing Stop params
-            min_rr_bt_val # Pass Min R:R
+            ts_enabled_bt_val, ts_atr_multiplier_bt_val # Pass Trailing Stop params
         )
 
         # Update UI with results for this specific symbol
@@ -3236,10 +3056,7 @@ TP_PNL_AMOUNT = 20.0       # Default TP PnL amount in $
 
 # Global variables for Trailing Stop
 TRAILING_STOP_ENABLED = False
-TRAILING_STOP_ATR_MULTIPLIER = 1.5 # Default value
-
-# Global variable for Risk-Reward Ratio Filter
-MIN_RISK_REWARD_RATIO = 1.5 # Default value
+TRAILING_STOP_ATR_MULTIPLIER = 1.5
 
 
 # --- GUI Helper Function ---
@@ -5386,411 +5203,227 @@ def open_order(symbol, side, strategy_sl=None, strategy_tp=None, strategy_accoun
     original_side_param = side # Store original for logging
     if side == 'up':
         side = 'buy'
-        # print(f"INFO: Mapped side parameter from 'up' to 'buy' for symbol {symbol}") # Reduced verbosity
+        print(f"INFO: Mapped side parameter from 'up' to 'buy' for symbol {symbol}")
     elif side == 'down':
         side = 'sell'
-        # print(f"INFO: Mapped side parameter from 'down' to 'sell' for symbol {symbol}") # Reduced verbosity
-    elif side not in ['buy', 'sell']: 
-        print(f"ERROR: Invalid side parameter '{original_side_param}' received in open_order for {symbol}. Aborting.")
+        print(f"INFO: Mapped side parameter from 'down' to 'sell' for symbol {symbol}")
+    elif side not in ['buy', 'sell']: # If it's already 'buy' or 'sell', do nothing, otherwise error
+        print(f"ERROR: Invalid side parameter '{original_side_param}' received in open_order for symbol {symbol}. Expected 'up', 'down', 'buy', or 'sell'. Aborting order.")
         return
 
     try:
-        price = float(client.ticker_price(symbol)['price']) # This is the current market price, used as entry
+        price = float(client.ticker_price(symbol)['price'])
         qty_precision = get_qty_precision(symbol)
         price_precision = get_price_precision(symbol)
-        # print(f"DEBUG: open_order: Initial price={price}, qty_precision={qty_precision}, price_precision={price_precision}")
+        print(f"DEBUG: open_order: Initial price={price}, qty_precision={qty_precision}, price_precision={price_precision}")
         if not isinstance(price_precision, int) or price_precision < 0:
-            print(f"Warning: Invalid price_precision '{price_precision}' for {symbol}. Defaulting to 2.")
-            price_precision = 2
+            print(f"Warning: Invalid price_precision '{price_precision}' for {symbol}. Defaulting to 4.")
+            price_precision = 4
 
         account_balance = get_balance_usdt()
-        if account_balance is None or account_balance <= 0:
-            print(f"Order Error ({symbol}): Account balance is {account_balance}. Aborting.")
+        if account_balance is None or account_balance <= 0: return
+
+        capital_to_risk_usdt = 0.0
+        sl_for_sizing_percentage = 0.0
+
+        print(f"INFO: Current SL/TP Mode: {SL_TP_MODE} for {symbol}")
+
+        if SL_TP_MODE == "Fixed PnL":
+            if SL_PNL_AMOUNT <= 0:
+                print(f"Warning: SL PnL Amount ($ {SL_PNL_AMOUNT}) must be positive for 'Fixed PnL' mode. Aborting order for {symbol}.")
+                return
+            capital_to_risk_usdt = SL_PNL_AMOUNT  # The fixed $ amount to risk
+            # For Fixed PnL, quantity is determined by this risk amount and the price difference to SL.
+            # The SL price itself will be entry_price - (SL_PNL_AMOUNT / quantity).
+            # So, sl_for_sizing_percentage is not directly used to set the SL distance here,
+            # but rather to estimate a reasonable notional position size.
+            # We can use a reference SL_PERCENT for this initial notional sizing.
+            sl_for_sizing_percentage = SL_PERCENT 
+            print(f"Using Fixed PnL mode: Capital to Risk = ${capital_to_risk_usdt:.2f}, SL_PERCENT for initial sizing ref = {sl_for_sizing_percentage*100:.2f}%")
+        else: # Percentage or ATR/Dynamic mode
+            current_account_risk = ACCOUNT_RISK_PERCENT # Global default
+            if strategy_account_risk_percent is not None and 0 < strategy_account_risk_percent < 1:
+                current_account_risk = strategy_account_risk_percent
+                print(f"Using strategy-defined account risk: {current_account_risk*100:.2f}% for {symbol}")
+            else:
+                print(f"Using global account risk: {current_account_risk*100:.2f}% for {symbol}")
+            capital_to_risk_usdt = account_balance * current_account_risk
+
+            if SL_TP_MODE == "ATR/Dynamic" and strategy_sl is not None:
+                # Ensure strategy_sl is valid for the side before calculating percentage
+                if (side == 'buy' and strategy_sl < price) or \
+                   (side == 'sell' and strategy_sl > price):
+                    sl_for_sizing_percentage = abs(price - strategy_sl) / price
+                else:
+                    print(f"Warning: Invalid strategy_sl ({strategy_sl}) for ATR/Dynamic sizing on {symbol} {side} at price {price}. Defaulting to global SL_PERCENT.")
+                    sl_for_sizing_percentage = SL_PERCENT
+                print(f"Using ATR/Dynamic mode: SL for sizing derived from strategy_sl ({strategy_sl}), effective SL % for sizing: {sl_for_sizing_percentage*100:.2f}%")
+            else: # Percentage mode (or ATR/Dynamic without strategy_sl, fallback to Percentage)
+                sl_for_sizing_percentage = SL_PERCENT
+                if SL_TP_MODE == "ATR/Dynamic": # Log if ATR/Dynamic is falling back
+                     print(f"INFO: SL_TP_MODE is 'ATR/Dynamic' but strategy_sl not provided. Falling back to SL_PERCENT for sizing reference.")
+                print(f"Using Percentage mode (or fallback): SL_PERCENT for sizing = {sl_for_sizing_percentage*100:.2f}%")
+
+        if capital_to_risk_usdt <= 0:
+            print(f"Warning: Capital to risk is {capital_to_risk_usdt:.2f} for {symbol}. Aborting order.")
+            return
+        if sl_for_sizing_percentage <= 0: # This check is crucial
+            print(f"Warning: SL for sizing percentage is {sl_for_sizing_percentage*100:.2f}%. Cannot calculate position size. Aborting order for {symbol}.")
             return
 
-        # --- Determine current_account_risk ---
-        current_account_risk = ACCOUNT_RISK_PERCENT # Global default
-        if strategy_account_risk_percent is not None and 0 < strategy_account_risk_percent < 1:
-            current_account_risk = strategy_account_risk_percent
-            # print(f"Using strategy-defined account risk: {current_account_risk*100:.2f}% for {symbol}") # Reduced verbosity
-        # else:
-            # print(f"Using global account risk: {current_account_risk*100:.2f}% for {symbol}") # Reduced verbosity
-        if not (0 < current_account_risk < 1): # Ensure risk percent is valid
-            print(f"Order Error ({symbol}): Invalid account risk percentage {current_account_risk*100:.2f}%. Aborting."); return
-
-        # --- Determine SL Price (sl_actual) & TP Price (tp_actual) ---
-        sl_actual, tp_actual = None, None
-
-        if SL_TP_MODE == "Fixed PnL":
-            # SL/TP for Fixed PnL depends on quantity, which is determined below.
-            # So, defer final sl_actual, tp_actual calculation for Fixed PnL.
-            pass
-        elif SL_TP_MODE == "ATR/Dynamic" or SL_TP_MODE == "StrategyDefined_SD":
-            if strategy_sl is not None and strategy_tp is not None:
-                sl_actual = strategy_sl
-                tp_actual = strategy_tp
-            else: # Fallback to Percentage SL/TP
-                print(f"INFO: {SL_TP_MODE} selected for {symbol} but no strategy_sl/tp. Falling back to Percentage SL/TP.")
-                if side == 'buy':
-                    sl_actual = round(price - price * SL_PERCENT, price_precision)
-                    tp_actual = round(price + price * TP_PERCENT, price_precision)
-                elif side == 'sell':
-                    sl_actual = round(price + price * SL_PERCENT, price_precision)
-                    tp_actual = round(price - price * TP_PERCENT, price_precision)
-        elif SL_TP_MODE == "Percentage":
-            if side == 'buy':
-                sl_actual = round(price - price * SL_PERCENT, price_precision)
-                tp_actual = round(price + price * TP_PERCENT, price_precision)
-            elif side == 'sell':
-                sl_actual = round(price + price * SL_PERCENT, price_precision)
-                tp_actual = round(price - price * TP_PERCENT, price_precision)
-        else:
-            print(f"Order Error ({symbol}): Unknown SL_TP_MODE '{SL_TP_MODE}'. Aborting."); return
+        position_size_usdt_notional = capital_to_risk_usdt / sl_for_sizing_percentage
         
-        # --- Calculate Quantity (calculated_qty_asset) ---
-        calculated_qty_asset = 0.0
-        position_size_usdt_notional = 0.0
-
-        if SL_TP_MODE == "Fixed PnL":
-            if SL_PNL_AMOUNT <= 0: print(f"Order Warning ({symbol}): SL PnL Amount ($ {SL_PNL_AMOUNT}) invalid for Fixed PnL. Aborting."); return
-            # For Fixed PnL, risk amount is SL_PNL_AMOUNT.
-            # Use a reference SL percentage to derive an initial notional size.
-            reference_sl_percentage_for_fixed_pnl = SL_PERCENT 
-            if reference_sl_percentage_for_fixed_pnl <=0: print(f"Order Warning ({symbol}): Reference SL_PERCENT invalid for Fixed PnL sizing. Aborting."); return
-            
-            # Notional size based on fixed PnL amount and reference stop distance percentage
-            position_size_usdt_notional = SL_PNL_AMOUNT / reference_sl_percentage_for_fixed_pnl
-            # print(f"Fixed PnL Mode ({symbol}): SL PnL=${SL_PNL_AMOUNT:.2f}, Ref SL%={reference_sl_percentage_for_fixed_pnl*100:.2f}%, InitNotional=${position_size_usdt_notional:.2f}")
-        
-        elif SL_TP_MODE == "Percentage" or SL_TP_MODE == "ATR/Dynamic" or SL_TP_MODE == "StrategyDefined_SD":
-            if sl_actual is None: # SL price must be known for these modes to use calculate_position_size
-                print(f"Order Error ({symbol}): SL price (sl_actual) is None for {SL_TP_MODE}. Cannot size. Aborting."); return
-            if price == sl_actual: # Prevent division by zero in calculate_position_size
-                 print(f"Order Error ({symbol}): Entry price and SL price are identical ({price}). Cannot size. Aborting."); return
-
-            asset_qty_from_calc = calculate_position_size(account_balance, current_account_risk, price, sl_actual)
-            calculated_qty_asset = round(asset_qty_from_calc, qty_precision) # Round here
-            position_size_usdt_notional = calculated_qty_asset * price # Notional based on calculated & rounded quantity
-            # print(f"{SL_TP_MODE} Mode ({symbol}): asset_qty_from_calc={asset_qty_from_calc:.8f}, rounded_qty={calculated_qty_asset}, Notional=${position_size_usdt_notional:.2f}")
-        
-        else: # Should not be reached
-            print(f"Order Error ({symbol}): Unhandled SL_TP_MODE '{SL_TP_MODE}' for quantity calculation. Aborting."); return
-
-        # --- Apply Notional Cap (common for all modes) ---
         CAP_FRACTION_OF_BALANCE = 0.50 
         max_permissible_notional_value = account_balance * CAP_FRACTION_OF_BALANCE
         if position_size_usdt_notional > max_permissible_notional_value:
-            # print(f"INFO: Position size for {symbol} being capped. Original notional: {position_size_usdt_notional:.2f} USDT.") # Reduced verbosity
+            original_calculated_pos_size_usdt = position_size_usdt_notional
             position_size_usdt_notional = max_permissible_notional_value
-            # Recalculate quantity based on capped notional value
-            if price <= 0: print(f"Order Error ({symbol}): Price is {price}. Cannot recalculate quantity after cap. Aborting."); return
-            calculated_qty_asset = round(position_size_usdt_notional / price, qty_precision)
-            # print(f"INFO: Capped notional: {position_size_usdt_notional:.2f} USDT, New capped quantity: {calculated_qty_asset} for {symbol}.")
+            print(f"INFO: Position size capped for {symbol}. Original calc: {original_calculated_pos_size_usdt:.2f} USDT, Capped to: {position_size_usdt_notional:.2f} USDT.")
         
+        calculated_qty_asset = round(position_size_usdt_notional / price, qty_precision)
         if calculated_qty_asset <= 0:
-            print(f"Order Warning ({symbol}): Final calculated quantity is {calculated_qty_asset}. Aborting order.")
+            print(f"Warning: Calculated quantity is {calculated_qty_asset} for {symbol}. Aborting order.")
             return
 
-        # --- Finalize SL/TP for Fixed PnL (now that quantity is known) ---
+        print(f"Order Details ({symbol}): SL/TP Mode='{SL_TP_MODE}', Bal={account_balance:.2f}, RiskCap=${capital_to_risk_usdt:.2f}, SL_Sizing%={sl_for_sizing_percentage*100:.2f}%, NotionalPosUSD={position_size_usdt_notional:.2f}, Qty={calculated_qty_asset}")
+
+        sl_actual, tp_actual = None, None
+
         if SL_TP_MODE == "Fixed PnL":
-            if TP_PNL_AMOUNT <= 0: print(f"Order Warning ({symbol}): TP PnL Amount ($ {TP_PNL_AMOUNT}) invalid. Aborting."); return
-            if calculated_qty_asset == 0: print(f"Order Error ({symbol}): Quantity is zero for Fixed PnL SL/TP calc. Aborting."); return
+            if TP_PNL_AMOUNT <= 0: 
+                print(f"Warning: TP PnL Amount ($ {TP_PNL_AMOUNT}) must be positive for 'Fixed PnL' mode. Aborting order for {symbol}.")
+                return
+            if calculated_qty_asset == 0: 
+                print(f"Error: Calculated quantity is zero for Fixed PnL mode, cannot determine PnL-based SL/TP for {symbol}. Aborting.")
+                return
+
             if side == 'buy':
                 sl_actual = round(price - (SL_PNL_AMOUNT / calculated_qty_asset), price_precision)
                 tp_actual = round(price + (TP_PNL_AMOUNT / calculated_qty_asset), price_precision)
             elif side == 'sell':
                 sl_actual = round(price + (SL_PNL_AMOUNT / calculated_qty_asset), price_precision)
                 tp_actual = round(price - (TP_PNL_AMOUNT / calculated_qty_asset), price_precision)
-            # print(f"Final Fixed PnL SL/TP ({symbol} {side}): SL={sl_actual}, TP={tp_actual} (Qty={calculated_qty_asset})")
+            print(f"Using Fixed PnL: SL: {sl_actual}, TP: {tp_actual} for {symbol} {side} (Qty: {calculated_qty_asset})")
 
-        # --- Validate SL/TP Prices (common for all modes) ---
-        if sl_actual is None or tp_actual is None:
-            print(f"Order Error ({symbol} {side}): SL or TP price is None after all calculations. Mode: {SL_TP_MODE}. Aborting.")
+        elif SL_TP_MODE == "ATR/Dynamic" or SL_TP_MODE == "StrategyDefined_SD": # Modified to include new mode
+            if strategy_sl is not None and strategy_tp is not None:
+                sl_actual = strategy_sl
+                tp_actual = strategy_tp
+                print(f"Using {SL_TP_MODE} (strategy-defined): SL: {sl_actual}, TP: {tp_actual} for {symbol} {side}")
+            else:
+                # Fallback to percentage if strategy doesn't provide SL/TP for these modes
+                print(f"INFO: {SL_TP_MODE} mode selected but no strategy_sl/tp provided for {symbol}. Falling back to Percentage SL/TP.")
+                if side == 'buy':
+                    sl_actual = round(price - price * SL_PERCENT, price_precision)
+                    tp_actual = round(price + price * TP_PERCENT, price_precision)
+                elif side == 'sell':
+                    sl_actual = round(price + price * SL_PERCENT, price_precision)
+                    tp_actual = round(price - price * TP_PERCENT, price_precision)
+                print(f"Using Fallback Percentage for ATR/Dynamic: SL: {sl_actual}, TP: {tp_actual} for {symbol} {side}")
+        
+        elif SL_TP_MODE == "Percentage": # Explicitly Percentage Mode
+            if side == 'buy':
+                sl_actual = round(price - price * SL_PERCENT, price_precision)
+                tp_actual = round(price + price * TP_PERCENT, price_precision)
+            elif side == 'sell':
+                sl_actual = round(price + price * SL_PERCENT, price_precision)
+                tp_actual = round(price - price * TP_PERCENT, price_precision)
+            print(f"Using Percentage-based: SL: {sl_actual} (from {SL_PERCENT*100}%), TP: {tp_actual} (from {TP_PERCENT*100}%) for {symbol} {side}")
+        
+        else: # Should not be reached if SL_TP_MODE is validated earlier
+            print(f"Error: Unknown SL_TP_MODE '{SL_TP_MODE}' in open_order. Aborting.")
             return
+
+        if sl_actual is None or tp_actual is None:
+            print(f"Error: SL or TP price could not be determined for {symbol} {side} with mode {SL_TP_MODE}. Aborting order.")
+            return
+        
+        # Validate that SL and TP are not impossible 
         if side == 'buy':
-            if sl_actual >= price: print(f"Order Warning ({symbol} BUY): SL price {sl_actual} >= entry {price}. Aborting."); return
-            if tp_actual <= price: print(f"Order Warning ({symbol} BUY): TP price {tp_actual} <= entry {price}. Aborting."); return
+            if sl_actual >= price: print(f"Warning: SL price {sl_actual} is at or above entry price {price} for BUY order on {symbol}. Check logic."); return
+            if tp_actual <= price: print(f"Warning: TP price {tp_actual} is at or below entry price {price} for BUY order on {symbol}. Check logic."); return
         elif side == 'sell':
-            if sl_actual <= price: print(f"Order Warning ({symbol} SELL): SL price {sl_actual} <= entry {price}. Aborting."); return
-            if tp_actual >= price: print(f"Order Warning ({symbol} SELL): TP price {tp_actual} >= entry {price}. Aborting."); return
+            if sl_actual <= price: print(f"Warning: SL price {sl_actual} is at or below entry price {price} for SELL order on {symbol}. Check logic."); return
+            if tp_actual >= price: print(f"Warning: TP price {tp_actual} is at or above entry price {price} for SELL order on {symbol}. Check logic."); return
 
-        # --- Risk-Reward Ratio Filter ---
-        # Apply only if SL/TP mode is Percentage or ATR/Dynamic, as Fixed PnL has implicit R:R.
-        # StrategyDefined_SD (like S6) should handle its own R:R, so skip for it too if SL/TP are from strategy.
-        if SL_TP_MODE in ["Percentage", "ATR/Dynamic"]: # ATR/Dynamic includes strategy-defined SL/TPs passed in
-            if price == sl_actual: # Should have been caught earlier, but as a safeguard
-                print(f"Order Error ({symbol} {side}): Entry price and SL price are identical for R:R calc. Aborting."); return
 
-            risk = abs(price - sl_actual)
-            reward = abs(tp_actual - price)
-
-            if risk == 0: # Should not happen if price != sl_actual
-                print(f"Order Warning ({symbol} {side}): Calculated risk is zero. Aborting R:R check and order."); return
-            
-            rr_ratio = reward / risk
-            # print(f"DEBUG R:R Filter ({symbol} {side}): Risk={risk:.4f}, Reward={reward:.4f}, Ratio={rr_ratio:.2f}, MinReq={MIN_RISK_REWARD_RATIO}") # Verbose
-            if rr_ratio < MIN_RISK_REWARD_RATIO:
-                print(f"Order REJECTED ({symbol} {side}): Risk-Reward Ratio ({rr_ratio:.2f}) is less than minimum ({MIN_RISK_REWARD_RATIO}).")
-                return # Do not open order
-            # else:
-                # print(f"INFO R:R Filter ({symbol} {side}): Ratio {rr_ratio:.2f} meets minimum {MIN_RISK_REWARD_RATIO}.") # Verbose
-
-        print(f"Final Order Details ({symbol} {side}): Mode='{SL_TP_MODE}', Qty={calculated_qty_asset}, EntryP={price}, SLP={sl_actual}, TPP={tp_actual}")
-
-        # --- Place Orders ---
         if side == 'buy':
             resp1 = client.new_order(symbol=symbol, side='BUY', type='LIMIT', quantity=calculated_qty_asset, timeInForce='GTC', price=price, newOrderRespType='FULL')
-            print(f"BUY {symbol}: {resp1.get('orderId', 'N/A')}")
+            print(f"BUY {symbol}: {resp1}")
             sleep(0.2)
             resp2 = client.new_order(symbol=symbol, side='SELL', type='STOP_MARKET', quantity=calculated_qty_asset, timeInForce='GTC', stopPrice=sl_actual, reduceOnly=True, newOrderRespType='FULL')
-            print(f"SL for BUY {symbol}: {resp2.get('orderId', 'N/A')}")
+            print(f"SL for BUY {symbol}: {resp2}")
             sleep(0.2)
             resp3 = client.new_order(symbol=symbol, side='SELL', type='TAKE_PROFIT_MARKET', quantity=calculated_qty_asset, timeInForce='GTC', stopPrice=tp_actual, reduceOnly=True, newOrderRespType='FULL')
-            print(f"TP for BUY {symbol}: {resp3.get('orderId', 'N/A')}")
+            print(f"TP for BUY {symbol}: {resp3}")
+
+            # --- BEGIN MODIFICATION: Update UI after BUY order ---
+            sleep(0.5) # Allow time for Binance backend to process
+            fresh_positions, fresh_open_orders = get_active_positions_data() # MODIFIED
+            formatted_positions = format_positions_for_display(fresh_positions, fresh_open_orders) # MODIFIED
+            if root and root.winfo_exists() and positions_text_widget:
+                root.after(0, update_text_widget_content, positions_text_widget, formatted_positions)
+
+            fresh_history = get_trade_history(symbol_list=TARGET_SYMBOLS, limit_per_symbol=10)
+            if root and root.winfo_exists() and history_text_widget:
+                root.after(0, update_text_widget_content, history_text_widget, fresh_history)
+            # --- END MODIFICATION ---
+
         elif side == 'sell':
             resp1 = client.new_order(symbol=symbol, side='SELL', type='LIMIT', quantity=calculated_qty_asset, timeInForce='GTC', price=price, newOrderRespType='FULL')
-            print(f"SELL {symbol}: {resp1.get('orderId', 'N/A')}")
+            print(f"SELL {symbol}: {resp1}")
             sleep(0.2)
             resp2 = client.new_order(symbol=symbol, side='BUY', type='STOP_MARKET', quantity=calculated_qty_asset, timeInForce='GTC', stopPrice=sl_actual, reduceOnly=True, newOrderRespType='FULL')
-            print(f"SL for SELL {symbol}: {resp2.get('orderId', 'N/A')}")
+            print(f"SL for SELL {symbol}: {resp2}")
             sleep(0.2)
             resp3 = client.new_order(symbol=symbol, side='BUY', type='TAKE_PROFIT_MARKET', quantity=calculated_qty_asset, timeInForce='GTC', stopPrice=tp_actual, reduceOnly=True, newOrderRespType='FULL')
-            print(f"TP for SELL {symbol}: {resp3.get('orderId', 'N/A')}")
-        
-        # --- Update UI (common for buy/sell) ---
-        sleep(0.5) 
-        fresh_positions, fresh_open_orders = get_active_positions_data()
-        formatted_positions = format_positions_for_display(fresh_positions, fresh_open_orders)
-        if root and root.winfo_exists() and positions_text_widget:
-            root.after(0, update_text_widget_content, positions_text_widget, formatted_positions)
-        fresh_history = get_trade_history(symbol_list=TARGET_SYMBOLS, limit_per_symbol=10)
-        if root and root.winfo_exists() and history_text_widget:
-            root.after(0, update_text_widget_content, history_text_widget, fresh_history)
+            print(f"TP for SELL {symbol}: {resp3}")
+
+            # --- BEGIN MODIFICATION: Update UI after SELL order ---
+            sleep(0.5) # Allow time for Binance backend to process
+            fresh_positions, fresh_open_orders = get_active_positions_data() # MODIFIED
+            formatted_positions = format_positions_for_display(fresh_positions, fresh_open_orders) # MODIFIED
+            if root and root.winfo_exists() and positions_text_widget:
+                root.after(0, update_text_widget_content, positions_text_widget, formatted_positions)
+
+            fresh_history = get_trade_history(symbol_list=TARGET_SYMBOLS, limit_per_symbol=10)
+            if root and root.winfo_exists() and history_text_widget:
+                root.after(0, update_text_widget_content, history_text_widget, fresh_history)
+            # --- END MODIFICATION ---
 
     except ClientError as error:
         err_msg_prefix = f"Order Err ({symbol}, {side})"
-        if error.error_code == -1111: print(f"{err_msg_prefix}: PRECISION ISSUE. Binance msg: {error.error_message}")
-        elif error.error_code == -4014: print(f"{err_msg_prefix}: MIN_NOTIONAL (Code -4014). Binance msg: {error.error_message}")
-        elif error.error_code == -4104: print(f"{err_msg_prefix}: MIN_NOTIONAL (Code -4104). Binance msg: {error.error_message}")
-        elif error.error_code == -4003: print(f"{err_msg_prefix}: PRICE_FILTER (Code -4003). Binance msg: {error.error_message}")
-        elif error.error_code == -4105: print(f"{err_msg_prefix}: PRICE_FILTER (Code -4105). Binance msg: {error.error_message}")
-        elif error.error_code == -2010: print(f"{err_msg_prefix}: INSUFFICIENT BALANCE or other issue (Code -2010). Binance msg: {error.error_message}")
-        else: print(f"{err_msg_prefix}: Code {error.error_code} - {error.error_message if error.error_message else error}")
-        return None
+        if error.error_code == -1111: # Standard Binance code for precision issues
+            print(f"{err_msg_prefix}: PRECISION ISSUE. Check quantity/price decimal places. Binance msg: {error.error_message}")
+        elif error.error_code == -4014: # Often related to MIN_NOTIONAL for Spot/Margin, UMFutures might use a different one like -4104
+            print(f"{err_msg_prefix}: MIN_NOTIONAL or similar filter failure (Code -4014). Order value potentially too small. Binance msg: {error.error_message}")
+        elif error.error_code == -4104: # Specific to UMFutures for MIN_NOTIONAL
+            print(f"{err_msg_prefix}: MIN_NOTIONAL filter failure (Code -4104). Order value too small. Binance msg: {error.error_message}")
+        elif error.error_code == -4003: # Often PRICE_FILTER for Spot/Margin, UMFutures might use -4105
+            print(f"{err_msg_prefix}: PRICE_FILTER or similar failure (Code -4003). Price out of bounds or invalid. Binance msg: {error.error_message}")
+        elif error.error_code == -4105: # Specific to UMFutures for PRICE_FILTER
+            print(f"{err_msg_prefix}: PRICE_FILTER failure (Code -4105). Price out of bounds or invalid. Binance msg: {error.error_message}")
+        elif error.error_code == -2010: # Typical for insufficient balance
+            print(f"{err_msg_prefix}: INSUFFICIENT BALANCE (Code -2010). Check available margin/funds. Binance msg: {error.error_message}")
+        else:
+            print(f"{err_msg_prefix}: Code {error.error_code} - {error.error_message if error.error_message else error}")
+        return None # Return None on ClientError
     except Exception as e:
-        print(f"Order Unexpected Err ({symbol}, {side}): {e} (Line: {e.__traceback__.tb_lineno if e.__traceback__ else 'N/A'})")
-        return None
+        print(f"Order Unexpected Err ({symbol}, {side}): {e}")
+        return None # Return None on other exceptions
     
+    # If all orders are successful, return their details
     order_details = {
-        'entry_order_id': resp1.get('orderId') if 'resp1' in locals() and resp1 else None,
-        'sl_order_id': resp2.get('orderId') if 'resp2' in locals() and resp2 else None,
-        'tp_order_id': resp3.get('orderId') if 'resp3' in locals() and resp3 else None,
-        'sl_price': sl_actual, 'tp_price': tp_actual, 'entry_price': price,
-        'qty': calculated_qty_asset, 'side': side
+        'entry_order_id': resp1.get('orderId') if resp1 else None,
+        'sl_order_id': resp2.get('orderId') if resp2 else None,
+        'tp_order_id': resp3.get('orderId') if resp3 else None,
+        'sl_price': sl_actual,
+        'tp_price': tp_actual,
+        'entry_price': price, # The price at which the LIMIT order was placed
+        'qty': calculated_qty_asset,
+        'side': side # 'buy' or 'sell'
     }
     return order_details
-
-# --- New Function: Place Limit Order ---
-def place_limit_order(symbol: str, side: str, price: float, quantity: float):
-    """
-    Places a limit order on Binance.
-    Args:
-        symbol (str): The trading symbol (e.g., 'BTCUSDT').
-        side (str): 'BUY' or 'SELL'.
-        price (float): The price for the limit order.
-        quantity (float): The quantity to order.
-    Returns:
-        dict: The order response from Binance API, or None if an error occurs.
-    """
-    global client
-    if not client:
-        print(f"ERROR (place_limit_order {symbol}): Binance client not initialized.")
-        return None
-
-    if side.upper() not in ['BUY', 'SELL']:
-        print(f"ERROR (place_limit_order {symbol}): Invalid order side '{side}'. Must be 'BUY' or 'SELL'.")
-        return None
-    
-    if quantity <= 0:
-        print(f"ERROR (place_limit_order {symbol}): Quantity must be positive. Got {quantity}.")
-        return None
-
-    if price <= 0:
-        print(f"ERROR (place_limit_order {symbol}): Price must be positive. Got {price}.")
-        return None
-
-    try:
-        qty_precision = get_qty_precision(symbol)
-        price_precision = get_price_precision(symbol)
-
-        # Ensure quantity and price are formatted to their respective precisions
-        # Binance API often requires this for specific symbols.
-        # Some symbols might have quantityPrecision = 0, meaning integer quantities.
-        formatted_quantity = f"{quantity:.{qty_precision}f}" if qty_precision > 0 else str(int(quantity))
-        formatted_price = f"{price:.{price_precision}f}"
-
-        print(f"Attempting to place {side} LIMIT order for {formatted_quantity} {symbol} at {formatted_price}")
-        
-        order_response = client.new_order(
-            symbol=symbol,
-            side=side.upper(),
-            type='LIMIT',
-            quantity=float(formatted_quantity), # API expects float for quantity
-            timeInForce='GTC',  # Good 'Til Canceled
-            price=formatted_price,
-            newOrderRespType='FULL' # Get full response
-        )
-        print(f"LIMIT Order Response ({symbol} {side} at {price}): {order_response}")
-        return order_response
-    except ClientError as ce:
-        print(f"API ClientError (place_limit_order {symbol} {side} at {price}): {ce.error_code} - {ce.error_message}")
-        return None
-    except Exception as e:
-        print(f"Unexpected Error (place_limit_order {symbol} {side} at {price}): {e}")
-        return None
-
-# --- New Function: Place Grid Orders ---
-def place_grid_orders(symbol: str, support: float, resistance: float, quantity_per_order: float, grid_levels: int = 5):
-    """
-    Places a grid of limit orders between support and resistance levels.
-    Args:
-        symbol (str): The trading symbol (e.g., 'BTCUSDT').
-        support (float): The support price level.
-        resistance (float): The resistance price level.
-        quantity_per_order (float): The quantity for each individual limit order.
-        grid_levels (int): The number of buy orders (and corresponding sell orders) to place.
-    """
-    if not client:
-        print(f"ERROR (place_grid_orders {symbol}): Binance client not initialized.")
-        return
-    
-    if support <= 0 or resistance <= 0 or support >= resistance:
-        print(f"ERROR (place_grid_orders {symbol}): Invalid support/resistance levels. Support: {support}, Resistance: {resistance}")
-        return
-
-    if quantity_per_order <= 0:
-        print(f"ERROR (place_grid_orders {symbol}): Quantity per order must be positive. Got {quantity_per_order}.")
-        return
-
-    if grid_levels <= 0:
-        print(f"ERROR (place_grid_orders {symbol}): Grid levels must be positive. Got {grid_levels}.")
-        return
-
-    print(f"Placing grid orders for {symbol} between {support} and {resistance}, Levels: {grid_levels}, Qty/Order: {quantity_per_order}")
-
-    step = (resistance - support) / grid_levels
-
-    if step <= 0: # Should be caught by support >= resistance, but as a safeguard
-        print(f"ERROR (place_grid_orders {symbol}): Calculated step is not positive ({step}). Resistance might be too close to support for the number of levels.")
-        return
-
-    orders_placed_details = {'buy_orders': [], 'sell_orders': []}
-
-    for i in range(grid_levels): # This will place 'grid_levels' buy orders and 'grid_levels' sell orders
-        buy_price = support + (i * step)
-        # The corresponding sell order for this buy grid line would typically be one step above it.
-        # Or, if it's a grid around a central price, sell orders are placed above and buy orders below.
-        # The problem description's snippet was: sell_price = buy_price + step
-        # This implies a series of buy orders and then sell orders one step above each buy.
-        # Let's refine this slightly: place buy orders from support upwards, and sell orders from resistance downwards.
-        # Or follow the snippet strictly. The snippet:
-        #   buy_price = support + i * step
-        #   sell_price = buy_price + step 
-        # This places buy orders at support, support+step, support+2*step ...
-        # And sell orders at support+step, support+2*step, support+3*step ...
-        # This means the highest buy is at support + (grid_levels-1)*step
-        # And the highest sell is at support + grid_levels*step (which is resistance)
-
-        # Adhering to the problem's formula:
-        # Buy orders
-        current_buy_price = support + (i * step)
-        # Sell orders (one step above each buy)
-        current_sell_price = current_buy_price + step
-        
-        price_precision = get_price_precision(symbol)
-        if not isinstance(price_precision, int) or price_precision < 0: price_precision = 2 # Fallback
-
-        rounded_buy_price = round(current_buy_price, price_precision)
-        rounded_sell_price = round(current_sell_price, price_precision)
-
-        # Place buy order
-        print(f"Grid {symbol}: Placing BUY {quantity_per_order} at {rounded_buy_price}")
-        buy_order_detail = place_limit_order(symbol, 'BUY', rounded_buy_price, quantity_per_order)
-        if buy_order_detail:
-            orders_placed_details['buy_orders'].append(buy_order_detail)
-        sleep(0.1) # Small delay
-
-        # Place sell order
-        # Ensure sell price is not same as buy price after rounding, and is above buy price
-        if rounded_sell_price > rounded_buy_price :
-            print(f"Grid {symbol}: Placing SELL {quantity_per_order} at {rounded_sell_price}")
-            sell_order_detail = place_limit_order(symbol, 'SELL', rounded_sell_price, quantity_per_order)
-            if sell_order_detail:
-                orders_placed_details['sell_orders'].append(sell_order_detail)
-            sleep(0.1) # Small delay
-        else:
-            print(f"Grid {symbol}: Skipping sell order for buy at {rounded_buy_price} because sell price {rounded_sell_price} is not above it after rounding.")
-
-
-    num_buy_placed = len(orders_placed_details['buy_orders'])
-    num_sell_placed = len(orders_placed_details['sell_orders'])
-    print(f"Grid orders placement summary for {symbol}: {num_buy_placed}/{grid_levels} BUY orders placed, {num_sell_placed}/{grid_levels} SELL orders placed.")
-    # Note: The number of sell orders might be less if sell_price <= buy_price after rounding for some steps.
-
-    # This function doesn't return the details directly but prints them.
-    # Could be modified to return orders_placed_details if needed by a caller.
-
-# --- New Function: Fetch News Sentiment (Placeholder) ---
-def fetch_news_sentiment(symbol: str) -> dict:
-    """
-    Placeholder function for fetching news sentiment.
-    In a real implementation, this would query a news API and perform sentiment analysis.
-    Args:
-        symbol (str): The trading symbol (e.g., 'BTCUSDT').
-    Returns:
-        dict: A dictionary containing 'sentiment_score' (float from -1.0 to 1.0) and 'error' (str or None).
-    """
-    print(f"Fetching news sentiment for {symbol} (Placeholder - returning neutral).")
-    # Simulate a neutral sentiment by default.
-    # To test the pausing mechanism, this function can be temporarily modified
-    # to return a score like -0.9 for a specific symbol.
-    # Example:
-    # if symbol == "BTCUSDT":
-    #     return {'sentiment_score': -0.9, 'error': None, 'source': 'Simulated Extreme Bearish'}
-    return {'sentiment_score': 0.0, 'error': None, 'source': 'Placeholder Neutral'}
-
-# --- New Function: Check News Impact ---
-def check_news_impact(symbol: str) -> bool:
-    """
-    Checks if trading should be paused based on news sentiment.
-    Args:
-        symbol (str): The trading symbol.
-    Returns:
-        bool: True if trading is allowed, False if trading should be paused.
-    """
-    news_data = fetch_news_sentiment(symbol)
-
-    if news_data.get('error'):
-        print(f"WARNING (check_news_impact {symbol}): Error fetching news sentiment: {news_data['error']}. Assuming safe to trade.")
-        return True # Allow trading if news fetch fails, to avoid unintended halt
-
-    sentiment_score = news_data.get('sentiment_score')
-    if sentiment_score is None:
-        print(f"WARNING (check_news_impact {symbol}): Sentiment score not found in news data. Assuming safe to trade.")
-        return True # Allow trading if score is missing
-
-    # Explicitly check type of sentiment_score to be safe
-    if not isinstance(sentiment_score, (float, int)):
-        print(f"WARNING (check_news_impact {symbol}): Sentiment score is not a valid number ({sentiment_score}). Assuming safe to trade.")
-        return True
-
-
-    if sentiment_score < -0.8:  # Extreme bearish news
-        print(f"NEWS IMPACT ({symbol}): Extreme bearish news detected (Score: {sentiment_score}). Pausing trading for this symbol.")
-        return False # Pause trading
-    
-    # print(f"News sentiment for {symbol}: {sentiment_score}. Trading allowed.") # Can be noisy
-    return True # Otherwise, allow trading
 
 def get_active_positions_data(): # Renamed from get_pos for clarity
     global client, status_var, root
@@ -6614,21 +6247,90 @@ def run_bot_logic():
             # --- ATR-Scaled Trailing Stop Logic ---
             if TRAILING_STOP_ENABLED and g_active_positions_details:
                 _activity_set("Applying Trailing Stop Logic...")
-                # print(f"DEBUG TRAIL_SL: Trailing Stop Enabled. Active positions: {list(g_active_positions_details.keys())}") # Reduced verbosity
-                for symbol_to_trail, pos_details_trail in list(g_active_positions_details.items()): # Renamed pos_details to avoid conflict
+                print(f"DEBUG TRAIL_SL: Trailing Stop Enabled. Active positions: {list(g_active_positions_details.keys())}")
+                for symbol_to_trail, pos_details in list(g_active_positions_details.items()):
                     if not bot_running: break
-                    # print(f"DEBUG TRAIL_SL: Checking {symbol_to_trail} for trailing SL. Details: {pos_details_trail}") # Reduced verbosity
+                    print(f"DEBUG TRAIL_SL: Checking {symbol_to_trail} for trailing SL. Details: {pos_details}")
 
-                    # Fetch fresh klines for this specific symbol for ATR calculation
-                    kl_for_trail_update = klines(symbol_to_trail)
-                    if kl_for_trail_update is not None and not kl_for_trail_update.empty:
-                        update_trailing_stop(symbol_to_trail, pos_details_trail, kl_for_trail_update)
-                    else:
-                        print(f"TRAIL_SL ({symbol_to_trail}): Could not fetch klines for trailing stop update. Skipping.")
+                    current_sl_price = pos_details.get('sl_price')
+                    sl_order_id_to_cancel = pos_details.get('sl_order_id')
+                    position_side = pos_details.get('side') # 'buy' or 'sell'
+                    position_qty = pos_details.get('qty')
+
+                    if not all([current_sl_price, sl_order_id_to_cancel, position_side, position_qty]):
+                        print(f"WARNING TRAIL_SL: Insufficient details for {symbol_to_trail} to trail SL. Skipping. Details: {pos_details}")
+                        continue
+
+                    kl_trail_df = klines(symbol_to_trail) # Fetches 5m klines
+                    if kl_trail_df is None or len(kl_trail_df) < 20: # Need enough for ATR
+                        print(f"WARNING TRAIL_SL: Insufficient kline data for {symbol_to_trail} for ATR calculation. Skipping trail.")
+                        continue
                     
-                    sleep(0.1) # Small delay between processing each symbol's trailing stop
-                    # The detailed logic is now within update_trailing_stop.
-            
+                    try:
+                        atr_trail = ta.volatility.AverageTrueRange(high=kl_trail_df['High'], low=kl_trail_df['Low'], close=kl_trail_df['Close'], window=14).average_true_range()
+                        if atr_trail is None or atr_trail.empty or pd.isna(atr_trail.iloc[-1]):
+                            print(f"WARNING TRAIL_SL: ATR calculation failed or NaN for {symbol_to_trail}. Skipping trail.")
+                            continue
+                        current_atr_for_trail = atr_trail.iloc[-1]
+                        latest_close_price = kl_trail_df['Close'].iloc[-1]
+                        price_precision_trail = get_price_precision(symbol_to_trail)
+
+                        new_potential_sl = None
+                        if position_side == 'buy': # Long position
+                            new_potential_sl = latest_close_price - (current_atr_for_trail * TRAILING_STOP_ATR_MULTIPLIER)
+                            new_potential_sl = round(new_potential_sl, price_precision_trail)
+                            # Ensure new SL is higher (better) than current SL and below current price
+                            if new_potential_sl > current_sl_price and new_potential_sl < latest_close_price:
+                                print(f"INFO TRAIL_SL ({symbol_to_trail} LONG): New SL {new_potential_sl} > Old SL {current_sl_price}. Modifying.")
+                            else:
+                                new_potential_sl = None # Condition not met
+                        elif position_side == 'sell': # Short position
+                            new_potential_sl = latest_close_price + (current_atr_for_trail * TRAILING_STOP_ATR_MULTIPLIER)
+                            new_potential_sl = round(new_potential_sl, price_precision_trail)
+                            # Ensure new SL is lower (better) than current SL and above current price
+                            if new_potential_sl < current_sl_price and new_potential_sl > latest_close_price:
+                                print(f"INFO TRAIL_SL ({symbol_to_trail} SHORT): New SL {new_potential_sl} < Old SL {current_sl_price}. Modifying.")
+                            else:
+                                new_potential_sl = None # Condition not met
+                        
+                        if new_potential_sl is not None:
+                            try:
+                                print(f"Attempting to cancel old SL Order ID {sl_order_id_to_cancel} for {symbol_to_trail}")
+                                client.cancel_order(symbol=symbol_to_trail, orderId=sl_order_id_to_cancel)
+                                print(f"Old SL Order ID {sl_order_id_to_cancel} for {symbol_to_trail} cancelled.")
+                                
+                                # Determine order side for new SL: if long pos, SL is SELL; if short pos, SL is BUY
+                                new_sl_order_side = 'SELL' if position_side == 'buy' else 'BUY'
+                                
+                                print(f"Attempting to place new SL order for {symbol_to_trail}: Side={new_sl_order_side}, Qty={position_qty}, StopPrice={new_potential_sl}")
+                                new_sl_order_resp = client.new_order(
+                                    symbol=symbol_to_trail,
+                                    side=new_sl_order_side,
+                                    type='STOP_MARKET',
+                                    quantity=abs(float(position_qty)), # Ensure qty is positive
+                                    timeInForce='GTC',
+                                    stopPrice=new_potential_sl,
+                                    reduceOnly=True # SL orders should always be reduceOnly
+                                )
+                                print(f"New SL order placed for {symbol_to_trail}: {new_sl_order_resp}")
+                                
+                                # Update g_active_positions_details with new SL info
+                                pos_details['sl_order_id'] = new_sl_order_resp.get('orderId')
+                                pos_details['sl_price'] = new_potential_sl
+                                print(f"DEBUG TRAIL_SL: Updated g_active_positions_details for {symbol_to_trail} with new SL: {pos_details}")
+
+                            except ClientError as ce:
+                                print(f"ERROR TRAIL_SL: ClientError modifying SL for {symbol_to_trail}: {ce}")
+                                # Potentially revert pos_details or handle the fact that SL might be in an inconsistent state
+                            except Exception as e_sl_mod:
+                                print(f"ERROR TRAIL_SL: Exception modifying SL for {symbol_to_trail}: {e_sl_mod}")
+                        else:
+                            print(f"DEBUG TRAIL_SL: No profitable SL adjustment for {symbol_to_trail} at this time.")
+
+                    except Exception as e_trail_inner:
+                        print(f"ERROR TRAIL_SL: Inner exception processing {symbol_to_trail}: {e_trail_inner}")
+                    sleep(0.2) # Small delay between processing each symbol's trailing stop
+
             # --- Position Closure Detection and Resetting Strategy Trackers ---
             # Consolidate g_active_positions_details cleanup here
             closed_symbols_this_cycle = set(g_active_positions_details.keys()) - set(open_position_symbols)
@@ -6830,15 +6532,6 @@ def run_bot_logic():
                         sleep(0.1) 
                         continue # Skip to the next symbol
                     # --- END MODIFICATION ---
-
-                    # --- Integration of News Impact Check ---
-                    if not check_news_impact(sym_to_check):
-                        _activity_set(f"Trading for {sym_to_check} paused due to news.")
-                        # Status var update can also be added here if desired for more prominent display
-                        # status_var.set(f"Status: {sym_to_check} paused (News). Bal: ...")
-                        sleep(0.1) # Small delay before checking next symbol
-                        continue # Skip strategy evaluation and trading for this symbol
-                    # --- End Integration of News Impact Check ---
                     
                     current_active_strategy_id = ACTIVE_STRATEGY_ID 
                     
@@ -7290,115 +6983,6 @@ def run_bot_logic():
         root.after(0, update_conditions_display_content, "Bot Idle", None, "Bot stopped.")
     print("Bot logic thread stopped.")
     _status_set("Bot stopped.")
-
-# --- Trailing Stop Function ---
-def update_trailing_stop(symbol, position_details, current_klines_df):
-    global client, TRAILING_STOP_ATR_MULTIPLIER, g_active_positions_details
-    if not client or not TRAILING_STOP_ENABLED:
-        return
-
-    if not position_details or not current_klines_df or current_klines_df.empty:
-        print(f"TRAIL_SL ({symbol}): Insufficient data for trailing stop (pos_details: {bool(position_details)}, klines: {not current_klines_df.empty if current_klines_df is not None else 'None'}).")
-        return
-
-    try:
-        # Calculate ATR
-        # Ensure klines_df has enough data for ATR calculation (e.g., window + buffer)
-        atr_period_for_trailing = 14 # Standard ATR period
-        if len(current_klines_df) < atr_period_for_trailing + 5: # Need period + buffer
-            print(f"TRAIL_SL ({symbol}): Not enough kline data ({len(current_klines_df)}) for ATR {atr_period_for_trailing} calculation.")
-            return
-
-        atr_indicator = ta.volatility.AverageTrueRange(
-            high=current_klines_df['High'],
-            low=current_klines_df['Low'],
-            close=current_klines_df['Close'],
-            window=atr_period_for_trailing,
-            fillna=False
-        )
-        atr_series = atr_indicator.average_true_range()
-        if atr_series is None or atr_series.empty or pd.isna(atr_series.iloc[-1]):
-            print(f"TRAIL_SL ({symbol}): ATR calculation failed or resulted in NaN.")
-            return
-        current_atr = atr_series.iloc[-1]
-        if current_atr == 0:
-            print(f"TRAIL_SL ({symbol}): ATR is zero, cannot calculate trail distance.")
-            return
-
-        trail_distance = current_atr * TRAILING_STOP_ATR_MULTIPLIER
-        current_market_price = float(client.ticker_price(symbol)['price'])
-        price_precision = get_price_precision(symbol)
-
-        current_sl_price = position_details.get('sl_price')
-        sl_order_id_to_cancel = position_details.get('sl_order_id')
-        position_side = position_details.get('side') # 'buy' or 'sell'
-        position_qty_str = position_details.get('qty') # Qty is stored as float/string
-
-        if not all([current_sl_price, sl_order_id_to_cancel, position_side, position_qty_str]):
-            print(f"TRAIL_SL ({symbol}): Missing critical position details for trailing stop. Details: {position_details}")
-            return
-        
-        position_qty_float = abs(float(position_qty_str)) # Ensure positive quantity for order
-
-        new_potential_sl = None
-        modify_sl = False
-
-        if position_side == 'buy': # Long position
-            new_potential_sl = round(current_market_price - trail_distance, price_precision)
-            if new_potential_sl > current_sl_price and new_potential_sl < current_market_price : # Must be profitable and valid SL
-                modify_sl = True
-        elif position_side == 'sell': # Short position
-            new_potential_sl = round(current_market_price + trail_distance, price_precision)
-            if new_potential_sl < current_sl_price and new_potential_sl > current_market_price: # Must be profitable and valid SL
-                modify_sl = True
-        
-        if modify_sl:
-            print(f"TRAIL_SL ({symbol} {position_side.upper()}): Modifying SL. Old: {current_sl_price}, New Potential: {new_potential_sl}, Market: {current_market_price}, ATR: {current_atr:.4f}, TrailDist: {trail_distance:.4f}")
-            try:
-                # Cancel existing SL order
-                print(f"TRAIL_SL ({symbol}): Cancelling old SL order ID: {sl_order_id_to_cancel}")
-                client.cancel_order(symbol=symbol, orderId=sl_order_id_to_cancel, recvWindow=6000)
-                print(f"TRAIL_SL ({symbol}): Old SL order {sl_order_id_to_cancel} cancelled.")
-                
-                # Place new SL order
-                new_sl_order_side = 'SELL' if position_side == 'buy' else 'BUY'
-                print(f"TRAIL_SL ({symbol}): Placing new SL order. Side: {new_sl_order_side}, Qty: {position_qty_float}, StopPrice: {new_potential_sl}")
-                new_sl_order_resp = client.new_order(
-                    symbol=symbol,
-                    side=new_sl_order_side,
-                    type='STOP_MARKET',
-                    quantity=position_qty_float,
-                    timeInForce='GTC',
-                    stopPrice=new_potential_sl,
-                    reduceOnly=True
-                )
-                print(f"TRAIL_SL ({symbol}): New SL order placed. Response: {new_sl_order_resp}")
-
-                # Update g_active_positions_details
-                if symbol in g_active_positions_details:
-                    g_active_positions_details[symbol]['sl_price'] = new_potential_sl
-                    g_active_positions_details[symbol]['sl_order_id'] = new_sl_order_resp.get('orderId')
-                    print(f"TRAIL_SL ({symbol}): Updated g_active_positions_details with new SL info: {g_active_positions_details[symbol]}")
-                else:
-                    print(f"TRAIL_SL ({symbol}): Warning - Symbol not found in g_active_positions_details after modifying SL. This should not happen.")
-
-            except ClientError as ce:
-                print(f"TRAIL_SL ({symbol}): ClientError modifying SL: {ce.error_code} - {ce.error_message}")
-                # Potentially re-instate old SL or handle error, for now, just log
-            except Exception as e_modify:
-                print(f"TRAIL_SL ({symbol}): Exception modifying SL: {e_modify}")
-        # else:
-            # print(f"TRAIL_SL ({symbol} {position_side.upper()}): No profitable SL adjustment. New SL ({new_potential_sl}) vs Old SL ({current_sl_price}). Market: {current_market_price}")
-
-
-    except ClientError as ce_outer:
-        print(f"TRAIL_SL ({symbol}): Outer ClientError: {ce_outer.error_code} - {ce_outer.error_message}")
-    except Exception as e_outer:
-        print(f"TRAIL_SL ({symbol}): Outer Exception: {e_outer}")
-        # import traceback
-        # print(traceback.format_exc())
-
-
     if start_button and root and root.winfo_exists(): start_button.config(state=tk.NORMAL)
     if stop_button and root and root.winfo_exists(): stop_button.config(state=tk.DISABLED)
     if testnet_radio and root and root.winfo_exists(): testnet_radio.config(state=tk.NORMAL)
@@ -7411,9 +6995,9 @@ def update_trailing_stop(symbol, position_details, current_klines_df):
 def apply_settings():
     global ACCOUNT_RISK_PERCENT, TP_PERCENT, SL_PERCENT, leverage, qty_concurrent_positions, LOCAL_HIGH_LOW_LOOKBACK_PERIOD, margin_type_setting, TARGET_SYMBOLS, ACTIVE_STRATEGY_ID
     # Add new globals for PnL SL/TP settings
-    global SL_TP_MODE, SL_PNL_AMOUNT, TP_PNL_AMOUNT, TRAILING_STOP_ENABLED, TRAILING_STOP_ATR_MULTIPLIER, MIN_RISK_REWARD_RATIO
+    global SL_TP_MODE, SL_PNL_AMOUNT, TP_PNL_AMOUNT, TRAILING_STOP_ENABLED, TRAILING_STOP_ATR_MULTIPLIER
     # And their corresponding tk StringVars
-    global sl_tp_mode_var, sl_pnl_amount_var, tp_pnl_amount_var, trailing_stop_enabled_var, trailing_stop_atr_multiplier_var, min_rr_ratio_var
+    global sl_tp_mode_var, sl_pnl_amount_var, tp_pnl_amount_var, trailing_stop_enabled_var, trailing_stop_atr_multiplier_var
     # Globals for strategy-specific parameters
     global strategies, global_strategy_param_vars, current_strategy_active_params, selected_strategy_var, STRATEGIES
 
@@ -7535,17 +7119,6 @@ def apply_settings():
             messagebox.showerror("Settings Error", "Invalid number format for Trailing Stop ATR Multiplier.")
             return False
 
-        # Min Risk:Reward Ratio
-        try:
-            min_rr = float(min_rr_ratio_var.get())
-            if min_rr <= 0:
-                messagebox.showerror("Settings Error", "Minimum R:R Ratio must be positive.")
-                return False
-            MIN_RISK_REWARD_RATIO = min_rr
-        except ValueError:
-            messagebox.showerror("Settings Error", "Invalid number format for Minimum R:R Ratio.")
-            return False
-
         print(f"Applied settings: Strategy='{STRATEGIES[ACTIVE_STRATEGY_ID]}', Risk={ACCOUNT_RISK_PERCENT*100:.2f}%, SL/TP Mode='{SL_TP_MODE}'")
         if SL_TP_MODE == "Percentage":
             print(f"  SL={SL_PERCENT*100:.2f}%, TP={TP_PERCENT*100:.2f}%")
@@ -7554,7 +7127,6 @@ def apply_settings():
         # ATR/Dynamic mode will use strategy's internal RR and ATR Multiplier, not printed here directly from these global settings
         print(f"  Lev={leverage}, MaxPos={qty_concurrent_positions}, Lookback={LOCAL_HIGH_LOW_LOOKBACK_PERIOD}, Margin={margin_type_setting}, Symbols={TARGET_SYMBOLS}")
         print(f"  Trailing Stop Enabled: {TRAILING_STOP_ENABLED}, Trailing ATR Multiplier: {TRAILING_STOP_ATR_MULTIPLIER}")
-        print(f"  Minimum R:R Ratio: {MIN_RISK_REWARD_RATIO}")
 
         # --- Apply Strategy-Specific Parameters ---
         current_strategy_active_params.clear() # Clear previous specific params
@@ -7863,13 +7435,6 @@ if __name__ == "__main__":
     backtest_trailing_stop_enabled_var = tk.BooleanVar(value=False) # Default to False for backtesting
     backtest_trailing_stop_atr_multiplier_var = tk.StringVar(value="1.5") # Default ATR multiplier for backtesting
 
-    # Initialize Backtesting Min R:R Var
-    backtest_min_rr_var = tk.StringVar(value="1.5") # Default Min R:R for backtesting
-
-    # Optuna Progress Var
-    # optuna_progress_var = tk.StringVar(value="Optuna: Idle") # Initialized later in __main__
-
-
     backtest_selected_strategy_var = tk.StringVar()
 
     # --- All main UI elements will be children of main_content_frame ---
@@ -7954,16 +7519,9 @@ if __name__ == "__main__":
     trailing_stop_enabled_checkbox = ttk.Checkbutton(params_input_frame, text="Enable Trailing Stop", variable=trailing_stop_enabled_var)
     trailing_stop_enabled_checkbox.grid(row=6, column=0, padx=2, pady=2, sticky='w')
 
-    ttk.Label(params_input_frame, text="Trailing ATR Multiplier:").grid(row=6, column=1, padx=2, pady=2, sticky='w') # Changed column from 2 to 1
+    ttk.Label(params_input_frame, text="Trailing ATR Multiplier:").grid(row=6, column=2, padx=2, pady=2, sticky='w')
     trailing_stop_atr_multiplier_entry = ttk.Entry(params_input_frame, textvariable=trailing_stop_atr_multiplier_var, width=10)
-    trailing_stop_atr_multiplier_entry.grid(row=6, column=2, padx=2, pady=2, sticky='w') # Changed column from 3 to 2
-
-    # Row 7: Min Risk:Reward Ratio
-    ttk.Label(params_input_frame, text="Min R:R Ratio:").grid(row=7, column=0, padx=2, pady=2, sticky='w')
-    min_rr_ratio_var = tk.StringVar(value=str(MIN_RISK_REWARD_RATIO)) # New StringVar
-    min_rr_ratio_entry = ttk.Entry(params_input_frame, textvariable=min_rr_ratio_var, width=10)
-    min_rr_ratio_entry.grid(row=7, column=1, padx=2, pady=2, sticky='w')
-
+    trailing_stop_atr_multiplier_entry.grid(row=6, column=3, padx=2, pady=2, sticky='w')
 
     params_widgets = [
         account_risk_percent_entry, sl_tp_mode_combobox,
@@ -7972,8 +7530,7 @@ if __name__ == "__main__":
         leverage_entry, qty_concurrent_positions_entry,
         local_high_low_lookback_entry, margin_type_isolated_radio, margin_type_cross_radio,
         target_symbols_entry,
-        trailing_stop_enabled_checkbox, trailing_stop_atr_multiplier_entry, # Added new widgets
-        min_rr_ratio_entry # Added new widget
+        trailing_stop_enabled_checkbox, trailing_stop_atr_multiplier_entry # Added new widgets
     ]
     params_input_frame.columnconfigure(1, weight=1) 
     params_input_frame.columnconfigure(3, weight=1) 
@@ -8073,33 +7630,7 @@ if __name__ == "__main__":
     ttk.Label(backtest_params_grid, text="Trailing ATR Multiplier:").grid(row=7, column=2, padx=2, pady=2, sticky='w')
     backtest_ts_atr_multiplier_entry = ttk.Entry(backtest_params_grid, textvariable=backtest_trailing_stop_atr_multiplier_var, width=7)
     backtest_ts_atr_multiplier_entry.grid(row=7, column=3, padx=2, pady=2, sticky='w')
-
-    # Row 8: Backtesting Min R:R Ratio
-    ttk.Label(backtest_params_grid, text="Min R:R Ratio:").grid(row=8, column=0, padx=2, pady=2, sticky='w')
-    backtest_min_rr_entry = ttk.Entry(backtest_params_grid, textvariable=backtest_min_rr_var, width=7)
-    backtest_min_rr_entry.grid(row=8, column=1, padx=2, pady=2, sticky='w')
-
-    # Button to launch the dashboard
-    launch_dashboard_button = ttk.Button(backtest_params_grid, text="View Dashboard", command=launch_dashboard)
-    launch_dashboard_button.grid(row=9, column=0, columnspan=2, pady=10, sticky='ew') # Span 2
-
-    # Button to run Optuna optimization
-    optuna_run_button = ttk.Button(backtest_params_grid, text="Run Optimization", command=run_optuna_optimization_command)
-    optuna_run_button.grid(row=9, column=2, columnspan=2, pady=10, sticky='ew') # Span 2
     
-    # Optuna Progress Label
-    optuna_progress_label = ttk.Label(backtest_params_grid, textvariable=optuna_progress_var, font=("Arial", 9), wraplength=300) # Wraplength for longer messages
-    optuna_progress_label.grid(row=10, column=0, columnspan=4, pady=(5,0), sticky='ew')
-
-    # Button to launch the dashboard
-    launch_dashboard_button = ttk.Button(backtest_params_grid, text="View Dashboard", command=launch_dashboard)
-    launch_dashboard_button.grid(row=9, column=0, columnspan=2, pady=10, sticky='ew') # Span 2
-
-    # Button to run Optuna optimization
-    optuna_run_button = ttk.Button(backtest_params_grid, text="Run Optimization", command=run_optuna_optimization_command)
-    optuna_run_button.grid(row=9, column=2, columnspan=2, pady=10, sticky='ew') # Span 2
-    
-
     account_summary_frame = ttk.LabelFrame(side_by_side_frame, text="Account Summary")
     account_summary_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
 
@@ -8200,271 +7731,6 @@ if __name__ == "__main__":
         print("Starting continuous 5-second updates for account summary from __main__.")
         root.after(5000, scheduled_account_summary_update) # Start the first scheduled call after 5 seconds
 
-# --- Optuna Objective Function ---
-def objective(trial, strategy_id_opt, symbol_opt, timeframe_opt, interval_days_opt, start_capital_opt, leverage_opt, account_risk_opt, sl_tp_mode_opt, fixed_sl_pnl_opt, fixed_tp_pnl_opt, ts_enabled_opt, ts_atr_multi_opt, min_rr_opt):
-    """
-    Optuna objective function.
-    `sl_tp_mode_opt` will determine if fixed_sl_pnl_opt, fixed_tp_pnl_opt are used, or if SL/TP percentages are tuned (for Percentage mode),
-    or if ATR-based params are tuned (for ATR/Dynamic or StrategyDefined_SD if they expose tunable ATR params).
-    """
-    params_for_strategy = {}
-    # Common parameters that might be tuned if not fixed by sl_tp_mode_opt
-    # These are examples; actual tuned params depend on strategy_id_opt and sl_tp_mode_opt
-
-    if sl_tp_mode_opt == "Percentage":
-        # For Percentage mode, Optuna could tune SL_PERCENT and TP_PERCENT if desired
-        # These would then be passed to execute_backtest's ui_sl_percentage and ui_tp_percentage
-        # For now, let's assume SL/TP % are fixed from UI for Percentage mode during Optuna,
-        # and Optuna focuses on strategy-internal parameters.
-        # If we were to tune them:
-        # params_for_strategy['user_sl_bt'] = trial.suggest_float('user_sl_bt_opt', 0.005, 0.1) # e.g. 0.5% to 10%
-        # params_for_strategy['user_tp_bt'] = trial.suggest_float('user_tp_bt_opt', 0.01, 0.2)   # e.g. 1% to 20%
-        pass # Using fixed SL/TP % from UI for now
-
-    elif sl_tp_mode_opt == "ATR/Dynamic":
-        # For ATR/Dynamic, Optuna could tune SL_ATR_MULTI_bt and RR_bt
-        params_for_strategy['SL_ATR_MULTI_bt'] = trial.suggest_float('SL_ATR_MULTI_bt_opt', 0.5, 3.0)
-        params_for_strategy['RR_bt'] = trial.suggest_float('RR_bt_opt', 1.0, 5.0)
-        # Note: These override the defaults in BacktestStrategyWrapper if passed to bt.run()
-
-    # Strategy-specific parameter tuning
-    if strategy_id_opt == 0: # Original Scalping
-        params_for_strategy['S0_EMA_Short'] = trial.suggest_int('S0_EMA_Short_opt', 5, 15)
-        params_for_strategy['S0_EMA_Long'] = trial.suggest_int('S0_EMA_Long_opt', 16, 50)
-        params_for_strategy['S0_RSI_Period'] = trial.suggest_int('S0_RSI_Period_opt', 7, 21)
-        params_for_strategy['S0_ST_ATR_Period'] = trial.suggest_int('S0_ST_ATR_Period_opt', 7, 20)
-        params_for_strategy['S0_ST_Multiplier'] = trial.suggest_float('S0_ST_Multiplier_opt', 1.0, 3.0)
-        # Add other S0 params if desired: S0_Vol_MA_Period, S0_Lookback_HL
-
-    elif strategy_id_opt == 1: # EMA Cross + SuperTrend
-        params_for_strategy['S1_EMA_Short'] = trial.suggest_int('S1_EMA_Short_opt', 5, 15)
-        params_for_strategy['S1_EMA_Long'] = trial.suggest_int('S1_EMA_Long_opt', 16, 50)
-        params_for_strategy['S1_RSI_Period'] = trial.suggest_int('S1_RSI_Period_opt', 7, 21)
-        params_for_strategy['S1_ST_ATR_Period'] = trial.suggest_int('S1_ST_ATR_Period_opt', 7, 20)
-        params_for_strategy['S1_ST_Multiplier'] = trial.suggest_float('S1_ST_Multiplier_opt', 1.0, 4.0)
-
-    elif strategy_id_opt == 5: # New RSI-Based Strategy
-        params_for_strategy['S5_RSI_Period'] = trial.suggest_int('S5_RSI_Period_opt', 7, 25)
-        params_for_strategy['S5_SMA_Period'] = trial.suggest_int('S5_SMA_Period_opt', 20, 100)
-        params_for_strategy['S5_Duration_Lookback'] = trial.suggest_int('S5_Duration_Lookback_opt', 3, 10)
-        params_for_strategy['S5_Slope_Lookback_RSI'] = trial.suggest_int('S5_Slope_Lookback_RSI_opt', 2, 7)
-        # S5_Divergence_Candles, S5_RSI_OB_Thresh, S5_RSI_OS_Thresh, S5_RSI_Slope_Min could also be tuned
-
-    elif strategy_id_opt == 7: # Candlestick Patterns
-        params_for_strategy['S7_ATR_Period'] = trial.suggest_int('S7_ATR_Period_opt', 7, 21) # For SL/TP calc
-        params_for_strategy['S7_SL_ATR_Multiplier'] = trial.suggest_float('S7_SL_ATR_Multiplier_opt', 0.5, 3.0)
-        params_for_strategy['S7_TP_ATR_Multiplier'] = trial.suggest_float('S7_TP_ATR_Multiplier_opt', 1.0, 5.0)
-        # S7_EMA_Trend_Period, S7_Volume_Lookback/Multiplier, RSI filter params could also be tuned
-    
-    # Add more elif blocks for other strategies (2, 3, 4, 6) with their specific tunable parameters
-
-    else: # Default case for strategies not explicitly listed for tuning
-        # For now, don't tune any specific params, rely on defaults or UI-set ones.
-        # Could add generic ATR_PERIOD_Generic tuning here if applicable.
-        print(f"Optuna: Strategy ID {strategy_id_opt} not configured for specific param tuning in objective function. Using defaults/UI values for strategy params.")
-        pass
-
-    # Call execute_backtest with the parameters for this trial
-    # Note: execute_backtest needs to be adapted to accept these **kwargs or have them set
-    # on BacktestStrategyWrapper class before Backtest is instantiated.
-    # The current BacktestStrategyWrapper.init relies on getattr(self, param_name, default),
-    # which works if parameters are passed to bt.run(**params_for_strategy).
-    
-    # The ui_tp_percentage and ui_sl_percentage are for "Percentage" mode.
-    # If Optuna tunes them, they should come from params_for_strategy.
-    # For now, assume they are fixed from UI if mode is Percentage.
-    fixed_ui_tp_percentage = 0.03 # Example, should come from UI if not tuned
-    fixed_ui_sl_percentage = 0.02 # Example
-
-    stats, _, _ = execute_backtest(
-        strategy_id_for_backtest=strategy_id_opt,
-        symbol=symbol_opt,
-        timeframe=timeframe_opt,
-        interval_days=interval_days_opt,
-        ui_tp_percentage=params_for_strategy.get('user_tp_bt', fixed_ui_tp_percentage), # Use tuned if available
-        ui_sl_percentage=params_for_strategy.get('user_sl_bt', fixed_ui_sl_percentage), # Use tuned if available
-        sl_tp_mode=sl_tp_mode_opt,
-        sl_pnl_amount_val=fixed_sl_pnl_opt, # Fixed PnL amounts are not tuned here
-        tp_pnl_amount_val=fixed_tp_pnl_opt,
-        starting_capital=start_capital_opt,
-        leverage_bt=leverage_opt,
-        account_risk_percent_bt=account_risk_opt,
-        ts_enabled_bt_param=ts_enabled_opt,
-        ts_atr_multiplier_bt_param=ts_atr_multi_opt,
-        min_rr_bt_param=min_rr_opt,
-        optuna_params=params_for_strategy # Pass all tuned strategy params
-    )
-
-    if stats is None or not isinstance(stats, pd.Series):
-        print(f"Optuna Trial {trial.number}: Backtest failed or returned invalid stats. Returning high drawdown.")
-        return 100.0 # Return a large value for drawdown if backtest fails, to penalize this trial
-
-    drawdown = stats.get('Max. Drawdown [%]', 100.0) # Default to 100% drawdown if key missing
-    
-    # Optuna tries to minimize the returned value. Max. Drawdown is positive.
-    # So, returning it directly is correct for direction='minimize'.
-    # Ensure it's a float.
-    try:
-        drawdown_float = float(drawdown)
-        print(f"Optuna Trial {trial.number}: Params: {trial.params}, Drawdown: {drawdown_float:.2f}%")
-        return drawdown_float
-    except ValueError:
-        print(f"Optuna Trial {trial.number}: Could not convert drawdown '{drawdown}' to float. Penalizing.")
-        return 100.0
-
-
-def run_optuna_optimization_command():
-    global backtest_symbol_var, backtest_timeframe_var, backtest_interval_var
-    global backtest_tp_var, backtest_sl_var, backtest_selected_strategy_var
-    global backtest_sl_pnl_amount_var, backtest_tp_pnl_amount_var, backtest_sl_tp_mode_var
-    global backtest_starting_capital_var, backtest_leverage_var, backtest_account_risk_var
-    global backtest_trailing_stop_enabled_var, backtest_trailing_stop_atr_multiplier_var
-    global backtest_min_rr_var
-    global backtest_results_text_widget, STRATEGIES, root, status_var, optuna_run_button, optuna_progress_var # Added optuna_run_button and optuna_progress_var
-
-    if optuna_run_button:
-        optuna_run_button.config(state=tk.DISABLED)
-    
-    try:
-        symbol = backtest_symbol_var.get().strip().upper()
-        if not symbol: # Simplified: optimize for one symbol at a time
-            messagebox.showerror("Input Error", "Symbol field cannot be empty for optimization.")
-            if optuna_run_button: optuna_run_button.config(state=tk.NORMAL)
-            return
-
-        timeframe = backtest_timeframe_var.get().strip()
-        interval_str = backtest_interval_var.get().strip()
-        selected_strategy_name_opt = backtest_selected_strategy_var.get() # This is already the one for backtesting UI
-        
-        starting_capital_str = backtest_starting_capital_var.get().strip()
-        leverage_str = backtest_leverage_var.get().strip()
-        account_risk_str = backtest_account_risk_var.get().strip()
-        
-        ts_enabled = backtest_trailing_stop_enabled_var.get()
-        ts_atr_multiplier_str = backtest_trailing_stop_atr_multiplier_var.get().strip()
-        min_rr_str = backtest_min_rr_var.get().strip()
-        
-        current_sl_tp_mode = backtest_sl_tp_mode_var.get()
-
-        # Parse non-strategy parameters (these are fixed during optimization)
-        # These are passed to the objective function, which then passes to execute_backtest
-        interval_days_val = int(interval_str)
-        starting_capital_val = float(starting_capital_str)
-        leverage_val = float(leverage_str)
-        account_risk_val = float(account_risk_str) / 100.0
-        ts_atr_multiplier_val = float(ts_atr_multiplier_str) if ts_enabled else 1.5
-        min_rr_val = float(min_rr_str)
-
-        # SL/TP values (fixed for the optimization run based on UI, unless Optuna tunes them, which it isn't yet for %/Fixed PnL modes)
-        sl_percentage_val = float(backtest_sl_var.get()) / 100.0 if current_sl_tp_mode == "Percentage" else 0.0
-        tp_percentage_val = float(backtest_tp_var.get()) / 100.0 if current_sl_tp_mode == "Percentage" else 0.0
-        sl_pnl_val = float(backtest_sl_pnl_amount_var.get()) if current_sl_tp_mode == "Fixed PnL" else 0.0
-        tp_pnl_val = float(backtest_tp_pnl_amount_var.get()) if current_sl_tp_mode == "Fixed PnL" else 0.0
-
-        strategy_id_to_optimize = None
-        for id_val, name_val in STRATEGIES.items():
-            if name_val == selected_strategy_name_opt:
-                strategy_id_to_optimize = id_val
-                break
-        
-        if strategy_id_to_optimize is None:
-            messagebox.showerror("Input Error", "Invalid strategy selected for optimization.")
-            if optuna_run_button: optuna_run_button.config(state=tk.NORMAL)
-            return
-
-        if not all([symbol, timeframe, interval_str, selected_strategy_name_opt, starting_capital_str, leverage_str, account_risk_str]):
-             messagebox.showerror("Input Error", "All general backtest fields are required for optimization.")
-             if optuna_run_button: optuna_run_button.config(state=tk.NORMAL)
-             return
-        
-        # --- UI Update: Start Optuna ---
-        if backtest_results_text_widget and root and root.winfo_exists():
-            backtest_results_text_widget.config(state=tk.NORMAL)
-            backtest_results_text_widget.delete('1.0', tk.END)
-            backtest_results_text_widget.insert(tk.END, f"Starting Optuna optimization for {selected_strategy_name_opt} on {symbol}...\nSit tight, this may take a while.\n\n")
-            backtest_results_text_widget.config(state=tk.DISABLED)
-        if status_var and root and root.winfo_exists():
-            status_var.set(f"Optuna: Running for {selected_strategy_name_opt}...")
-
-        # --- Threading for Optuna ---
-        # Optuna's study.optimize can be blocking. Run it in a thread.
-        def optuna_thread_target():
-            n_trials_optuna = 25 # Define number of trials here
-            try:
-                study = optuna.create_study(direction='minimize') # Minimize drawdown
-                
-                # Use a lambda to pass fixed arguments to the objective function
-                # And also a callback for progress update
-                def objective_callback(study, trial):
-                    # This function is called by Optuna after each trial.
-                    # We can use it to update the UI.
-                    if root and root.winfo_exists() and optuna_progress_var:
-                        progress_msg = f"Optuna Trial: {trial.number + 1}/{n_trials_optuna}. Value: {trial.value:.2f}. Params: {trial.params}"
-                        # Truncate message if too long for status bar
-                        if len(progress_msg) > 100: progress_msg = progress_msg[:97] + "..."
-                        root.after(0, lambda msg=progress_msg: optuna_progress_var.set(msg))
-                
-                objective_with_args = lambda trial_obj: objective( # Renamed trial to trial_obj to avoid conflict
-                    trial_obj, strategy_id_to_optimize, symbol, timeframe, 
-                    interval_days_val, starting_capital_val, leverage_val, account_risk_val,
-                    current_sl_tp_mode, sl_pnl_val, tp_pnl_val, 
-                    ts_enabled, ts_atr_multiplier_val, min_rr_val
-                )
-                
-                study.optimize(objective_with_args, n_trials=n_trials_optuna, callbacks=[objective_callback])
-
-                best_params_str = "\n".join([f"  {key}: {value}" for key, value in study.best_params.items()])
-                result_message = (
-                    f"Optuna Optimization Complete for {selected_strategy_name_opt} on {symbol}:\n"
-                    f"Best Trial Number: {study.best_trial.number}\n"
-                    f"Best Value (Min Drawdown %): {study.best_value:.2f}%\n"
-                    f"Best Parameters:\n{best_params_str}\n"
-                )
-                
-                if root and root.winfo_exists() and backtest_results_text_widget:
-                    def update_optuna_results_ui():
-                        backtest_results_text_widget.config(state=tk.NORMAL)
-                        backtest_results_text_widget.insert(tk.END, result_message)
-                        backtest_results_text_widget.see(tk.END)
-                        backtest_results_text_widget.config(state=tk.DISABLED)
-                        status_var.set(f"Optuna: Complete for {selected_strategy_name_opt}.")
-                        if optuna_run_button: optuna_run_button.config(state=tk.NORMAL)
-                    root.after(0, update_optuna_results_ui)
-                else:
-                    print(result_message) # Fallback if UI not available
-                    if optuna_run_button: optuna_run_button.config(state=tk.NORMAL) # Ensure button re-enabled
-
-            except Exception as e_opt:
-                err_msg_opt = f"Error during Optuna optimization: {e_opt}"
-                print(err_msg_opt)
-                if root and root.winfo_exists():
-                    def update_optuna_error_ui():
-                        if backtest_results_text_widget:
-                            backtest_results_text_widget.config(state=tk.NORMAL)
-                            backtest_results_text_widget.insert(tk.END, f"\n{err_msg_opt}\n")
-                            backtest_results_text_widget.config(state=tk.DISABLED)
-                        status_var.set("Optuna: Error occurred.")
-                        if optuna_run_button: optuna_run_button.config(state=tk.NORMAL)
-                    root.after(0, update_optuna_error_ui)
-                else: # If no UI, re-enable button directly if it was a global reference (not ideal)
-                     if optuna_run_button: optuna_run_button.config(state=tk.NORMAL)
-
-
-        opt_thread = threading.Thread(target=optuna_thread_target, daemon=True)
-        opt_thread.start()
-
-    except ValueError:
-        messagebox.showerror("Input Error", "Invalid number format for one of the optimization parameters.")
-        if optuna_run_button: optuna_run_button.config(state=tk.NORMAL)
-    except Exception as e:
-        messagebox.showerror("Error", f"An unexpected error occurred setting up Optuna: {e}")
-        if backtest_results_text_widget and root and root.winfo_exists():
-            backtest_results_text_widget.config(state=tk.NORMAL)
-            backtest_results_text_widget.insert(tk.END, f"\nError setting up Optuna: {e}")
-            backtest_results_text_widget.config(state=tk.DISABLED)
-        if optuna_run_button: optuna_run_button.config(state=tk.NORMAL)
-
-
     def on_closing():
         global bot_running, bot_thread, root
         if bot_running:
@@ -8496,22 +7762,6 @@ def run_streamlit_ui():
                     st.text(param)
             else:
                 st.text("No parameters defined for this strategy.")
-
-# --- Moved launch_dashboard function earlier ---
-def launch_dashboard():
-    # This function will be called when the "View Dashboard" button is clicked.
-    # It should open the dashboard URL in the default web browser.
-    # The dashboard.py script needs to be running for this to work.
-    # Users will need to run `python dashboard.py` separately.
-    dashboard_url = "http://127.0.0.1:8050/"
-    try:
-        webbrowser.open_new_tab(dashboard_url)
-        print(f"Attempted to open dashboard at {dashboard_url}")
-        messagebox.showinfo("Dashboard", f"Attempting to open dashboard at {dashboard_url}.\nEnsure dashboard.py is running.")
-    except Exception as e:
-        print(f"Error opening dashboard: {e}")
-        messagebox.showerror("Dashboard Error", f"Could not open web browser: {e}")
-# --- End of moved launch_dashboard function ---
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == 'streamlit':
@@ -8590,9 +7840,6 @@ if __name__ == "__main__":
         # Initialize Backtesting Trailing Stop Vars
         backtest_trailing_stop_enabled_var = tk.BooleanVar(value=False) # Default to False for backtesting
         backtest_trailing_stop_atr_multiplier_var = tk.StringVar(value="1.5") # Default ATR multiplier for backtesting
-
-    # Optuna Progress Var
-        optuna_progress_var = tk.StringVar(value="Optuna: Idle") # Initialized here
 
         backtest_selected_strategy_var = tk.StringVar()
 
