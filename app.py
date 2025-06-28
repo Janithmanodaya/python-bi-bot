@@ -8091,6 +8091,14 @@ if __name__ == "__main__":
     optuna_progress_label = ttk.Label(backtest_params_grid, textvariable=optuna_progress_var, font=("Arial", 9), wraplength=300) # Wraplength for longer messages
     optuna_progress_label.grid(row=10, column=0, columnspan=4, pady=(5,0), sticky='ew')
 
+    # Button to launch the dashboard
+    launch_dashboard_button = ttk.Button(backtest_params_grid, text="View Dashboard", command=launch_dashboard)
+    launch_dashboard_button.grid(row=9, column=0, columnspan=2, pady=10, sticky='ew') # Span 2
+
+    # Button to run Optuna optimization
+    optuna_run_button = ttk.Button(backtest_params_grid, text="Run Optimization", command=run_optuna_optimization_command)
+    optuna_run_button.grid(row=9, column=2, columnspan=2, pady=10, sticky='ew') # Span 2
+    
 
     account_summary_frame = ttk.LabelFrame(side_by_side_frame, text="Account Summary")
     account_summary_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
@@ -8489,6 +8497,7 @@ def run_streamlit_ui():
             else:
                 st.text("No parameters defined for this strategy.")
 
+# --- Moved launch_dashboard function earlier ---
 def launch_dashboard():
     # This function will be called when the "View Dashboard" button is clicked.
     # It should open the dashboard URL in the default web browser.
@@ -8502,6 +8511,7 @@ def launch_dashboard():
     except Exception as e:
         print(f"Error opening dashboard: {e}")
         messagebox.showerror("Dashboard Error", f"Could not open web browser: {e}")
+# --- End of moved launch_dashboard function ---
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == 'streamlit':
