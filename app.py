@@ -9,12 +9,83 @@ from binance.error import ClientError
 import ta
 import pandas as pd
 
+# This list's "name" must match the values in the STRATEGIES dictionary (ID-to-name map)
+# The order here doesn't strictly matter as long as names are unique and findable.
 strategies = [
-    {"name": "Moving Average Crossover", "parameters": ["SMA1", "SMA2", "ATR"]},
-    {"name": "RSI Divergence", "parameters": ["RSI Period", "Lookback Window", "ATR"]},
-    {"name": "ATR Trailing Stop", "parameters": ["ATR Period", "ATR Multiplier"]},
-    {"name": "Bollinger Bands", "parameters": ["Period", "Standard Deviations", "ATR"]},
-    {"name": "MACD", "parameters": ["Fast Period", "Slow Period", "Signal Period", "ATR"]},
+    {"name": "Original Scalping", # Corresponds to STRATEGIES ID 0 -> scalping_strategy_signal
+     "parameters": [
+         {"name": "S0_EMA_Short", "type": "int", "default": 9},
+         {"name": "S0_EMA_Long", "type": "int", "default": 21},
+         {"name": "S0_RSI_Period", "type": "int", "default": 14},
+         {"name": "S0_ST_ATR_Period", "type": "int", "default": 10},
+         {"name": "S0_ST_Multiplier", "type": "float", "default": 1.5}
+     ]},
+    {"name": "EMA Cross + SuperTrend", # Corresponds to STRATEGIES ID 1 -> strategy_ema_supertrend
+     "parameters": [
+         {"name": "S1_EMA_Short", "type": "int", "default": 9},
+         {"name": "S1_EMA_Long", "type": "int", "default": 21},
+         {"name": "S1_RSI_Period", "type": "int", "default": 14},
+         {"name": "S1_ST_ATR_Period", "type": "int", "default": 10},
+         {"name": "S1_ST_Multiplier", "type": "float", "default": 3.0}
+     ]},
+    {"name": "Bollinger Band Mean-Reversion", # Corresponds to STRATEGIES ID 2 -> strategy_bollinger_band_mean_reversion
+     "parameters": [
+         {"name": "S2_EMA_Slow", "type": "int", "default": 50},
+         {"name": "S2_EMA_Fast", "type": "int", "default": 30},
+         {"name": "S2_RSI_Period", "type": "int", "default": 10},
+         {"name": "S2_BB_Length", "type": "int", "default": 15},
+         {"name": "S2_BB_StdDev", "type": "float", "default": 1.5},
+         {"name": "S2_ATR_Period", "type": "int", "default": 7}
+     ]},
+    {"name": "VWAP Breakout Momentum", # Corresponds to STRATEGIES ID 3 -> strategy_vwap_breakout_momentum
+     "parameters": [
+         {"name": "S3_ATR_Period", "type": "int", "default": 14},
+         {"name": "S3_MACD_Slow", "type": "int", "default": 26},
+         {"name": "S3_MACD_Fast", "type": "int", "default": 12},
+         {"name": "S3_MACD_Sign", "type": "int", "default": 9},
+         {"name": "S3_ATR_RollingAvgPeriod", "type": "int", "default": 20}
+     ]},
+    {"name": "MACD Divergence + Pivot-Point", # Corresponds to STRATEGIES ID 4 -> strategy_macd_divergence_pivot
+     "parameters": [
+         {"name": "S4_MACD_Slow", "type": "int", "default": 26},
+         {"name": "S4_MACD_Fast", "type": "int", "default": 12},
+         {"name": "S4_MACD_Sign", "type": "int", "default": 9},
+         {"name": "S4_Stoch_K_Period", "type": "int", "default": 14},
+         {"name": "S4_Stoch_Smooth_Window", "type": "int", "default": 3},
+         {"name": "S4_ATR_Period", "type": "int", "default": 14},
+         {"name": "S4_Divergence_Lookback", "type": "int", "default": 15},
+         {"name": "S4_Stoch_Oversold", "type": "int", "default": 20},
+         {"name": "S4_Stoch_Overbought", "type": "int", "default": 80}
+     ]},
+    {"name": "New RSI-Based Strategy", # Corresponds to STRATEGIES ID 5 -> strategy_rsi_enhanced
+     "parameters": [
+        {"name": "S5_RSI_Period", "type": "int", "default": 14},
+        {"name": "S5_SMA_Period", "type": "int", "default": 50},
+        {"name": "S5_Duration_Lookback", "type": "int", "default": 5},
+        {"name": "S5_Slope_Lookback_RSI", "type": "int", "default": 3},
+        {"name": "S5_Divergence_Candles", "type": "int", "default": 15}
+     ]},
+    {"name": "Market Structure S/D", # Corresponds to STRATEGIES ID 6 -> strategy_market_structure_sd
+     "parameters": [
+        {"name": "S6_Swing_Order", "type": "int", "default": 5},
+        {"name": "S6_SD_ATR_Period", "type": "int", "default": 14},
+        {"name": "S6_SD_Lookback_Candles", "type": "int", "default": 10},
+        {"name": "S6_SD_Consol_ATR_Factor", "type": "float", "default": 0.7},
+        {"name": "S6_SD_Sharp_Move_ATR_Factor", "type": "float", "default": 1.5},
+        {"name": "S6_Min_RR", "type": "float", "default": 1.5}
+     ]},
+    {"name": "Candlestick Patterns", # Corresponds to STRATEGIES ID 7 -> strategy_candlestick_patterns_signal
+     "parameters": [
+        {"name": "S7_EMA_Trend_Period", "type": "int", "default": 200},
+        {"name": "S7_ATR_Period", "type": "int", "default": 14},
+        {"name": "S7_SL_ATR_Multiplier", "type": "float", "default": 1.5},
+        {"name": "S7_TP_ATR_Multiplier", "type": "float", "default": 2.0},
+        {"name": "S7_Volume_Lookback", "type": "int", "default": 20},
+        {"name": "S7_Volume_Multiplier", "type": "float", "default": 2.0},
+        {"name": "S7_Fallback_RSI_ATR_Period", "type": "int", "default": 14},
+        {"name": "S7_Fallback_RSI_SL_ATR_Multi", "type": "float", "default": 1.5},
+        {"name": "S7_Fallback_RSI_TP_ATR_Multi", "type": "float", "default": 1.5}
+     ]}
 ]
 
 from backtesting import Backtest, Strategy
@@ -1055,37 +1126,62 @@ class BacktestStrategyWrapper(Strategy):
         print(f"[BT Strategy LOG for {self.data.symbol if hasattr(self.data, 'symbol') else 'N/A'}] Data tail:\n{self.data.df.tail()}")
         print(f"[BT Strategy LOG for {self.data.symbol if hasattr(self.data, 'symbol') else 'N/A'}] Data NaN sum:\n{self.data.df.isnull().sum()}")
         # --- End Jules's Logging ---
-        if self.current_strategy_id == 5:
-            self.rsi_period_val = getattr(self, 'rsi_period', 14) 
-            self.rsi = self.I(rsi_bt, self.data.Close, self.rsi_period_val, name='RSI_S5')
-            # ATR is always initialized as it's needed for ATR/Dynamic mode by any strategy
-            self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, self.ATR_PERIOD, name='ATR_dynSLTP_S5')
-        elif self.current_strategy_id == 1:
+        if self.current_strategy_id == 5: # New RSI-Based Strategy
+            s5_rsi_period = getattr(self, 'S5_RSI_Period', 14)
+            # S5_SMA_Period, S5_Duration_Lookback, S5_Slope_Lookback_RSI, S5_Divergence_Candles are used in next()
+            self.rsi = self.I(rsi_bt, self.data.Close, s5_rsi_period, name='RSI_S5')
+            self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, getattr(self, 'ATR_PERIOD', 14), name='ATR_dynSLTP_S5') # Generic ATR
+        
+        elif self.current_strategy_id == 1: # EMA Cross + SuperTrend
             print(f"DEBUG BacktestStrategyWrapper.init: Initializing indicators for Strategy ID 1 (EMA Cross + SuperTrend)")
-            self.ema_short_s1 = self.I(ema_bt, self.data.Close, self.EMA_SHORT_S1, name='EMA_S_S1')
-            self.ema_long_s1 = self.I(ema_bt, self.data.Close, self.EMA_LONG_S1, name='EMA_L_S1')
-            self.rsi_s1 = self.I(rsi_bt, self.data.Close, self.RSI_PERIOD_S1, name='RSI_S1')
-            self.st_s1 = self.I(supertrend_numerical_bt, self.data.High, self.data.Low, self.data.Close, self.ST_ATR_PERIOD_S1, self.ST_MULTIPLIER_S1, name='ST_S1', overlay=True)
-            self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, self.ATR_PERIOD, name='ATR_dynSLTP_S1')
-        elif self.current_strategy_id == 0:
+            s1_ema_short = getattr(self, 'S1_EMA_Short', 9)
+            s1_ema_long = getattr(self, 'S1_EMA_Long', 21)
+            s1_rsi_period = getattr(self, 'S1_RSI_Period', 14)
+            s1_st_atr_period = getattr(self, 'S1_ST_ATR_Period', 10)
+            s1_st_multiplier = getattr(self, 'S1_ST_Multiplier', 3.0)
+            
+            self.ema_short_s1 = self.I(ema_bt, self.data.Close, s1_ema_short, name='EMA_S_S1')
+            self.ema_long_s1 = self.I(ema_bt, self.data.Close, s1_ema_long, name='EMA_L_S1')
+            self.rsi_s1 = self.I(rsi_bt, self.data.Close, s1_rsi_period, name='RSI_S1')
+            self.st_s1 = self.I(supertrend_numerical_bt, self.data.High, self.data.Low, self.data.Close, s1_st_atr_period, s1_st_multiplier, name='ST_S1', overlay=True)
+            self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, getattr(self, 'ATR_PERIOD', 14), name='ATR_dynSLTP_S1') # Generic ATR
+
+        elif self.current_strategy_id == 0: # Original Scalping
             print(f"DEBUG BacktestStrategyWrapper.init: Initializing indicators for Strategy ID 0 (Original Scalping)")
-            self.ema9_s0 = self.I(ema_bt, self.data.Close, 9, name='EMA9_S0')
-            self.ema21_s0 = self.I(ema_bt, self.data.Close, 21, name='EMA21_S0')
-            self.rsi_s0 = self.I(rsi_bt, self.data.Close, 14, name='RSI_S0')
+            s0_ema_short = getattr(self, 'S0_EMA_Short', 9)
+            s0_ema_long = getattr(self, 'S0_EMA_Long', 21)
+            s0_rsi_period = getattr(self, 'S0_RSI_Period', 14)
+            s0_st_atr_period = getattr(self, 'S0_ST_ATR_Period', 10)
+            s0_st_multiplier = getattr(self, 'S0_ST_Multiplier', 1.5)
+            # LOCAL_HIGH_LOW_LOOKBACK_PERIOD and volume_ma10 period (10) are still hardcoded in S0's live logic & here for vol_ma.
+
+            self.ema9_s0 = self.I(ema_bt, self.data.Close, s0_ema_short, name='EMA9_S0')
+            self.ema21_s0 = self.I(ema_bt, self.data.Close, s0_ema_long, name='EMA21_S0')
+            self.rsi_s0 = self.I(rsi_bt, self.data.Close, s0_rsi_period, name='RSI_S0')
             self.volume_ma10_s0 = self.I(lambda series, window: pd.Series(series).rolling(window).mean(), self.data.Volume, 10, name='VolumeMA10_S0', overlay=False) 
-            self.st_s0 = self.I(supertrend_numerical_bt, self.data.High, self.data.Low, self.data.Close, self.ST_ATR_PERIOD_S0, self.ST_MULTIPLIER_S0, name='Supertrend_S0', overlay=True) 
-            self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, self.ATR_PERIOD, name='ATR_dynSLTP_S0')
+            self.st_s0 = self.I(supertrend_numerical_bt, self.data.High, self.data.Low, self.data.Close, s0_st_atr_period, s0_st_multiplier, name='Supertrend_S0', overlay=True) 
+            self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, getattr(self, 'ATR_PERIOD', 14), name='ATR_dynSLTP_S0') # Generic ATR
+        
         elif self.current_strategy_id == 6: # Market Structure S/D Strategy
             print(f"DEBUG BacktestStrategyWrapper.init: Initializing for Strategy ID 6 (Market Structure S/D)")
+            s6_swing_order = getattr(self, 'S6_Swing_Order', 5)
+            s6_sd_atr_period = getattr(self, 'S6_SD_ATR_Period', 14) # Used for identify_supply_demand_zones call
+            # Other S6 params (lookback_candles, consol_factor, sharp_move_factor, min_rr) are used in next() or by helper functions directly.
+            
             # For backtesting, pre-calculate swing points and S/D zones on the entire dataset once.
             # Market structure itself will be evaluated dynamically in next() or based on these points.
             try:
-                self.bt_swing_highs_bool, self.bt_swing_lows_bool = find_swing_points(self.data.df, order=5)
+                self.bt_swing_highs_bool, self.bt_swing_lows_bool = find_swing_points(self.data.df, order=s6_swing_order)
                 # S/D zones also depend on the whole dataset for accurate historical identification
-                self.bt_sd_zones = identify_supply_demand_zones(self.data.df, atr_period=14, lookback_candles=10) 
-                print(f"DEBUG BT S6: Pre-calculated {len(self.bt_sd_zones)} S/D zones.")
+                # Pass S6 specific ATR period to this helper if it's meant to use it
+                self.bt_sd_zones = identify_supply_demand_zones(self.data.df, atr_period=s6_sd_atr_period, 
+                                                                lookback_candles=getattr(self, 'S6_SD_Lookback_Candles', 10),
+                                                                consolidation_atr_factor=getattr(self, 'S6_SD_Consol_ATR_Factor', 0.7),
+                                                                sharp_move_atr_factor=getattr(self, 'S6_SD_Sharp_Move_ATR_Factor', 1.5))
+                print(f"DEBUG BT S6: Pre-calculated {len(self.bt_sd_zones)} S/D zones using ATR period {s6_sd_atr_period}.")
                 # ATR is useful for some dynamic calculations or fallbacks, ensure it's available.
-                self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, self.ATR_PERIOD, name='ATR_S6')
+                # Use a generic ATR_PERIOD or S6 specific if defined for this self.atr
+                self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, getattr(self,'S6_ATR_Period', 14), name='ATR_S6') # Fallback if S6_ATR_Period not specifically set for this
             except Exception as e:
                 print(f"ERROR BT S6 init: Failed to pre-calculate swings or S/D zones: {e}")
                 # Potentially raise this or handle it to prevent backtest from running with faulty setup
@@ -1093,25 +1189,88 @@ class BacktestStrategyWrapper(Strategy):
                 self.bt_swing_lows_bool = pd.Series([False]*len(self.data.df), index=self.data.df.index)
                 self.bt_sd_zones = []
                 self.atr = None # Invalidate ATR if setup fails critically
+        
         elif self.current_strategy_id == 7: # Candlestick Patterns Strategy
             print(f"DEBUG BacktestStrategyWrapper.init: Initializing for Strategy ID 7 (Candlestick Patterns)")
-            # Required indicators for S7's filters and logic
-            self.ema200_s7 = self.I(ema_bt, self.data.Close, self.s7_bt_ema_trend_period, name='EMA200_S7') # Use s7_bt_ema_trend_period
-            self.atr_s7 = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, self.s7_bt_atr_period, name='ATR_S7') # Use s7_bt_atr_period
-            # RSI for S7 filter (if needed as a series, otherwise calculated on the fly in next())
-            # self.s7_rsi_filter_series = self.I(rsi_bt, self.data.Close, self.s7_bt_rsi_period, name='RSI_S7_Filter')
+            s7_ema_trend_period_bt = getattr(self, 'S7_EMA_Trend_Period', self.s7_bt_ema_trend_period) # self.s7_bt_ema_trend_period is the old hardcoded default
+            s7_atr_period_bt = getattr(self, 'S7_ATR_Period', self.s7_bt_atr_period)
+            # Other S7 params like multipliers, volume lookbacks, RSI thresholds are used in next() via getattr.
+
+            self.ema200_s7 = self.I(ema_bt, self.data.Close, s7_ema_trend_period_bt, name='EMA200_S7')
+            self.atr_s7 = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, s7_atr_period_bt, name='ATR_S7')
+            # RSI for S7 filter is calculated on the fly in next() if needed.
             # Candlestick pattern recognition will be done in next() using helper functions
             # on self.data.df slices. No specific self.I needed for the patterns themselves here.
             # Volume data is self.data.Volume
-        else: # Default for any other strategy ID, ensure ATR is available
+        
+        elif self.current_strategy_id == 2: # Bollinger Band Mean-Reversion
+            print(f"DEBUG BacktestStrategyWrapper.init: Initializing for Strategy ID 2 (Bollinger Bands)")
+            s2_ema_slow = getattr(self, 'S2_EMA_Slow', 50)
+            s2_ema_fast = getattr(self, 'S2_EMA_Fast', 30)
+            s2_rsi_period = getattr(self, 'S2_RSI_Period', 10)
+            s2_bb_length = getattr(self, 'S2_BB_Length', 15)
+            s2_bb_stddev = getattr(self, 'S2_BB_StdDev', 1.5)
+            s2_atr_period = getattr(self, 'S2_ATR_Period', 7)
+
+            self.ema_slow_s2 = self.I(ema_bt, self.data.Close, s2_ema_slow, name='EMA_Slow_S2')
+            self.ema_fast_s2 = self.I(ema_bt, self.data.Close, s2_ema_fast, name='EMA_Fast_S2')
+            self.rsi_s2 = self.I(rsi_bt, self.data.Close, s2_rsi_period, name='RSI_S2')
+            # BollingerBands from `ta` library are used directly in `next` for S2, not as `self.I`
+            # However, ATR might be needed for dynamic SL/TP if that mode is selected.
+            self.atr_s2 = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, s2_atr_period, name='ATR_S2')
+            # self.atr is the generic one, ensure it's also available if S2 uses ATR/Dynamic SLTP
+            if not hasattr(self, 'atr'): # If not already set by a prior strategy's generic ATR init
+                 self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, getattr(self, 'ATR_PERIOD', 14), name='ATR_dynSLTP_S2')
+
+
+        elif self.current_strategy_id == 3: # VWAP Breakout Momentum
+            print(f"DEBUG BacktestStrategyWrapper.init: Initializing for Strategy ID 3 (VWAP Breakout)")
+            s3_atr_period = getattr(self, 'S3_ATR_Period', 14)
+            s3_macd_slow = getattr(self, 'S3_MACD_Slow', 26)
+            s3_macd_fast = getattr(self, 'S3_MACD_Fast', 12)
+            s3_macd_sign = getattr(self, 'S3_MACD_Sign', 9)
+            # S3_ATR_RollingAvgPeriod is used in next()
+
+            self.atr_s3 = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, s3_atr_period, name='ATR_S3')
+            # MACD lines for S3 (macd_line, macd_signal_line, macd_hist are often used)
+            # self.I can only return one series. MACD object needs to be handled carefully.
+            # For simplicity, if specific lines are needed, they might be calculated in next or via multiple self.I calls if ta lib supports it.
+            # For now, let's assume MACD is primarily evaluated via its histogram or direct calculation in next().
+            # We'll initialize a generic ATR if needed for SL/TP.
+            if not hasattr(self, 'atr'):
+                 self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, getattr(self, 'ATR_PERIOD', 14), name='ATR_dynSLTP_S3')
+
+
+        elif self.current_strategy_id == 4: # MACD Divergence + Pivot-Point
+            print(f"DEBUG BacktestStrategyWrapper.init: Initializing for Strategy ID 4 (MACD Div Pivot)")
+            s4_macd_slow = getattr(self, 'S4_MACD_Slow', 26)
+            s4_macd_fast = getattr(self, 'S4_MACD_Fast', 12)
+            s4_macd_sign = getattr(self, 'S4_MACD_Sign', 9)
+            s4_stoch_k_period = getattr(self, 'S4_Stoch_K_Period', 14)
+            s4_stoch_smooth_window = getattr(self, 'S4_Stoch_Smooth_Window', 3)
+            s4_atr_period = getattr(self, 'S4_ATR_Period', 14)
+            # S4_Divergence_Lookback, S4_Stoch_Oversold, S4_Stoch_Overbought are used in next()
+            
+            # For MACD, typically the histogram (diff) is used for divergence.
+            # Stochastic %K is ta.momentum.StochasticOscillator().stoch()
+            # ATR for SL/TP
+            self.atr_s4 = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, s4_atr_period, name='ATR_S4')
+            if not hasattr(self, 'atr'):
+                 self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, getattr(self, 'ATR_PERIOD', 14), name='ATR_dynSLTP_S4')
+
+
+        else: # Default for any other (new/unspecified) strategy ID, ensure ATR is available
             print(f"DEBUG BacktestStrategyWrapper.init: Strategy ID {self.current_strategy_id} - Defaulting to RSI and ATR.")
-            self.rsi_period_val = getattr(self, 'rsi_period', 14)
-            self.rsi = self.I(rsi_bt, self.data.Close, self.rsi_period_val, name=f'RSI_default_{self.current_strategy_id}')
-            self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, self.ATR_PERIOD, name=f'ATR_default_{self.current_strategy_id}')
+            # Try to get a generic RSI_Period if set, else default to 14
+            default_rsi_period = getattr(self, 'RSI_Period', 14) # Example: "RSI_Period" might be a common name
+            self.rsi = self.I(rsi_bt, self.data.Close, default_rsi_period, name=f'RSI_default_{self.current_strategy_id}')
+            
+            # Use a generic ATR_PERIOD if set, else default to 14
+            default_atr_period = getattr(self, 'ATR_PERIOD', 14) # This is already a class attribute
+            self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, default_atr_period, name=f'ATR_default_{self.current_strategy_id}')
             print(f"DEBUG BacktestStrategyWrapper.init: Defaulted ATR indicator for strategy ID {self.current_strategy_id}.")
 
     def next(self):
-        # print(f"DEBUG BacktestStrategyWrapper.next: Executing for strategy ID {self.current_strategy_id}, Mode: {self.sl_tp_mode_bt}") # DEBUG
         price = float(self.data.Close[-1]) 
         trade_symbol = self.data.symbol if hasattr(self.data, 'symbol') else 'N/A'
         log_prefix_bt_next = f"[BT Strategy LOG {trade_symbol} - Bar {len(self.data.Close)-1} - Price {price:.4f}]" # Adjusted precision
@@ -2164,6 +2323,41 @@ def execute_backtest(strategy_id_for_backtest, symbol, timeframe, interval_days,
     print(f"DEBUG execute_backtest: Set BacktestStrategyWrapper.trailing_stop_enabled_bt to: {ts_enabled_bt_param}")
     print(f"DEBUG execute_backtest: Set BacktestStrategyWrapper.trailing_stop_atr_multiplier_bt to: {ts_atr_multiplier_bt_param}")
 
+    # --- Set Strategy-Specific Parameters for Backtesting ---
+    active_strategy_name_for_bt = STRATEGIES.get(strategy_id_for_backtest)
+    if active_strategy_name_for_bt:
+        strategy_def_for_bt = next((s for s in strategies if s["name"] == active_strategy_name_for_bt), None)
+        if strategy_def_for_bt and strategy_def_for_bt["parameters"]:
+            print(f"DEBUG execute_backtest: Setting specific parameters for strategy: {active_strategy_name_for_bt}")
+            
+            # Determine which parameter set to use:
+            # Option 1: Backtesting UI has its own dynamic fields (Ideal - NOT IMPLEMENTED YET)
+            # Option 2: Use live parameters if strategy matches current ACTIVE_STRATEGY_ID
+            # Option 3: Fallback to defaults defined in `strategies` list if no UI/live params available.
+            
+            params_to_use_for_bt = {}
+            if strategy_id_for_backtest == ACTIVE_STRATEGY_ID and current_strategy_active_params:
+                print(f"DEBUG execute_backtest: Using LIVE parameters for backtest of {active_strategy_name_for_bt}")
+                params_to_use_for_bt = current_strategy_active_params
+            else:
+                print(f"DEBUG execute_backtest: Using DEFAULT parameters for backtest of {active_strategy_name_for_bt}")
+                for param_info in strategy_def_for_bt["parameters"]:
+                    params_to_use_for_bt[param_info["name"]] = param_info["default"]
+
+            for param_name, param_value in params_to_use_for_bt.items():
+                try:
+                    # Type conversion might be needed if reading from a different source in future
+                    # For now, current_strategy_active_params and defaults should have correct types
+                    setattr(BacktestStrategyWrapper, param_name, param_value)
+                    print(f"DEBUG execute_backtest: Set BacktestStrategyWrapper.{param_name} = {param_value}")
+                except Exception as e_set_attr:
+                    print(f"DEBUG execute_backtest: Error setting attribute {param_name} on BacktestStrategyWrapper: {e_set_attr}")
+        else:
+            print(f"DEBUG execute_backtest: No specific parameter definitions found for {active_strategy_name_for_bt} in `strategies` list.")
+    else:
+        print(f"DEBUG execute_backtest: Could not find strategy name for ID {strategy_id_for_backtest}.")
+
+
     # Calculate margin for backtesting.py: margin = 1 / leverage
     # Ensure leverage_bt >= 1. If leverage_bt is 0 or less, or less than 1, default to 1 (no leverage, margin=1).
     if leverage_bt < 1:
@@ -2279,6 +2473,8 @@ selected_strategy_var = None # For strategy selection
 
 # GUI Variables for Strategy Checkboxes
 strategy_checkbox_vars = {}
+global_strategy_param_vars = {} # To store StringVars for dynamic strategy parameters
+current_strategy_active_params = {} # To store the actual typed values of the current strategy's parameters
 
 # Entry widgets (to be made global for enabling/disabling)
 account_risk_percent_entry = None
@@ -6621,8 +6817,12 @@ def apply_settings():
     global SL_TP_MODE, SL_PNL_AMOUNT, TP_PNL_AMOUNT, TRAILING_STOP_ENABLED, TRAILING_STOP_ATR_MULTIPLIER
     # And their corresponding tk StringVars
     global sl_tp_mode_var, sl_pnl_amount_var, tp_pnl_amount_var, trailing_stop_enabled_var, trailing_stop_atr_multiplier_var
+    # Globals for strategy-specific parameters
+    global strategies, global_strategy_param_vars, current_strategy_active_params, selected_strategy_var, STRATEGIES
+
 
     try:
+        # --- Apply General Bot Settings ---
         # SL/TP Mode
         selected_mode = sl_tp_mode_var.get()
         # Added "StrategyDefined_SD" to the list of valid modes
@@ -6746,11 +6946,63 @@ def apply_settings():
         # ATR/Dynamic mode will use strategy's internal RR and ATR Multiplier, not printed here directly from these global settings
         print(f"  Lev={leverage}, MaxPos={qty_concurrent_positions}, Lookback={LOCAL_HIGH_LOW_LOOKBACK_PERIOD}, Margin={margin_type_setting}, Symbols={TARGET_SYMBOLS}")
         print(f"  Trailing Stop Enabled: {TRAILING_STOP_ENABLED}, Trailing ATR Multiplier: {TRAILING_STOP_ATR_MULTIPLIER}")
+
+        # --- Apply Strategy-Specific Parameters ---
+        current_strategy_active_params.clear() # Clear previous specific params
+        active_strategy_id_val = selected_strategy_var.get() # This is an Int from selected_strategy_var
+        
+        if active_strategy_id_val in STRATEGIES: # Check if the ID is valid
+            selected_strategy_name = STRATEGIES[active_strategy_id_val]
+            
+            # Find the strategy details from the `strategies` list (which contains type info)
+            strategy_definition = next((s for s in strategies if s["name"] == selected_strategy_name), None)
+
+            if strategy_definition and selected_strategy_name in global_strategy_param_vars:
+                print(f"Applying specific parameters for strategy: {selected_strategy_name}")
+                temp_params = {}
+                valid_params = True
+                for param_def in strategy_definition["parameters"]:
+                    param_name = param_def["name"]
+                    param_type = param_def["type"]
+                    
+                    if param_name in global_strategy_param_vars[selected_strategy_name]:
+                        str_var = global_strategy_param_vars[selected_strategy_name][param_name]
+                        val_str = str_var.get()
+                        try:
+                            if param_type == "int":
+                                temp_params[param_name] = int(val_str)
+                            elif param_type == "float":
+                                temp_params[param_name] = float(val_str)
+                            else: # Default to string if type is unknown, though we should define all
+                                temp_params[param_name] = val_str
+                            print(f"  {param_name}: {temp_params[param_name]} (Type: {param_type})")
+                        except ValueError:
+                            messagebox.showerror("Settings Error", f"Invalid value for '{param_name}' in strategy '{selected_strategy_name}'. Expected type: {param_type}.")
+                            valid_params = False
+                            break 
+                    else:
+                        # This case should ideally not happen if UI is populated correctly
+                        print(f"Warning: Parameter '{param_name}' not found in UI vars for strategy '{selected_strategy_name}'. Using default if available in strategy logic.")
+                
+                if valid_params:
+                    current_strategy_active_params = temp_params
+                else:
+                    # Invalidate ACTIVE_STRATEGY_ID or prevent bot start if specific params are bad?
+                    # For now, an error message is shown, and current_strategy_active_params remains empty or outdated.
+                    # This might lead to issues if the bot starts. It's better to return False here.
+                    return False # Indicate settings application failed
+            else:
+                print(f"No specific parameters defined or UI vars missing for strategy: {selected_strategy_name}")
+        else:
+            messagebox.showerror("Settings Error", f"Currently selected strategy ID {active_strategy_id_val} is invalid.")
+            return False
+
+
         messagebox.showinfo("Settings", "Settings applied successfully!")
         return True
 
     except ValueError as ve: 
-        messagebox.showerror("Settings Error", f"Invalid input for one or more parameters. Please ensure they are valid numbers. Error: {ve}")
+        messagebox.showerror("Settings Error", f"Invalid input for one or more general parameters. Please ensure they are valid numbers. Error: {ve}")
         return False
     except Exception as e:
         messagebox.showerror("Settings Error", f"An unexpected error occurred while applying settings: {e}")
@@ -6817,28 +7069,64 @@ def stop_bot():
     print("Stop signal sent to bot thread.")
 
 def handle_strategy_checkbox_select(selected_id):
-    global strategy_checkbox_vars, selected_strategy_var, STRATEGIES 
+    global strategy_checkbox_vars, selected_strategy_var, STRATEGIES, strategies
+    global global_strategy_param_vars, strategy_specific_params_frame, params_widgets
 
     current_val_for_selected_id = strategy_checkbox_vars[selected_id].get()
 
-    if current_val_for_selected_id: # If the clicked checkbox is now True
-        selected_strategy_var.set(selected_id) # Set this as the active strategy ID
+    if current_val_for_selected_id:  # If the clicked checkbox is now True
+        selected_strategy_var.set(selected_id)  # Set this as the active strategy ID
         # Uncheck all others
         for s_id, bool_var in strategy_checkbox_vars.items():
             if s_id != selected_id:
                 bool_var.set(False)
-        print(f"Strategy {STRATEGIES[selected_id]} ({selected_id}) GUI selected via checkbox.")
+        
+        selected_strategy_name = STRATEGIES[selected_id]
+        print(f"Strategy {selected_strategy_name} ({selected_id}) GUI selected. Updating specific parameters UI.")
+
+        # Clear existing specific parameter widgets
+        for widget in strategy_specific_params_frame.winfo_children():
+            widget.destroy()
+            if widget in params_widgets: # Also remove from global list if they were added
+                params_widgets.remove(widget)
+
+
+        # Find the strategy details from the global `strategies` list (the one with parameter details)
+        strategy_details = next((s for s in strategies if s["name"] == selected_strategy_name), None)
+
+        if strategy_details and strategy_details["parameters"]:
+            if selected_strategy_name not in global_strategy_param_vars:
+                global_strategy_param_vars[selected_strategy_name] = {}
+
+            for i, param_info in enumerate(strategy_details["parameters"]):
+                param_name = param_info["name"]
+                param_default = param_info["default"]
+                
+                # Create StringVar for this parameter if it doesn't exist or re-initialize
+                string_var = tk.StringVar(value=str(param_default))
+                global_strategy_param_vars[selected_strategy_name][param_name] = string_var
+                
+                # Create Label and Entry
+                lbl = ttk.Label(strategy_specific_params_frame, text=f"{param_name}:")
+                lbl.grid(row=i, column=0, padx=2, pady=2, sticky='w')
+                
+                entry = ttk.Entry(strategy_specific_params_frame, textvariable=string_var, width=15)
+                entry.grid(row=i, column=1, padx=2, pady=2, sticky='w')
+                
+                # Add to params_widgets so they can be disabled/enabled with the bot state
+                params_widgets.append(lbl)
+                params_widgets.append(entry)
+        else:
+            # No parameters for this strategy or strategy details not found
+            lbl_no_params = ttk.Label(strategy_specific_params_frame, text="No specific parameters for this strategy.")
+            lbl_no_params.pack(padx=5, pady=5)
+            params_widgets.append(lbl_no_params)
+
     else:
-        # This logic prevents unchecking the *last* checked box, 
-        # effectively making one always selected, similar to radio buttons.
-        # If the user tries to uncheck the currently active strategy, re-check it.
-        if selected_strategy_var.get() == selected_id: # Check if it's the currently active one
-            strategy_checkbox_vars[selected_id].set(True) 
+        # This logic prevents unchecking the *last* checked box
+        if selected_strategy_var.get() == selected_id:  # Check if it's the currently active one
+            strategy_checkbox_vars[selected_id].set(True)
             print(f"Strategy {STRATEGIES[selected_id]} ({selected_id}) remains selected. Cannot uncheck all.")
-        # If it's not the active one being unchecked (which shouldn't happen if logic is correct elsewhere,
-        # but as a safeguard), this 'else' branch means an already false checkbox was clicked (no change) or
-        # a non-active one was unchecked, which is fine if another one is still active.
-        # However, the primary goal is to ensure the selected_strategy_var reflects one true checkbox.
 
 # --- Main Application Window ---
 if __name__ == "__main__":
@@ -7018,6 +7306,10 @@ if __name__ == "__main__":
 
     strategy_frame = ttk.LabelFrame(controls_frame, text="Strategy Selection")
     strategy_frame.pack(fill="x", padx=5, pady=5)
+
+    # Frame for strategy-specific parameters, placed below strategy selection
+    strategy_specific_params_frame = ttk.LabelFrame(controls_frame, text="Strategy-Specific Parameters")
+    strategy_specific_params_frame.pack(fill="x", padx=5, pady=(0,5)) # pady to keep some space
     
     if strategy_radio_buttons: 
         params_widgets = [widget for widget in params_widgets if widget not in strategy_radio_buttons]
@@ -7174,7 +7466,25 @@ if __name__ == "__main__":
     update_conditions_display_content("System", None, initial_conditions_msg) # Initial display
 
     # Initial data load for Account Summary
-    update_account_summary_data() 
+    update_account_summary_data()
+
+    # Populate strategy-specific parameters for the initially selected strategy
+    if root and root.winfo_exists():
+        # Ensure the initial strategy checkbox is set correctly before calling handler
+        initial_active_id = selected_strategy_var.get() # Get the default active ID
+        if initial_active_id in strategy_checkbox_vars:
+            strategy_checkbox_vars[initial_active_id].set(True) # Ensure its checkbox var is true
+            handle_strategy_checkbox_select(initial_active_id) # Call handler to populate UI
+        else:
+            # Fallback if initial_active_id is somehow not in strategy_checkbox_vars (e.g. empty STRATEGIES dict)
+            # This might happen if STRATEGIES is empty or ACTIVE_STRATEGY_ID is invalid
+            # Attempt to select the first available strategy if any
+            if STRATEGIES and strategy_checkbox_vars:
+                first_available_id = list(STRATEGIES.keys())[0]
+                selected_strategy_var.set(first_available_id)
+                strategy_checkbox_vars[first_available_id].set(True)
+                handle_strategy_checkbox_select(first_available_id)
+
 
     # Start the continuous 5-second update cycle for Account Summary
     if root and root.winfo_exists(): # Check if root exists before scheduling
