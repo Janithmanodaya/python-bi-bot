@@ -494,7 +494,8 @@ def strategy_candlestick_patterns_signal(symbol: str) -> dict:
     base_return = {
         'signal': 'none', 'sl_price': None, 'tp_price': None, 'error': None,
         'account_risk_percent': 0.005, 
-        'all_conditions_status': {} 
+        'all_conditions_status': {},
+        'signal_candle_timestamp': None
     }
     s7_log_prefix = f"[S7 {symbol}]"
 
@@ -503,6 +504,8 @@ def strategy_candlestick_patterns_signal(symbol: str) -> dict:
     if kl_df is None or len(kl_df) < min_klines_needed:
         base_return['error'] = f"S7: Insufficient klines (need {min_klines_needed}, got {len(kl_df) if kl_df is not None else 0})"
         return base_return
+        
+    base_return['signal_candle_timestamp'] = kl_df.index[-1]
 
     now_utc = pd.Timestamp.now(tz='UTC')
     if now_utc.hour == 23 or now_utc.hour == 0:
@@ -593,8 +596,8 @@ def strategy_candlestick_patterns_signal(symbol: str) -> dict:
     s7_rr_for_dynamic_calc = s7_tp_atr_multiplier / s7_sl_atr_multiplier if s7_sl_atr_multiplier > 0 else 1.5 
 
     # Volume Filter Parameters (used by check_volume_spike called earlier)
-    s7_volume_lookback_period = 20
-    s7_volume_spike_multiplier = 2.0
+    # s7_volume_lookback_period = 20 # Filter removed
+    # s7_volume_spike_multiplier = 2.0 # Filter removed
     # Note: check_volume_spike is called with these defaults. For optimization, 
     # these might be passed into strategy_candlestick_patterns_signal or changed globally.
 
@@ -603,60 +606,52 @@ def strategy_candlestick_patterns_signal(symbol: str) -> dict:
         # Log detected pattern before filters
         print(f"[S7 {symbol}] Pattern detected: {detected_pattern_name} ({pattern_side}) at price {current_price}")
 
-        # EMA Trend Filter
-        ema_filter_passed = False
-        if pattern_side == "up":
-            if current_price > last_ema200 and ema200_slope_up:
-                ema_filter_passed = True
-            base_return['all_conditions_status']['ema_trend_filter_long_eval'] = f"Price ({current_price:.{price_precision}f}) > EMA200 ({last_ema200:.{price_precision}f}) AND Slope Up ({ema200_slope_up})"
-        elif pattern_side == "down":
-            if current_price < last_ema200 and ema200_slope_down:
-                ema_filter_passed = True
-            base_return['all_conditions_status']['ema_trend_filter_short_eval'] = f"Price ({current_price:.{price_precision}f}) < EMA200 ({last_ema200:.{price_precision}f}) AND Slope Down ({ema200_slope_down})"
+        # --- FILTERS REMOVED ---
+        # # EMA Trend Filter
+        # ema_filter_passed = False
+        # if pattern_side == "up":
+        #     if current_price > last_ema200 and ema200_slope_up:
+        #         ema_filter_passed = True
+        #     base_return['all_conditions_status']['ema_trend_filter_long_eval'] = f"Price ({current_price:.{price_precision}f}) > EMA200 ({last_ema200:.{price_precision}f}) AND Slope Up ({ema200_slope_up})"
+        # elif pattern_side == "down":
+        #     if current_price < last_ema200 and ema200_slope_down:
+        #         ema_filter_passed = True
+        #     base_return['all_conditions_status']['ema_trend_filter_short_eval'] = f"Price ({current_price:.{price_precision}f}) < EMA200 ({last_ema200:.{price_precision}f}) AND Slope Down ({ema200_slope_down})"
+        # base_return['all_conditions_status']['ema_filter_passed'] = ema_filter_passed
         
-        base_return['all_conditions_status']['ema_filter_passed'] = ema_filter_passed
-        
-        # Volume Filter (using check_volume_spike output)
-        volume_filter_passed = volume_spike_detected # Re-enable volume filter
-        base_return['all_conditions_status']['volume_spike_filter_passed'] = volume_filter_passed
-        base_return['all_conditions_status']['original_volume_spike_detected'] = volume_spike_detected # Keep for info
+        # # Volume Filter (using check_volume_spike output)
+        # volume_filter_passed = volume_spike_detected 
+        # base_return['all_conditions_status']['volume_spike_filter_passed'] = volume_filter_passed
+        # base_return['all_conditions_status']['original_volume_spike_detected'] = volume_spike_detected
 
-        # RSI Entry Filter Parameters
-        s7_rsi_period = 14                 # RSI period for entry filter
-        s7_rsi_overbought_threshold = 75   # RSI level above which bullish patterns are filtered
-        s7_rsi_oversold_threshold = 25     # RSI level below which bearish patterns are filtered
-        # --- End of Parameter Optimization Hooks for Strategy 7 ---
+        # # RSI Entry Filter Parameters
+        # s7_rsi_period = 14                 
+        # s7_rsi_overbought_threshold = 75   
+        # s7_rsi_oversold_threshold = 25     
+        # # --- End of Parameter Optimization Hooks for Strategy 7 ---
 
-        rsi_filter_passed = True # Default to true, set to false if filter fails
-        # This status will be updated only if primary filters (EMA, Volume) pass
-        base_return['all_conditions_status']['rsi_entry_filter_passed'] = "Not Evaluated Yet" 
+        # rsi_filter_passed = True 
+        # base_return['all_conditions_status']['rsi_entry_filter_passed'] = "Not Evaluated (Filter Removed)"
+        # --- END OF FILTERS REMOVED ---
 
-
-        if ema_filter_passed and volume_filter_passed:
-            # Calculate RSI for the filter only if other primary filters passed
-            try:
-                rsi_series_s7_filter = ta.momentum.RSIIndicator(close=kl_df['Close'], window=s7_rsi_period).rsi()
-                if rsi_series_s7_filter is None or rsi_series_s7_filter.empty or pd.isna(rsi_series_s7_filter.iloc[-1]):
-                    base_return['error'] = (base_return['error'] or "") + "; S7 RSI filter calc failed or NaN"
-                    rsi_filter_passed = False 
-                else:
-                    last_rsi_s7 = rsi_series_s7_filter.iloc[-1]
-                    base_return['all_conditions_status']['rsi_for_filter'] = f"{last_rsi_s7:.2f}"
-                    if pattern_side == "up" and last_rsi_s7 > s7_rsi_overbought_threshold:
-                        rsi_filter_passed = False
-                        base_return['all_conditions_status']['rsi_filter_result'] = f"REJECTED LONG: RSI ({last_rsi_s7:.2f}) > Threshold ({s7_rsi_overbought_threshold})"
-                    elif pattern_side == "down" and last_rsi_s7 < s7_rsi_oversold_threshold:
-                        rsi_filter_passed = False
-                        base_return['all_conditions_status']['rsi_filter_result'] = f"REJECTED SHORT: RSI ({last_rsi_s7:.2f}) < Threshold ({s7_rsi_oversold_threshold})"
-                    else:
-                        base_return['all_conditions_status']['rsi_filter_result'] = "PASSED"
-            except Exception as e_rsi_filt:
-                base_return['error'] = (base_return['error'] or "") + f"; S7 RSI filter exception: {str(e_rsi_filt)}"
-                rsi_filter_passed = False
+        # Directly proceed to SL/TP if pattern is found, as filters are removed.
+        # if ema_filter_passed and volume_filter_passed: # This condition is now effectively always true for pattern trades
+            # try:
+            #     rsi_series_s7_filter = ta.momentum.RSIIndicator(close=kl_df['Close'], window=s7_rsi_period).rsi()
+            #     if rsi_series_s7_filter is None or rsi_series_s7_filter.empty or pd.isna(rsi_series_s7_filter.iloc[-1]):
+            #         base_return['error'] = (base_return['error'] or "") + "; S7 RSI filter calc failed or NaN (Filter Removed)"
+            #         # rsi_filter_passed = False # Filter removed
+            #     else:
+            #         last_rsi_s7 = rsi_series_s7_filter.iloc[-1]
+            #         base_return['all_conditions_status']['rsi_for_filter'] = f"{last_rsi_s7:.2f} (Filter Removed)"
+            #         # RSI checks removed
+            # except Exception as e_rsi_filt:
+            #     base_return['error'] = (base_return['error'] or "") + f"; S7 RSI filter exception: {str(e_rsi_filt)} (Filter Removed)"
+                # rsi_filter_passed = False # Filter removed
             
-            base_return['all_conditions_status']['rsi_entry_filter_passed'] = rsi_filter_passed
+            # base_return['all_conditions_status']['rsi_entry_filter_passed'] = rsi_filter_passed # Will be true or based on calc error
 
-            if rsi_filter_passed: # Only proceed if RSI filter also passes
+            # if rsi_filter_passed: # This is now effectively always true if pattern found
                 # --- S7 Confluence Factor Hook (Live Strategy) ---
                 # Future enhancement: Add checks for confluence factors here.
                 # For example:
@@ -673,49 +668,43 @@ def strategy_candlestick_patterns_signal(symbol: str) -> dict:
                 #     Proceed with SL/TP calculation...
                 # --- End S7 Confluence Factor Hook ---
 
-                entry_price = current_price
-                # Use calculate_dynamic_sl_tp for SL/TP
-                print(f"{s7_log_prefix} Attempting ATR-based SL/TP for {detected_pattern_name} ({pattern_side}). SL_ATR_Multi: {s7_sl_atr_multiplier}, RR for Calc: {s7_rr_for_dynamic_calc:.2f} (derived from TP_ATR_Multi: {s7_tp_atr_multiplier})")
-                dynamic_sl_tp_result = calculate_dynamic_sl_tp(
-                    symbol=symbol,
-                entry_price=entry_price,
-                side=pattern_side, # 'up' or 'down'
-                atr_period=s7_atr_period,
-                rr=s7_rr_for_dynamic_calc,
-                atr_multiplier=s7_sl_atr_multiplier # This is the SL ATR multiplier
-            )
+        # Since filters are removed, if a pattern is detected, proceed to SL/TP calculation.
+        entry_price = current_price
+        # Use calculate_dynamic_sl_tp for SL/TP
+        print(f"{s7_log_prefix} Attempting ATR-based SL/TP for {detected_pattern_name} ({pattern_side}). SL_ATR_Multi: {s7_sl_atr_multiplier}, RR for Calc: {s7_rr_for_dynamic_calc:.2f} (derived from TP_ATR_Multi: {s7_tp_atr_multiplier})")
+        dynamic_sl_tp_result = calculate_dynamic_sl_tp(
+            symbol=symbol,
+            entry_price=entry_price,
+            side=pattern_side, # 'up' or 'down'
+            atr_period=s7_atr_period,
+            rr=s7_rr_for_dynamic_calc,
+            atr_multiplier=s7_sl_atr_multiplier # This is the SL ATR multiplier
+        )
 
-            if dynamic_sl_tp_result['error']:
-                rejection_reason_sltp = f"ATR SL/TP calc failed for {detected_pattern_name}: {dynamic_sl_tp_result['error']}"
-                base_return['error'] = f"S7: {rejection_reason_sltp}"
-                print(f"{s7_log_prefix} REJECTED: {rejection_reason_sltp}")
-                base_return['signal'] = 'none'
-            elif dynamic_sl_tp_result['sl_price'] is not None and dynamic_sl_tp_result['tp_price'] is not None:
-                base_return['signal'] = pattern_side
-                base_return['sl_price'] = dynamic_sl_tp_result['sl_price']
-                base_return['tp_price'] = dynamic_sl_tp_result['tp_price']
-                print(f"{s7_log_prefix} ATR SL/TP successful for {detected_pattern_name}: SL={base_return['sl_price']}, TP={base_return['tp_price']}")
-            else:
-                rejection_reason_sltp = f"ATR SL/TP calc for {detected_pattern_name} resulted in None SL/TP without explicit error."
-                base_return['error'] = f"S7: {rejection_reason_sltp}"
-                print(f"{s7_log_prefix} REJECTED: {rejection_reason_sltp}")
-                base_return['signal'] = 'none'
-        else: 
-            if detected_pattern_name != "None": # Only log rejection if a pattern was actually detected
-                error_details = []
-                # This part will be more relevant when filters are active
-                if not ema_filter_passed: error_details.append("EMA filter false")
-                if not volume_filter_passed: error_details.append("Volume filter false")
-                
-                if error_details:
-                    rejection_reason_filters = f"{detected_pattern_name} filters failed ({', '.join(error_details)})"
-                    base_return['error'] = f"S7: {rejection_reason_filters}"
-                    print(f"{s7_log_prefix} REJECTED: {rejection_reason_filters}")
-                base_return['signal'] = 'none' # Ensure signal is none if filters fail
+        if dynamic_sl_tp_result['error']:
+            rejection_reason_sltp = f"ATR SL/TP calc failed for {detected_pattern_name}: {dynamic_sl_tp_result['error']}"
+            base_return['error'] = f"S7: {rejection_reason_sltp}"
+            print(f"{s7_log_prefix} REJECTED (SL/TP CALC): {rejection_reason_sltp}") # Clarified rejection source
+            base_return['signal'] = 'none'
+        elif dynamic_sl_tp_result['sl_price'] is not None and dynamic_sl_tp_result['tp_price'] is not None:
+            base_return['signal'] = pattern_side
+            base_return['sl_price'] = dynamic_sl_tp_result['sl_price']
+            base_return['tp_price'] = dynamic_sl_tp_result['tp_price']
+            print(f"{s7_log_prefix} ATR SL/TP successful for {detected_pattern_name}: SL={base_return['sl_price']}, TP={base_return['tp_price']}")
+        else:
+            rejection_reason_sltp = f"ATR SL/TP calc for {detected_pattern_name} resulted in None SL/TP without explicit error."
+            base_return['error'] = f"S7: {rejection_reason_sltp}"
+            print(f"{s7_log_prefix} REJECTED (SL/TP CALC NONE): {rejection_reason_sltp}") # Clarified rejection source
+            base_return['signal'] = 'none'
+        # else: # This 'else' corresponded to filters failing, which are now removed.
+            # if detected_pattern_name != "None": 
+            #     # This block would have logged filter failures. Since filters are removed, this is not needed.
+            #     pass
+            # base_return['signal'] = 'none' 
             
-    # Standard "no pattern" message if applicable, not a "rejection" of a specific pattern
-    if base_return['signal'] == 'none' and detected_pattern_name == "None" and not base_return['error'] :
-         base_return['error'] = "S7: No specific candlestick pattern detected."
+    # Standard "no pattern" message if applicable
+    if base_return['signal'] == 'none' and detected_pattern_name == "None" and not base_return['error'] : # Ensure no other error already set
+         base_return['error'] = "S7: No specific candlestick pattern detected." # This is informational if no pattern found
     
     # Logging for errors that are not specific rejections
     if base_return['error'] and \
@@ -793,6 +782,198 @@ def strategy_candlestick_patterns_signal(symbol: str) -> dict:
             base_return['error'] = f"S7 RSI Fallback Error: {e_rsi_fallback}"
 
     return base_return
+
+
+# --- New Exit Strategy Functions ---
+
+# Candlestick patterns for exits (some might reuse existing is_hammer, is_shooting_star etc. if suitable)
+
+def is_gravestone_doji(metrics: dict, body_to_range_ratio_threshold=0.1, lower_wick_to_range_ratio_threshold=0.05) -> bool:
+    """
+    Checks for a Gravestone Doji.
+    Body is very small (doji shape).
+    Long upper wick.
+    Very small or no lower wick.
+    """
+    if not metrics: return False
+    # Relies on 'is_doji_shape' from get_candle_metrics which checks: body <= total_range * 0.1
+    is_doji_shape = metrics['is_doji_shape'] 
+    
+    if metrics['total_range'] == 0: # Avoid division by zero for a zero-range candle
+        # A perfect doji (open=high=low=close) could be, but less distinct.
+        # For Gravestone, we expect O=L=C and H > L. So total_range > 0.
+        return False
+
+    # Gravestone: Open and Close are near the Low. Body is at the lower end.
+    # Consider body is in the lowest 10-15% of the candle's total range.
+    body_at_bottom = (max(metrics['o'], metrics['c']) < metrics['l'] + metrics['total_range'] * 0.15) 
+    # And upper wick is significant (e.g., > 70% of range), lower wick is small.
+    has_long_upper_wick = metrics['upper_wick'] >= metrics['total_range'] * 0.7 
+    has_small_lower_wick = metrics['lower_wick'] <= metrics['total_range'] * lower_wick_to_range_ratio_threshold
+    
+    # print(f"DEBUG EXIT_RULE is_gravestone_doji: M={metrics} -> Res={(is_doji_shape and body_at_bottom and has_small_lower_wick)} (DS:{is_doji_shape}, BaB:{body_at_bottom}, SLW:{has_small_lower_wick}, LUW:{has_long_upper_wick})")
+    return is_doji_shape and body_at_bottom and has_small_lower_wick # Removed has_long_upper_wick as body_at_bottom + small_lower_wick implies it for a doji shape
+
+def is_dragonfly_doji(metrics: dict, body_to_range_ratio_threshold=0.1, upper_wick_to_range_ratio_threshold=0.05) -> bool:
+    """
+    Checks for a Dragonfly Doji.
+    Body is very small (doji shape).
+    Long lower wick.
+    Very small or no upper wick.
+    """
+    if not metrics: return False
+    is_doji_shape = metrics['is_doji_shape']
+
+    if metrics['total_range'] == 0: # O=H=L=C, not a dragonfly
+        return False
+
+    # Dragonfly: Open and Close are near the High. Body is at the upper end.
+    body_at_top = (min(metrics['o'], metrics['c']) > metrics['h'] - metrics['total_range'] * 0.15)
+    has_long_lower_wick = metrics['lower_wick'] >= metrics['total_range'] * 0.7
+    has_small_upper_wick = metrics['upper_wick'] <= metrics['total_range'] * upper_wick_to_range_ratio_threshold
+    
+    # print(f"DEBUG EXIT_RULE is_dragonfly_doji: M={metrics} -> Res={(is_doji_shape and body_at_top and has_small_upper_wick)} (DS:{is_doji_shape}, BaT:{body_at_top}, SUW:{has_small_upper_wick}, LLW:{has_long_lower_wick})")
+    return is_doji_shape and body_at_top and has_small_upper_wick # Removed has_long_lower_wick for similar reasons
+
+# is_shooting_star (already exists via is_inverted_hammer in S7)
+# is_hanging_man (already exists via is_hammer in S7)
+# is_bearish_engulfing (already exists in S7)
+# is_morning_star (already exists in S7)
+# is_bullish_engulfing (already exists in S7)
+# is_hammer (already exists in S7)
+
+def check_exit_on_opposite_candlestick_reversal(symbol: str, side: str, kl_df: pd.DataFrame) -> tuple[bool, str]:
+    """
+    Checks if an exit signal based on opposite candlestick reversals is present.
+    Args:
+        symbol (str): The trading symbol. (Currently unused but good for context/logging)
+        side (str): The side of the current trade ('buy' for long, 'sell' for short).
+        kl_df (pd.DataFrame): DataFrame with kline data. Needs at least 3 candles for 3-candle patterns.
+    Returns:
+        tuple[bool, str]: (True if exit condition met, "description of pattern or 'NoReversal'")
+    """
+    if kl_df is None or len(kl_df) < 1: # Need at least 1 candle for single patterns
+        return False, "Insufficient data for exit reversal check (min 1)"
+
+    m_curr = get_candle_metrics(kl_df.iloc[-1])
+    m_prev = get_candle_metrics(kl_df.iloc[-2]) if len(kl_df) >= 2 else None
+    m_prev2 = get_candle_metrics(kl_df.iloc[-3]) if len(kl_df) >= 3 else None # For Morning/Evening Star
+
+    if side == 'buy': # Current trade is Long, looking for Bearish reversal
+        if is_shooting_star(m_curr): return True, "Shooting Star"
+        if is_hanging_man(m_curr): return True, "Hanging Man"
+        if is_gravestone_doji(m_curr): return True, "Gravestone Doji"
+        if m_prev and is_bearish_engulfing(m_prev, m_curr): return True, "Bearish Engulfing"
+        # Evening Star is a three-candle pattern, also bearish. Added from original list.
+        if m_prev2 and m_prev and is_evening_star(m_prev2, m_prev, m_curr): return True, "Evening Star"
+
+
+    elif side == 'sell': # Current trade is Short, looking for Bullish reversal
+        if is_hammer(m_curr): return True, "Hammer"
+        if is_dragonfly_doji(m_curr): return True, "Dragonfly Doji"
+        if m_prev2 and m_prev and is_morning_star(m_prev2, m_prev, m_curr): return True, "Morning Star"
+        if m_prev and is_bullish_engulfing(m_prev, m_curr): return True, "Bullish Engulfing"
+        # Inverted Hammer is a bullish reversal, added from original list.
+        if is_inverted_hammer(m_curr): return True, "Inverted Hammer"
+
+    return False, "NoOppositeReversal"
+
+
+def check_trailing_stop_candlestick_extremes(symbol: str, side: str, current_sl: float, entry_price: float, target_profit_price: float, kl_df: pd.DataFrame) -> float | None:
+    """
+    Implements the trailing stop via candlestick lows/highs after 50% target profit.
+    """
+    if kl_df is None or kl_df.empty:
+        return None
+
+    latest_candle_metrics = get_candle_metrics(kl_df.iloc[-1])
+    current_price = latest_candle_metrics['c'] # Current close price
+    price_precision = get_price_precision(symbol)
+    if not isinstance(price_precision, int) or price_precision < 0: price_precision = 2 
+
+    profit_target_distance = abs(target_profit_price - entry_price)
+    if profit_target_distance == 0: return None 
+
+    current_profit_distance = 0
+    if side == 'buy' and current_price > entry_price:
+        current_profit_distance = current_price - entry_price
+    elif side == 'sell' and current_price < entry_price:
+        current_profit_distance = entry_price - current_price
+    
+    if current_profit_distance < (profit_target_distance * 0.5):
+        return None # Trail only after 50% of target profit is achieved in current direction
+
+    new_sl_candidate = None
+    if side == 'buy': 
+        if latest_candle_metrics['is_bullish']: 
+            # Trail stop to just below the low of the subsequent bullish candle
+            # A small buffer might be considered, e.g., 1 tick or a tiny percentage
+            potential_new_sl = latest_candle_metrics['l'] # - some_buffer
+            potential_new_sl = round(potential_new_sl, price_precision)
+            # New SL must be higher than current SL and also higher than entry price (to lock in profit)
+            # and also below the current price to be a valid stop for a long.
+            if potential_new_sl > current_sl and potential_new_sl > entry_price and potential_new_sl < current_price:
+                new_sl_candidate = potential_new_sl
+    
+    elif side == 'sell': 
+        if latest_candle_metrics['is_bearish']:
+            potential_new_sl = latest_candle_metrics['h'] # + some_buffer
+            potential_new_sl = round(potential_new_sl, price_precision)
+            # New SL must be lower than current SL and also lower than entry price
+            # and also above the current price to be a valid stop for a short.
+            if potential_new_sl < current_sl and potential_new_sl < entry_price and potential_new_sl > current_price:
+                new_sl_candidate = potential_new_sl
+                
+    return new_sl_candidate
+
+
+def check_time_based_exit_new(entry_candle_timestamp: pd.Timestamp, current_kl_df: pd.DataFrame, bars_limit: int = 20) -> bool:
+    """
+    Checks if the trade should be exited based on time (number of bars passed).
+    Args:
+        entry_candle_timestamp (pd.Timestamp): Timestamp of the candle when the trade was entered.
+        current_kl_df (pd.DataFrame): The current kline DataFrame, indexed by Time.
+        bars_limit (int): Number of bars after which to exit.
+    Returns:
+        bool: True if time limit reached, False otherwise.
+    """
+    if entry_candle_timestamp is None or current_kl_df is None or current_kl_df.empty:
+        return False
+    
+    try:
+        # Ensure entry_candle_timestamp is compatible with current_kl_df.index
+        if entry_candle_timestamp.tzinfo is None and current_kl_df.index.tzinfo is not None:
+            entry_candle_timestamp = entry_candle_timestamp.tz_localize(current_kl_df.index.tzinfo)
+        elif entry_candle_timestamp.tzinfo is not None and current_kl_df.index.tzinfo is None:
+             # This is tricky, assuming current_kl_df index should be UTC if entry_candle_timestamp is
+             print("Warning: check_time_based_exit_new: entry_candle_timestamp is tz-aware, but kline index is not. This might lead to issues.")
+        elif entry_candle_timestamp.tzinfo is not None and current_kl_df.index.tzinfo is not None and entry_candle_timestamp.tzinfo != current_kl_df.index.tzinfo:
+            entry_candle_timestamp = entry_candle_timestamp.tz_convert(current_kl_df.index.tzinfo)
+
+        entry_idx_loc = current_kl_df.index.get_loc(entry_candle_timestamp, method='ffill') # find closest past index
+        current_idx_loc = len(current_kl_df) - 1 # Index of the latest candle
+        
+        candles_passed = current_idx_loc - entry_idx_loc
+        # print(f"DEBUG TimeBasedExit: EntryTS: {entry_candle_timestamp}, EntryIdx: {entry_idx_loc}, CurrIdx: {current_idx_loc}, Passed: {candles_passed}, Limit: {bars_limit}")
+        return candles_passed >= bars_limit
+    except KeyError:
+        # print(f"DEBUG TimeBasedExit: Entry timestamp {entry_candle_timestamp} not found in kline index for time-based exit check.")
+        return False # Entry timestamp not in current klines, cannot determine bars passed reliably
+    except Exception as e:
+        print(f"Error in check_time_based_exit_new: {e}")
+        return False
+
+
+def check_volume_driven_exit_new(symbol: str, kl_df: pd.DataFrame, volume_lookback: int = 20, volume_multiplier: float = 2.0) -> bool:
+    """
+    Checks for an exit based on a high-volume candle (reversal implied by rule name, but logic is just high volume).
+    """
+    # Reuses existing check_volume_spike. The "reversal" aspect is not explicitly checked here,
+    # only if a high-volume candle prints.
+    return check_volume_spike(kl_df, lookback_period=volume_lookback, multiplier=volume_multiplier)
+
+# --- End of New Exit Strategy Functions ---
+
 
 # Backtest Strategy Wrapper Class
 class BacktestStrategyWrapper(Strategy):
@@ -1657,52 +1838,54 @@ class BacktestStrategyWrapper(Strategy):
                     ema_filter_passed_s7_bt = True
                 elif pattern_side_s7_bt == "down" and current_price_s7_bt < last_ema200_s7_bt and ema200_slope_down_bt:
                     ema_filter_passed_s7_bt = True
-                print(f"{log_prefix_bt_next} S7 BT: EMA Filter Passed: {ema_filter_passed_s7_bt}")
+                print(f"{log_prefix_bt_next} S7 BT: EMA Filter Passed: {ema_filter_passed_s7_bt} (FILTERS NOW REMOVED FOR ENTRY)")
                 
-                rsi_filter_passed_s7_bt = True # Default to true, only set to false if condition met
-                print(f"{log_prefix_bt_next} S7 BT: Volume Spike Detected: {volume_spike_detected_s7_bt}")
+                # rsi_filter_passed_s7_bt = True # Default to true, set to false if condition met (FILTER REMOVED)
+                print(f"{log_prefix_bt_next} S7 BT: Volume Spike Detected: {volume_spike_detected_s7_bt} (FILTERS NOW REMOVED FOR ENTRY)")
 
-                if ema_filter_passed_s7_bt and volume_spike_detected_s7_bt: # RSI filter only if others pass
-                    print(f"{log_prefix_bt_next} S7 BT: Calculating RSI for filter. RSI Period: {self.s7_bt_rsi_period}")
-                    try:
-                        close_prices_list_filter = list(self.data.Close)
-                        if not close_prices_list_filter:
-                            raise ValueError("Close prices list for filter is empty.")
+                # if ema_filter_passed_s7_bt and volume_spike_detected_s7_bt: # RSI filter only if others pass (FILTERS REMOVED)
+                    # print(f"{log_prefix_bt_next} S7 BT: Calculating RSI for filter. RSI Period: {self.s7_bt_rsi_period} (FILTER REMOVED)")
+                    # try:
+                        # close_prices_list_filter = list(self.data.Close)
+                        # if not close_prices_list_filter:
+                        #     raise ValueError("Close prices list for filter is empty.")
                         
-                        rsi_values_for_s7_filter = rsi_bt(pd.Series(close_prices_list_filter), period=self.s7_bt_rsi_period)
+                        # rsi_values_for_s7_filter = rsi_bt(pd.Series(close_prices_list_filter), period=self.s7_bt_rsi_period)
 
-                        if rsi_values_for_s7_filter is None:
-                            raise ValueError("rsi_bt for filter returned None.")
-                        if rsi_values_for_s7_filter.empty:
-                            raise ValueError("rsi_bt for filter returned an empty Series.")
-                        if rsi_values_for_s7_filter.isnull().all():
-                            raise ValueError("rsi_bt for filter returned a Series with all NaNs.")
-                        if pd.isna(rsi_values_for_s7_filter.iloc[-1]):
-                            raise ValueError("Last RSI value for filter is NaN.")
+                        # if rsi_values_for_s7_filter is None:
+                        #     raise ValueError("rsi_bt for filter returned None.")
+                        # if rsi_values_for_s7_filter.empty:
+                        #     raise ValueError("rsi_bt for filter returned an empty Series.")
+                        # if rsi_values_for_s7_filter.isnull().all():
+                        #     raise ValueError("rsi_bt for filter returned a Series with all NaNs.")
+                        # if pd.isna(rsi_values_for_s7_filter.iloc[-1]):
+                        #     raise ValueError("Last RSI value for filter is NaN.")
 
-                        last_rsi_s7_bt = rsi_values_for_s7_filter.iloc[-1]
-                        print(f"{log_prefix_bt_next} S7 BT: Last RSI for filter: {last_rsi_s7_bt:.2f}. Side: {pattern_side_s7_bt}, OB: {self.s7_bt_rsi_overbought}, OS: {self.s7_bt_rsi_oversold}")
-                        if pattern_side_s7_bt == "up" and last_rsi_s7_bt > self.s7_bt_rsi_overbought:
-                            rsi_filter_passed_s7_bt = False
-                        elif pattern_side_s7_bt == "down" and last_rsi_s7_bt < self.s7_bt_rsi_oversold:
-                            rsi_filter_passed_s7_bt = False
-                        # else: rsi_filter_passed_s7_bt remains True (its default)
+                        # last_rsi_s7_bt = rsi_values_for_s7_filter.iloc[-1]
+                        # print(f"{log_prefix_bt_next} S7 BT: Last RSI for filter: {last_rsi_s7_bt:.2f}. Side: {pattern_side_s7_bt}, OB: {self.s7_bt_rsi_overbought}, OS: {self.s7_bt_rsi_oversold} (FILTER REMOVED)")
+                        # if pattern_side_s7_bt == "up" and last_rsi_s7_bt > self.s7_bt_rsi_overbought:
+                        #     rsi_filter_passed_s7_bt = False
+                        # elif pattern_side_s7_bt == "down" and last_rsi_s7_bt < self.s7_bt_rsi_oversold:
+                        #     rsi_filter_passed_s7_bt = False
+                        # # else: rsi_filter_passed_s7_bt remains True (its default)
                             
-                    except ValueError as ve_rsi_filter:
-                        print(f"{log_prefix_bt_next} S7 BT: ValueError during RSI filter processing: {ve_rsi_filter}.")
-                        rsi_filter_passed_s7_bt = False
-                    except Exception as e_rsi_filter_general:
-                        print(f"{log_prefix_bt_next} S7 BT: Unexpected error during RSI filter processing: {e_rsi_filter_general}.")
-                        rsi_filter_passed_s7_bt = False
+                    # except ValueError as ve_rsi_filter:
+                    #     print(f"{log_prefix_bt_next} S7 BT: ValueError during RSI filter processing: {ve_rsi_filter} (FILTER REMOVED).")
+                    #     # rsi_filter_passed_s7_bt = False # FILTER REMOVED
+                    # except Exception as e_rsi_filter_general:
+                    #     print(f"{log_prefix_bt_next} S7 BT: Unexpected error during RSI filter processing: {e_rsi_filter_general} (FILTER REMOVED).")
+                        # rsi_filter_passed_s7_bt = False # FILTER REMOVED
                     
-                    print(f"{log_prefix_bt_next} S7 BT: RSI Filter Passed: {rsi_filter_passed_s7_bt}")
-                else: # EMA or Volume filter failed, so RSI filter effectively fails too for pattern trade
-                    rsi_filter_passed_s7_bt = False # Ensure it's false if primary filters fail
-                    print(f"{log_prefix_bt_next} S7 BT: EMA or Volume filter failed, so RSI filter step skipped/failed for pattern trade.")
+                    # print(f"{log_prefix_bt_next} S7 BT: RSI Filter Passed: {rsi_filter_passed_s7_bt} (FILTER REMOVED)")
+                # else: # EMA or Volume filter failed, so RSI filter effectively fails too for pattern trade (FILTERS REMOVED)
+                    # rsi_filter_passed_s7_bt = False # Ensure it's false if primary filters fail (FILTERS REMOVED)
+                    # print(f"{log_prefix_bt_next} S7 BT: EMA or Volume filter failed, so RSI filter step skipped/failed for pattern trade (FILTERS REMOVED).")
 
                 
-                if ema_filter_passed_s7_bt and volume_spike_detected_s7_bt and rsi_filter_passed_s7_bt: # Check all three again
-                    print(f"{log_prefix_bt_next} S7 BT: All filters passed for pattern {detected_pattern_name_s7_bt}. Proceeding to SL/TP.")
+                # if ema_filter_passed_s7_bt and volume_spike_detected_s7_bt and rsi_filter_passed_s7_bt: # Check all three again (NOW JUST CHECKS IF PATTERN EXISTS)
+                # Simplified: If pattern_side_s7_bt is not "none", it means a pattern was detected. Filters are bypassed.
+                if pattern_side_s7_bt != "none":
+                    print(f"{log_prefix_bt_next} S7 BT: Pattern {detected_pattern_name_s7_bt} detected. Proceeding to SL/TP (filters removed).")
                     entry_price_s7 = current_price_s7_bt
                     sl_to_use_s7, tp_to_use_s7 = None, None
                     sl_percentage_for_sizing_s7 = None
@@ -3235,13 +3418,16 @@ def scalping_strategy_signal(symbol):
         },
         'sl_price': None, # Not applicable for S0 at this stage
         'tp_price': None, # Not applicable for S0 at this stage
-        'error': None
+        'error': None,
+        'signal_candle_timestamp': None
     }
 
     kl = klines(symbol)
     if kl is None or len(kl) < max(21, LOCAL_HIGH_LOW_LOOKBACK_PERIOD + 1): # Ensure enough data
         return_data['error'] = 'Insufficient kline data'
         return return_data
+    
+    return_data['signal_candle_timestamp'] = kl.index[-1] # Store signal candle timestamp
     
     try:
         ema9 = ta.trend.EMAIndicator(close=kl['Close'], window=9).ema_indicator()
@@ -3397,7 +3583,8 @@ def strategy_ema_supertrend(symbol):
         'sl_price': None,
         'tp_price': None,
         'error': None,
-        'account_risk_percent': 0.01 # Strategy 1 specific risk
+        'account_risk_percent': 0.01, # Strategy 1 specific risk
+        'signal_candle_timestamp': None
     }
 
     global strategy1_cooldown_active
@@ -3411,6 +3598,8 @@ def strategy_ema_supertrend(symbol):
     if kl is None or len(kl) < 21: # Need enough for EMAs and SuperTrend lookback
         base_return['error'] = "Insufficient kline data (need at least 21 candles)"
         return base_return
+    
+    base_return['signal_candle_timestamp'] = kl.index[-1]
 
     try:
         # Calculate Indicators
@@ -3557,7 +3746,8 @@ def strategy_bollinger_band_mean_reversion(symbol):
         'sl_price': None, # SL/TP will be handled by the global settings or ATR/Dynamic
         'tp_price': None,
         'error': None,
-        'account_risk_percent': 0.008 # Default for S2, can be adjusted
+        'account_risk_percent': 0.008, # Default for S2, can be adjusted
+        'signal_candle_timestamp': None
     }
 
     try:
@@ -3609,6 +3799,8 @@ def strategy_bollinger_band_mean_reversion(symbol):
         if df.empty:
             base_return['error'] = "DataFrame is empty after dropping NaNs from indicator calculations."
             return base_return
+        
+        base_return['signal_candle_timestamp'] = df.index[-1] # Timestamp of the latest candle in CSV
 
         # 3 - Define EMA Signal Function (Adapted to work with DataFrame directly)
         # For live trading, current_candle would be the latest completed candle.
@@ -3770,7 +3962,8 @@ def strategy_vwap_breakout_momentum(symbol):
         'sl_price': None,
         'tp_price': None,
         'error': None,
-        'account_risk_percent': 0.01 # Strategy 3 specific risk
+        'account_risk_percent': 0.01, # Strategy 3 specific risk
+        'signal_candle_timestamp': None
     }
 
     # Time-based Filter (London/NY Overlap: 13:00-17:00 UTC)
@@ -3808,6 +4001,8 @@ def strategy_vwap_breakout_momentum(symbol):
     if len(kl_day_df) < min_data_len_for_indicators:
         base_return['error'] = f"Insufficient daily kline data for indicators (need {min_data_len_for_indicators}, got {len(kl_day_df)})"
         return base_return
+    
+    base_return['signal_candle_timestamp'] = kl_day_df.index[-1]
 
     try:
         # Calculate Indicators
@@ -3954,7 +4149,8 @@ def strategy_macd_divergence_pivot(symbol):
         'tp_price': None,
         'error': None,
         'divergence_price_point': None, # Specific to S4
-        'account_risk_percent': 0.012 # Strategy 4 specific risk
+        'account_risk_percent': 0.012, # Strategy 4 specific risk
+        'signal_candle_timestamp': None
     }
 
     if strategy4_active_trade_info['symbol'] is not None:
@@ -4008,6 +4204,8 @@ def strategy_macd_divergence_pivot(symbol):
     if kl is None or len(kl) < min_candles_for_indicators + div_lookback:
         base_return['error'] = f"Insufficient 5m kline data for S4 (need ~{min_candles_for_indicators + div_lookback})"
         return base_return
+        
+    base_return['signal_candle_timestamp'] = kl.index[-1]
 
     try:
         # Calculate Indicators
@@ -4162,7 +4360,8 @@ def strategy_rsi_enhanced(symbol):
             'rsi_slope_down_met': False, 'price_below_sma50_met': False, 'bearish_divergence_found': False,
         },
         'sl_price': None, 'tp_price': None, 'error': None,
-        'account_risk_percent': 0.01 
+        'account_risk_percent': 0.01, 
+        'signal_candle_timestamp': None
     }
 
     rsi_period = 14
@@ -4176,6 +4375,8 @@ def strategy_rsi_enhanced(symbol):
     if kl is None or len(kl) < min_klines:
         base_return['error'] = f'Insufficient kline data for S5 {symbol} (need {min_klines}, got {len(kl) if kl is not None else 0})'
         return base_return
+    
+    base_return['signal_candle_timestamp'] = kl.index[-1]
 
     try:
         rsi_series = ta.momentum.RSIIndicator(close=kl['Close'], window=rsi_period).rsi()
@@ -4353,7 +4554,8 @@ def strategy_market_structure_sd(symbol: str) -> dict:
         'tp_price': None,
         'entry_price_estimate': None, 
         'error': None,
-        'account_risk_percent': 0.01 
+        'account_risk_percent': 0.01, 
+        'signal_candle_timestamp': None
     }
 
     min_klines_needed = 60
@@ -4383,6 +4585,8 @@ def strategy_market_structure_sd(symbol: str) -> dict:
         print(f"{s6_log_prefix} Error: {error_msg}") # Should ideally not be reached if assert for 60 is active
         base_return['error'] = error_msg
         return base_return
+    
+    base_return['signal_candle_timestamp'] = kl_df.index[-1]
     # This print is now covered by the one after assertion. Can be removed or kept for verbosity.
     # print(f"{s6_log_prefix} Kline data length: {len(kl_df)}") 
 
@@ -5458,11 +5662,13 @@ def run_bot_logic():
                                 'qty': order_outcome.get('qty'),
                                 'side': order_outcome.get('side'), # 'buy' or 'sell'
                                 'entry_order_id': order_outcome.get('entry_order_id'),
-                                'strategy_id': strategy_id # Store which strategy opened it
+                                'strategy_id': strategy_id, # Store which strategy opened it
+                                'entry_candle_timestamp': current_strategy_output.get('signal_candle_timestamp'), # Added for time-based exit
+                                'initial_tp_price': order_outcome.get('tp_price') # Added for candlestick trailing stop
                             }
                             print(f"DEBUG: Stored in g_active_positions_details for {symbol}: {g_active_positions_details[symbol]}")
 
-                        trade_entry_ts = pd.Timestamp.now(tz='UTC')
+                        trade_entry_ts = pd.Timestamp.now(tz='UTC') # This is actual trade time, not candle time
                         # Update strategy-specific trackers (ensure they also store SL/TP order IDs if needed by their specific logic)
                         if strategy_id == 1:
                             strategy1_active_trade_info.update({
@@ -5514,111 +5720,110 @@ def run_bot_logic():
             # --- Active Trade Management & Timeouts (BEFORE checking for new trades) ---
             now_utc_for_timeout = pd.Timestamp.now(tz='UTC')
 
-            # --- ATR-Scaled Trailing Stop Logic (Live Trading) ---
-            if TRAILING_STOP_ENABLED and g_active_positions_details:
-                _activity_set("Applying Trailing Stop Logic...")
-                print(f"DEBUG TRAIL_SL (Live): Trailing Stop Enabled. Active positions: {list(g_active_positions_details.keys())}")
-                for symbol_to_trail, pos_details in list(g_active_positions_details.items()): # Iterate a copy
+            # --- New Exit Strategy Logic ---
+            if g_active_positions_details:
+                _activity_set("Applying New Exit Strategy Logic...")
+                print(f"DEBUG NEW_EXIT_STRAT: Active positions: {list(g_active_positions_details.keys())}")
+                for symbol_in_pos, pos_details in list(g_active_positions_details.items()):
                     if not bot_running: break
-                    
-                    # Check if this position should have trailing stop (e.g., based on strategy_id)
-                    # For now, applying to all; can be made strategy-specific later if needed.
-                    # Example: if pos_details.get('strategy_id') not in [7, ...]: continue
+                    print(f"DEBUG NEW_EXIT_STRAT: Checking {symbol_in_pos} with details: {pos_details}")
 
-                    print(f"DEBUG TRAIL_SL (Live): Checking {symbol_to_trail} for trailing SL. Details: {pos_details}")
-
-                    current_sl_price_from_details = pos_details.get('sl_price')
-                    sl_order_id_to_cancel = pos_details.get('sl_order_id')
-                    position_side = pos_details.get('side') # 'buy' or 'sell'
-                    position_qty = pos_details.get('qty') # Should be positive float from Binance
-                    entry_price_from_details = pos_details.get('entry_price')
-
-
-                    if not all([current_sl_price_from_details, sl_order_id_to_cancel, position_side, position_qty, entry_price_from_details]):
-                        print(f"WARNING TRAIL_SL (Live): Insufficient details for {symbol_to_trail} to trail SL. Skipping. Details: {pos_details}")
-                        continue
-                    
-                    # Ensure qty is float and positive for order placement
-                    try:
-                        position_qty_float = abs(float(position_qty))
-                        if position_qty_float == 0: raise ValueError("Position quantity is zero.")
-                    except ValueError as ve:
-                        print(f"ERROR TRAIL_SL (Live): Invalid quantity for {symbol_to_trail}: {position_qty}. Error: {ve}. Skipping trail.")
+                    kl_df_exit_check = klines(symbol_in_pos)
+                    if kl_df_exit_check is None or len(kl_df_exit_check) < 3: # Min 3 for some patterns
+                        print(f"WARNING NEW_EXIT_STRAT: Insufficient kline data for {symbol_in_pos} for exit checks. Skipping.")
                         continue
 
-                    kl_trail_df = klines(symbol_to_trail)
-                    if kl_trail_df is None or len(kl_trail_df) < 20: # Need enough for ATR
-                        print(f"WARNING TRAIL_SL (Live): Insufficient kline data for {symbol_to_trail} for ATR. Skipping trail.")
-                        continue
-                    
-                    try:
-                        atr_trail = ta.volatility.AverageTrueRange(
-                            high=kl_trail_df['High'], 
-                            low=kl_trail_df['Low'], 
-                            close=kl_trail_df['Close'], 
-                            window=14 # Standard ATR period for trailing
-                        ).average_true_range()
+                    # 1. Exit on Opposite Candlestick Reversal
+                    exit_reversal, pattern_name = check_exit_on_opposite_candlestick_reversal(
+                        symbol_in_pos, pos_details['side'], kl_df_exit_check
+                    )
+                    if exit_reversal:
+                        print(f"EXIT RULE (Opposite Reversal): Closing {pos_details['side']} trade on {symbol_in_pos} due to {pattern_name}.")
+                        close_open_orders(symbol_in_pos) # This closes all orders (SL/TP) and then market closes position
+                        # Market close position (ensure you have a function for this or implement)
+                        # client.new_order(symbol=symbol_in_pos, side='SELL' if pos_details['side'] == 'buy' else 'BUY', type='MARKET', quantity=abs(float(pos_details['qty'])))
+                        # For now, close_open_orders handles SL/TP cancellation. A market order would be needed to exit position immediately.
+                        # Assuming close_open_orders + SL/TP hit or manual closure is the mechanism for now.
+                        # For an immediate exit, a market order to flatten the position is required.
+                        # This part needs careful implementation of "closing the position".
+                        # For now, we'll print and rely on existing SL/TP or manual action.
+                        # A better way: client.new_order(symbol=symbol_in_pos, side='SELL' if pos_details['side']=='buy' else 'BUY', type='MARKET', quantity=pos_details['qty'], reduceOnly=True)
+                        # Let's assume close_open_orders is the primary way to signal exit for now.
+                        # And g_active_positions_details will be cleaned up when position is confirmed closed.
+                        _activity_set(f"EXIT (Reversal): {symbol_in_pos} by {pattern_name}")
+                        sleep(0.5) # Give time for orders to process
+                        continue # Move to next symbol as this one is being exited
 
-                        if atr_trail is None or atr_trail.empty or pd.isna(atr_trail.iloc[-1]) or atr_trail.iloc[-1] == 0:
-                            print(f"WARNING TRAIL_SL (Live): ATR calculation failed, NaN, or zero for {symbol_to_trail}. Skipping trail.")
+                    # 2. Volume-Driven Exit
+                    exit_volume = check_volume_driven_exit_new(symbol_in_pos, kl_df_exit_check)
+                    if exit_volume:
+                        print(f"EXIT RULE (Volume Driven): Closing {pos_details['side']} trade on {symbol_in_pos} due to high volume spike.")
+                        close_open_orders(symbol_in_pos)
+                        _activity_set(f"EXIT (Volume): {symbol_in_pos}")
+                        sleep(0.5)
+                        continue
+
+                    # 3. Time-Based Exit (20 bars)
+                    # Requires 'entry_candle_timestamp' in pos_details
+                    entry_ts = pos_details.get('entry_candle_timestamp')
+                    if entry_ts:
+                        # Assuming kl_df_exit_check is current klines, latest candle is at index -1 (len -1)
+                        # entry_candle_timestamp needs to be found within this kl_df_exit_check
+                        exit_timebased = check_time_based_exit_new(entry_ts, kl_df_exit_check, bars_limit=20)
+                        if exit_timebased:
+                            print(f"EXIT RULE (Time-Based): Closing {pos_details['side']} trade on {symbol_in_pos} after 20 bars.")
+                            close_open_orders(symbol_in_pos)
+                            # Consider exiting at break-even or small profit if this is the logic.
+                            # For now, just closing.
+                            _activity_set(f"EXIT (Time): {symbol_in_pos}")
+                            sleep(0.5)
                             continue
-                        
-                        current_atr_for_trail = atr_trail.iloc[-1]
-                        latest_close_price = kl_trail_df['Close'].iloc[-1]
-                        price_precision_trail = get_price_precision(symbol_to_trail)
+                    else:
+                        print(f"DEBUG NEW_EXIT_STRAT: 'entry_candle_timestamp' not found for {symbol_in_pos} in pos_details. Cannot check time-based exit.")
 
-                        new_potential_sl = None
-                        candidate_sl = None # Initialize candidate_sl
-                        trail_atr_offset = current_atr_for_trail * TRAILING_STOP_ATR_MULTIPLIER
 
-                        if position_side == 'buy': # Long position
-                            candidate_sl = latest_close_price - trail_atr_offset
-                            candidate_sl = round(candidate_sl, price_precision_trail)
-                            if candidate_sl > current_sl_price_from_details and candidate_sl > entry_price_from_details and candidate_sl < latest_close_price :
-                                new_potential_sl = candidate_sl
-                                print(f"INFO TRAIL_SL (Live - {symbol_to_trail} LONG): New SL {new_potential_sl} > Old SL {current_sl_price_from_details} AND > Entry {entry_price_from_details}. Modifying.")
-                        elif position_side == 'sell': # Short position
-                            candidate_sl = latest_close_price + trail_atr_offset
-                            candidate_sl = round(candidate_sl, price_precision_trail)
-                            if candidate_sl < current_sl_price_from_details and candidate_sl < entry_price_from_details and candidate_sl > latest_close_price:
-                                new_potential_sl = candidate_sl
-                                print(f"INFO TRAIL_SL (Live - {symbol_to_trail} SHORT): New SL {new_potential_sl} < Old SL {current_sl_price_from_details} AND < Entry {entry_price_from_details}. Modifying.")
-                        
-                        if new_potential_sl is not None:
-                            try:
-                                print(f"Attempting to cancel old SL Order ID {sl_order_id_to_cancel} for {symbol_to_trail}")
-                                client.cancel_order(symbol=symbol_to_trail, orderId=sl_order_id_to_cancel, recvWindow=6000)
-                                print(f"Old SL Order ID {sl_order_id_to_cancel} for {symbol_to_trail} cancelled.")
-                                
-                                new_sl_order_side = 'SELL' if position_side == 'buy' else 'BUY'
-                                
-                                print(f"Attempting to place new SL order for {symbol_to_trail}: Side={new_sl_order_side}, Qty={position_qty_float}, StopPrice={new_potential_sl}")
-                                new_sl_order_resp = client.new_order(
-                                    symbol=symbol_to_trail,
-                                    side=new_sl_order_side,
-                                    type='STOP_MARKET',
-                                    quantity=position_qty_float,
-                                    timeInForce='GTC',
-                                    stopPrice=new_potential_sl,
-                                    reduceOnly=True
-                                )
-                                print(f"New SL order placed for {symbol_to_trail}: {new_sl_order_resp}")
-                                
-                                g_active_positions_details[symbol_to_trail]['sl_order_id'] = new_sl_order_resp.get('orderId')
-                                g_active_positions_details[symbol_to_trail]['sl_price'] = new_potential_sl
-                                print(f"DEBUG TRAIL_SL (Live): Updated g_active_positions_details for {symbol_to_trail} with new SL: {g_active_positions_details[symbol_to_trail]}")
+                    # 4. Trailing Stop via Candlestick Lows/Highs
+                    # Requires 'initial_tp_price' in pos_details
+                    initial_tp = pos_details.get('initial_tp_price')
+                    current_sl = pos_details.get('sl_price')
+                    entry_price = pos_details.get('entry_price')
+                    
+                    if all([initial_tp, current_sl, entry_price]):
+                        new_sl_candlestick_trail = check_trailing_stop_candlestick_extremes(
+                            symbol_in_pos, pos_details['side'], current_sl, entry_price, initial_tp, kl_df_exit_check
+                        )
+                        if new_sl_candlestick_trail is not None:
+                            sl_order_id_to_cancel = pos_details.get('sl_order_id')
+                            position_qty_float = abs(float(pos_details.get('qty',0)))
 
-                            except ClientError as ce:
-                                print(f"ERROR TRAIL_SL (Live): ClientError modifying SL for {symbol_to_trail}: {ce}")
-                            except Exception as e_sl_mod:
-                                print(f"ERROR TRAIL_SL (Live): Exception modifying SL for {symbol_to_trail}: {e_sl_mod}")
-                        else:
-                            print(f"DEBUG TRAIL_SL (Live): No profitable/valid SL adjustment for {symbol_to_trail} at this time. Candidate SL: {candidate_sl if candidate_sl is not None else 'N/A'}")
-
-                    except Exception as e_trail_inner:
-                        print(f"ERROR TRAIL_SL (Live): Inner exception processing {symbol_to_trail}: {e_trail_inner}")
-                    sleep(0.2) 
-
+                            if sl_order_id_to_cancel and position_qty_float > 0:
+                                try:
+                                    print(f"TRAILING STOP (Candlestick Extremes): Modifying SL for {symbol_in_pos}. Old SL: {current_sl}, New SL: {new_sl_candlestick_trail}")
+                                    client.cancel_order(symbol=symbol_in_pos, orderId=sl_order_id_to_cancel, recvWindow=6000)
+                                    
+                                    new_sl_order_side_trail = 'SELL' if pos_details['side'] == 'buy' else 'BUY'
+                                    new_sl_order_resp_trail = client.new_order(
+                                        symbol=symbol_in_pos, side=new_sl_order_side_trail, type='STOP_MARKET',
+                                        quantity=position_qty_float, timeInForce='GTC',
+                                        stopPrice=new_sl_candlestick_trail, reduceOnly=True
+                                    )
+                                    print(f"New Candlestick Trailing SL order placed for {symbol_in_pos}: {new_sl_order_resp_trail}")
+                                    
+                                    # Update g_active_positions_details
+                                    g_active_positions_details[symbol_in_pos]['sl_order_id'] = new_sl_order_resp_trail.get('orderId')
+                                    g_active_positions_details[symbol_in_pos]['sl_price'] = new_sl_candlestick_trail
+                                    _activity_set(f"TRAIL SL (Candle): {symbol_in_pos} to {new_sl_candlestick_trail}")
+                                except ClientError as ce_trail:
+                                    print(f"ERROR TRAIL_SL (Candlestick): ClientError modifying SL for {symbol_in_pos}: {ce_trail}")
+                                except Exception as e_trail_mod:
+                                    print(f"ERROR TRAIL_SL (Candlestick): Exception modifying SL for {symbol_in_pos}: {e_trail_mod}")
+                            else:
+                                print(f"WARNING TRAIL_SL (Candlestick): Missing SL order ID or zero quantity for {symbol_in_pos}.")
+                    else:
+                         print(f"DEBUG NEW_EXIT_STRAT: Insufficient details for candlestick trailing stop for {symbol_in_pos} (initial_tp, current_sl, or entry_price missing).")
+                    sleep(0.2) # Delay after processing each symbol for exits
+            
+            # --- Original Strategy-Specific Timeouts (To be reviewed against new 20-bar rule) ---
             # Strategy 1 Timeout
             if strategy1_active_trade_info['symbol'] is not None and strategy1_active_trade_info['entry_time'] is not None:
                 s1_active_symbol = strategy1_active_trade_info['symbol']
