@@ -1664,25 +1664,44 @@ class BacktestStrategyWrapper(Strategy):
 
                 if ema_filter_passed_s7_bt and volume_spike_detected_s7_bt: # RSI filter only if others pass
                     print(f"{log_prefix_bt_next} S7 BT: Calculating RSI for filter. RSI Period: {self.s7_bt_rsi_period}")
-                    rsi_values_for_s7_filter = rsi_bt(self.data.Close, period=self.s7_bt_rsi_period) # rsi_bt returns a Series
-                    
-                    if rsi_values_for_s7_filter is not None and len(rsi_values_for_s7_filter) > 0 and not pd.isna(rsi_values_for_s7_filter[-1]):
-                        last_rsi_s7_bt = rsi_values_for_s7_filter[-1]
+                    try:
+                        close_prices_list_filter = list(self.data.Close)
+                        if not close_prices_list_filter:
+                            raise ValueError("Close prices list for filter is empty.")
+                        
+                        rsi_values_for_s7_filter = rsi_bt(pd.Series(close_prices_list_filter), period=self.s7_bt_rsi_period)
+
+                        if rsi_values_for_s7_filter is None:
+                            raise ValueError("rsi_bt for filter returned None.")
+                        if rsi_values_for_s7_filter.empty:
+                            raise ValueError("rsi_bt for filter returned an empty Series.")
+                        if rsi_values_for_s7_filter.isnull().all():
+                            raise ValueError("rsi_bt for filter returned a Series with all NaNs.")
+                        if pd.isna(rsi_values_for_s7_filter.iloc[-1]):
+                            raise ValueError("Last RSI value for filter is NaN.")
+
+                        last_rsi_s7_bt = rsi_values_for_s7_filter.iloc[-1]
                         print(f"{log_prefix_bt_next} S7 BT: Last RSI for filter: {last_rsi_s7_bt:.2f}. Side: {pattern_side_s7_bt}, OB: {self.s7_bt_rsi_overbought}, OS: {self.s7_bt_rsi_oversold}")
                         if pattern_side_s7_bt == "up" and last_rsi_s7_bt > self.s7_bt_rsi_overbought:
                             rsi_filter_passed_s7_bt = False
                         elif pattern_side_s7_bt == "down" and last_rsi_s7_bt < self.s7_bt_rsi_oversold:
                             rsi_filter_passed_s7_bt = False
-                    else: 
-                        print(f"{log_prefix_bt_next} S7 BT: RSI calculation for filter failed or returned NaN/empty.")
-                        rsi_filter_passed_s7_bt = False 
+                        # else: rsi_filter_passed_s7_bt remains True (its default)
+                            
+                    except ValueError as ve_rsi_filter:
+                        print(f"{log_prefix_bt_next} S7 BT: ValueError during RSI filter processing: {ve_rsi_filter}.")
+                        rsi_filter_passed_s7_bt = False
+                    except Exception as e_rsi_filter_general:
+                        print(f"{log_prefix_bt_next} S7 BT: Unexpected error during RSI filter processing: {e_rsi_filter_general}.")
+                        rsi_filter_passed_s7_bt = False
+                    
                     print(f"{log_prefix_bt_next} S7 BT: RSI Filter Passed: {rsi_filter_passed_s7_bt}")
                 else: # EMA or Volume filter failed, so RSI filter effectively fails too for pattern trade
                     rsi_filter_passed_s7_bt = False # Ensure it's false if primary filters fail
                     print(f"{log_prefix_bt_next} S7 BT: EMA or Volume filter failed, so RSI filter step skipped/failed for pattern trade.")
 
                 
-                if volume_spike_detected_s7_bt and ema_filter_passed_s7_bt and rsi_filter_passed_s7_bt:
+                if ema_filter_passed_s7_bt and volume_spike_detected_s7_bt and rsi_filter_passed_s7_bt: # Check all three again
                     print(f"{log_prefix_bt_next} S7 BT: All filters passed for pattern {detected_pattern_name_s7_bt}. Proceeding to SL/TP.")
                     entry_price_s7 = current_price_s7_bt
                     sl_to_use_s7, tp_to_use_s7 = None, None
@@ -1753,9 +1772,24 @@ class BacktestStrategyWrapper(Strategy):
             # Fallback RSI logic for S7 (if no candlestick pattern)
             elif detected_pattern_name_s7_bt == "None": # No candlestick pattern
                 print(f"{log_prefix_bt_next} S7 BT: No candlestick pattern. Checking RSI fallback...")
-                rsi_values_for_s7_fallback = rsi_bt(self.data.Close, period=self.s7_bt_rsi_period)
-                if rsi_values_for_s7_fallback is not None and len(rsi_values_for_s7_fallback) > 0 and not pd.isna(rsi_values_for_s7_fallback[-1]):
-                    last_rsi_s7_fallback = rsi_values_for_s7_fallback[-1]
+                try:
+                    # Attempt to make RSI calculation more robust
+                    close_prices_list = list(self.data.Close) # Convert _Array to list first
+                    if not close_prices_list:
+                        raise ValueError("Close prices list is empty.")
+
+                    rsi_values_for_s7_fallback = rsi_bt(pd.Series(close_prices_list), period=self.s7_bt_rsi_period)
+                    
+                    if rsi_values_for_s7_fallback is None:
+                        raise ValueError("rsi_bt returned None.")
+                    if rsi_values_for_s7_fallback.empty:
+                        raise ValueError("rsi_bt returned an empty Series.")
+                    if rsi_values_for_s7_fallback.isnull().all():
+                        raise ValueError("rsi_bt returned a Series with all NaNs.")
+                    if pd.isna(rsi_values_for_s7_fallback.iloc[-1]): # Check last value specifically
+                        raise ValueError("Last RSI value is NaN.")
+
+                    last_rsi_s7_fallback = rsi_values_for_s7_fallback.iloc[-1]
                     print(f"{log_prefix_bt_next} S7 BT RSI Fallback: Last RSI={last_rsi_s7_fallback:.2f}, OS={self.s7_bt_rsi_oversold}, OB={self.s7_bt_rsi_overbought}")
                     rsi_fallback_side = "none"
                     if last_rsi_s7_fallback < self.s7_bt_rsi_oversold: 
@@ -1782,13 +1816,12 @@ class BacktestStrategyWrapper(Strategy):
                                 print(f"{log_prefix_bt_next} S7 BT RSI Fallback: ATR/Dynamic SL/TP. ATR Period: {self.s7_bt_atr_period}, SL Multi: {self.s7_bt_sl_atr_multiplier}, TP Multi: {self.s7_bt_tp_atr_multiplier}")
                                 if self.atr_s7 is None or len(self.atr_s7) < 1 or pd.isna(self.atr_s7[-1]) or self.atr_s7[-1] == 0: 
                                     print(f"{log_prefix_bt_next} S7 BT RSI Fallback: ATR data for SL/TP is None, too short, NaN or zero. Cannot place trade.")
-                                    return
+                                    return # Return here to avoid further processing with bad ATR
                                 current_atr_s7_bt_fb = self.atr_s7[-1]
                                 print(f"{log_prefix_bt_next} S7 BT RSI Fallback: Current ATR for SL/TP: {current_atr_s7_bt_fb:.4f}")
                                 sl_dist_rsi = current_atr_s7_bt_fb * self.s7_bt_sl_atr_multiplier 
                                 tp_dist_rsi = current_atr_s7_bt_fb * self.s7_bt_tp_atr_multiplier
                                 print(f"{log_prefix_bt_next} S7 BT RSI Fallback: SL Distance: {sl_dist_rsi:.4f}, TP Distance: {tp_dist_rsi:.4f}")
-
 
                                 if rsi_fallback_side == "buy":
                                     sl_rsi_fb = round(entry_price_s7_rsi - sl_dist_rsi, self.PRICE_PRECISION_BT)
@@ -1803,7 +1836,7 @@ class BacktestStrategyWrapper(Strategy):
                                     if sl_diff_rsi > 0: sl_percentage_for_sizing_s7_rsi = sl_diff_rsi / entry_price_s7_rsi
                                     else: 
                                         print(f"{log_prefix_bt_next} S7 BT RSI Fallback: SL is at entry. Invalidating SL.")
-                                        sl_rsi_fb = None
+                                        sl_rsi_fb = None # Invalidate SL to prevent trade
                                 print(f"{log_prefix_bt_next} S7 BT RSI Fallback: SL Pct for Sizing: {sl_percentage_for_sizing_s7_rsi*100 if sl_percentage_for_sizing_s7_rsi is not None else 'N/A'}%")
 
                             elif self.sl_tp_mode_bt == "Percentage":
@@ -1811,16 +1844,15 @@ class BacktestStrategyWrapper(Strategy):
                                 tp_rsi_fb = tp_long if rsi_fallback_side == "buy" else tp_short
                                 if self.user_sl > 0 : sl_percentage_for_sizing_s7_rsi = self.user_sl
                                 print(f"{log_prefix_bt_next} S7 BT RSI Fallback: Percentage SL/TP. SL: {sl_rsi_fb}, TP: {tp_rsi_fb}")
-                            # Fixed PnL for RSI fallback not explicitly detailed, can use default sizing.
-
+                            
                             if sl_rsi_fb and tp_rsi_fb and sl_rsi_fb > 0 and tp_rsi_fb > 0:
                                 if (rsi_fallback_side == "buy" and sl_rsi_fb < entry_price_s7_rsi and tp_rsi_fb > entry_price_s7_rsi) or \
                                    (rsi_fallback_side == "sell" and sl_rsi_fb > entry_price_s7_rsi and tp_rsi_fb < entry_price_s7_rsi):
                                     
-                                    final_trade_size_s7_rsi = 0.02
+                                    final_trade_size_s7_rsi = 0.02 # Default size
                                     if sl_percentage_for_sizing_s7_rsi and sl_percentage_for_sizing_s7_rsi > 0 and self.account_risk_percent_bt > 0:
                                         calc_size_rsi = self.account_risk_percent_bt / sl_percentage_for_sizing_s7_rsi
-                                        final_trade_size_s7_rsi = min(calc_size_rsi, 1.0)
+                                        final_trade_size_s7_rsi = min(calc_size_rsi, 1.0) # Cap size
                                     print(f"{log_prefix_bt_next} S7 Sizing for RSI Fallback: AccRisk={self.account_risk_percent_bt*100:.2f}%, SL%={sl_percentage_for_sizing_s7_rsi*100 if sl_percentage_for_sizing_s7_rsi else 'N/A'}%, CalcSize={calc_size_rsi if sl_percentage_for_sizing_s7_rsi else 'N/A'}, FinalSize={final_trade_size_s7_rsi:.4f}")
                                     
                                     print(f"{log_prefix_bt_next} S7 BT: Placing RSI Fallback Trade: Side={rsi_fallback_side}, Size={final_trade_size_s7_rsi}, SL={sl_rsi_fb}, TP={tp_rsi_fb}")
@@ -1829,13 +1861,19 @@ class BacktestStrategyWrapper(Strategy):
                                 else:
                                     print(f"{log_prefix_bt_next} S7 BT RSI Fallback: Invalid SL/TP relation for {rsi_fallback_side}. SL={sl_rsi_fb}, TP={tp_rsi_fb}, Entry={entry_price_s7_rsi}. No trade.")
                             else:
-                                print(f"{log_prefix_bt_next} S7 BT RSI Fallback: SL/TP is None or non-positive. SL={sl_rsi_fb}, TP={tp_rsi_fb}. No trade.")
+                                print(f"{log_prefix_bt_next} S7 BT RSI Fallback: SL/TP is None or non-positive after calculation. SL={sl_rsi_fb}, TP={tp_rsi_fb}. No trade.")
                         else:
                              print(f"{log_prefix_bt_next} S7 BT RSI Fallback: EMA not aligned for RSI signal. No trade.")
                     else:
                         print(f"{log_prefix_bt_next} S7 BT RSI Fallback: No RSI OS/OB condition met. No trade.")
-                else:
-                    print(f"{log_prefix_bt_next} S7 BT RSI Fallback: RSI calculation failed or returned NaN/empty. No trade.")
+                
+                except ValueError as ve_rsi: # Catch specific ValueErrors from our checks or rsi_bt
+                    print(f"{log_prefix_bt_next} S7 BT RSI Fallback: ValueError during RSI processing: {ve_rsi}. No trade.")
+                except Exception as e_rsi_fallback_general: # Catch any other unexpected error
+                    print(f"{log_prefix_bt_next} S7 BT RSI Fallback: Unexpected error: {e_rsi_fallback_general}. No trade.")
+                    # import traceback # Uncomment for detailed traceback during debugging
+                    # print(traceback.format_exc()) # Uncomment for detailed traceback
+            
             else: # Pattern detected but filters failed
                 print(f"{log_prefix_bt_next} S7 BT: Pattern {detected_pattern_name_s7_bt} was detected, but one or more filters (EMA, Volume, RSI) failed. No trade.")
 
@@ -4948,7 +4986,7 @@ def get_trade_history(symbol_list=['BTCUSDT', 'ETHUSDT'], limit_per_symbol=15):
 
     for symbol in symbol_list:
         try:
-            trades = client.account_trades(symbol=symbol, limit=limit_per_symbol)
+            trades = client.user_trades(symbol=symbol, limit=limit_per_symbol)
             if trades: all_trades_formatted.append(f"--- {symbol} (Last {len(trades)}) ---")
             for trade in trades:
                 trade_time = pd.to_datetime(trade['time'], unit='ms')
@@ -4997,7 +5035,7 @@ def get_last_7_days_profit(client_instance):
     print(f"Fetching trades for last 7 days for symbols: {TARGET_SYMBOLS}")
     for symbol in TARGET_SYMBOLS:
         try:
-            trades = client_instance.account_trades(symbol=symbol, startTime=seven_days_ago_ms, recvWindow=6000)
+            trades = client_instance.user_trades(symbol=symbol, startTime=seven_days_ago_ms, recvWindow=6000)
             symbol_profit = 0.0
             for trade in trades:
                 price = float(trade['price'])
@@ -5035,7 +5073,7 @@ def get_overall_profit_loss(client_instance):
         try:
             # Fetch trades in batches if necessary, for now using limit=1000
             # To get ALL trades, one might need to loop with fromId parameter
-            trades = client_instance.account_trades(symbol=symbol, limit=1000, recvWindow=6000) # Max limit is 1000
+            trades = client_instance.user_trades(symbol=symbol, limit=1000, recvWindow=6000) # Max limit is 1000
             symbol_pnl = 0.0
             for trade in trades:
                 price = float(trade['price'])
