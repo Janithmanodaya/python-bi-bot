@@ -5590,6 +5590,208 @@ def open_order(symbol, side, strategy_sl=None, strategy_tp=None, strategy_accoun
     }
     return order_details
 
+# --- New Function: Place Limit Order ---
+def place_limit_order(symbol: str, side: str, price: float, quantity: float):
+    """
+    Places a limit order on Binance.
+    Args:
+        symbol (str): The trading symbol (e.g., 'BTCUSDT').
+        side (str): 'BUY' or 'SELL'.
+        price (float): The price for the limit order.
+        quantity (float): The quantity to order.
+    Returns:
+        dict: The order response from Binance API, or None if an error occurs.
+    """
+    global client
+    if not client:
+        print(f"ERROR (place_limit_order {symbol}): Binance client not initialized.")
+        return None
+
+    if side.upper() not in ['BUY', 'SELL']:
+        print(f"ERROR (place_limit_order {symbol}): Invalid order side '{side}'. Must be 'BUY' or 'SELL'.")
+        return None
+    
+    if quantity <= 0:
+        print(f"ERROR (place_limit_order {symbol}): Quantity must be positive. Got {quantity}.")
+        return None
+
+    if price <= 0:
+        print(f"ERROR (place_limit_order {symbol}): Price must be positive. Got {price}.")
+        return None
+
+    try:
+        qty_precision = get_qty_precision(symbol)
+        price_precision = get_price_precision(symbol)
+
+        # Ensure quantity and price are formatted to their respective precisions
+        # Binance API often requires this for specific symbols.
+        # Some symbols might have quantityPrecision = 0, meaning integer quantities.
+        formatted_quantity = f"{quantity:.{qty_precision}f}" if qty_precision > 0 else str(int(quantity))
+        formatted_price = f"{price:.{price_precision}f}"
+
+        print(f"Attempting to place {side} LIMIT order for {formatted_quantity} {symbol} at {formatted_price}")
+        
+        order_response = client.new_order(
+            symbol=symbol,
+            side=side.upper(),
+            type='LIMIT',
+            quantity=float(formatted_quantity), # API expects float for quantity
+            timeInForce='GTC',  # Good 'Til Canceled
+            price=formatted_price,
+            newOrderRespType='FULL' # Get full response
+        )
+        print(f"LIMIT Order Response ({symbol} {side} at {price}): {order_response}")
+        return order_response
+    except ClientError as ce:
+        print(f"API ClientError (place_limit_order {symbol} {side} at {price}): {ce.error_code} - {ce.error_message}")
+        return None
+    except Exception as e:
+        print(f"Unexpected Error (place_limit_order {symbol} {side} at {price}): {e}")
+        return None
+
+# --- New Function: Place Grid Orders ---
+def place_grid_orders(symbol: str, support: float, resistance: float, quantity_per_order: float, grid_levels: int = 5):
+    """
+    Places a grid of limit orders between support and resistance levels.
+    Args:
+        symbol (str): The trading symbol (e.g., 'BTCUSDT').
+        support (float): The support price level.
+        resistance (float): The resistance price level.
+        quantity_per_order (float): The quantity for each individual limit order.
+        grid_levels (int): The number of buy orders (and corresponding sell orders) to place.
+    """
+    if not client:
+        print(f"ERROR (place_grid_orders {symbol}): Binance client not initialized.")
+        return
+    
+    if support <= 0 or resistance <= 0 or support >= resistance:
+        print(f"ERROR (place_grid_orders {symbol}): Invalid support/resistance levels. Support: {support}, Resistance: {resistance}")
+        return
+
+    if quantity_per_order <= 0:
+        print(f"ERROR (place_grid_orders {symbol}): Quantity per order must be positive. Got {quantity_per_order}.")
+        return
+
+    if grid_levels <= 0:
+        print(f"ERROR (place_grid_orders {symbol}): Grid levels must be positive. Got {grid_levels}.")
+        return
+
+    print(f"Placing grid orders for {symbol} between {support} and {resistance}, Levels: {grid_levels}, Qty/Order: {quantity_per_order}")
+
+    step = (resistance - support) / grid_levels
+
+    if step <= 0: # Should be caught by support >= resistance, but as a safeguard
+        print(f"ERROR (place_grid_orders {symbol}): Calculated step is not positive ({step}). Resistance might be too close to support for the number of levels.")
+        return
+
+    orders_placed_details = {'buy_orders': [], 'sell_orders': []}
+
+    for i in range(grid_levels): # This will place 'grid_levels' buy orders and 'grid_levels' sell orders
+        buy_price = support + (i * step)
+        # The corresponding sell order for this buy grid line would typically be one step above it.
+        # Or, if it's a grid around a central price, sell orders are placed above and buy orders below.
+        # The problem description's snippet was: sell_price = buy_price + step
+        # This implies a series of buy orders and then sell orders one step above each buy.
+        # Let's refine this slightly: place buy orders from support upwards, and sell orders from resistance downwards.
+        # Or follow the snippet strictly. The snippet:
+        #   buy_price = support + i * step
+        #   sell_price = buy_price + step 
+        # This places buy orders at support, support+step, support+2*step ...
+        # And sell orders at support+step, support+2*step, support+3*step ...
+        # This means the highest buy is at support + (grid_levels-1)*step
+        # And the highest sell is at support + grid_levels*step (which is resistance)
+
+        # Adhering to the problem's formula:
+        # Buy orders
+        current_buy_price = support + (i * step)
+        # Sell orders (one step above each buy)
+        current_sell_price = current_buy_price + step
+        
+        price_precision = get_price_precision(symbol)
+        if not isinstance(price_precision, int) or price_precision < 0: price_precision = 2 # Fallback
+
+        rounded_buy_price = round(current_buy_price, price_precision)
+        rounded_sell_price = round(current_sell_price, price_precision)
+
+        # Place buy order
+        print(f"Grid {symbol}: Placing BUY {quantity_per_order} at {rounded_buy_price}")
+        buy_order_detail = place_limit_order(symbol, 'BUY', rounded_buy_price, quantity_per_order)
+        if buy_order_detail:
+            orders_placed_details['buy_orders'].append(buy_order_detail)
+        sleep(0.1) # Small delay
+
+        # Place sell order
+        # Ensure sell price is not same as buy price after rounding, and is above buy price
+        if rounded_sell_price > rounded_buy_price :
+            print(f"Grid {symbol}: Placing SELL {quantity_per_order} at {rounded_sell_price}")
+            sell_order_detail = place_limit_order(symbol, 'SELL', rounded_sell_price, quantity_per_order)
+            if sell_order_detail:
+                orders_placed_details['sell_orders'].append(sell_order_detail)
+            sleep(0.1) # Small delay
+        else:
+            print(f"Grid {symbol}: Skipping sell order for buy at {rounded_buy_price} because sell price {rounded_sell_price} is not above it after rounding.")
+
+
+    num_buy_placed = len(orders_placed_details['buy_orders'])
+    num_sell_placed = len(orders_placed_details['sell_orders'])
+    print(f"Grid orders placement summary for {symbol}: {num_buy_placed}/{grid_levels} BUY orders placed, {num_sell_placed}/{grid_levels} SELL orders placed.")
+    # Note: The number of sell orders might be less if sell_price <= buy_price after rounding for some steps.
+
+    # This function doesn't return the details directly but prints them.
+    # Could be modified to return orders_placed_details if needed by a caller.
+
+# --- New Function: Fetch News Sentiment (Placeholder) ---
+def fetch_news_sentiment(symbol: str) -> dict:
+    """
+    Placeholder function for fetching news sentiment.
+    In a real implementation, this would query a news API and perform sentiment analysis.
+    Args:
+        symbol (str): The trading symbol (e.g., 'BTCUSDT').
+    Returns:
+        dict: A dictionary containing 'sentiment_score' (float from -1.0 to 1.0) and 'error' (str or None).
+    """
+    print(f"Fetching news sentiment for {symbol} (Placeholder - returning neutral).")
+    # Simulate a neutral sentiment by default.
+    # To test the pausing mechanism, this function can be temporarily modified
+    # to return a score like -0.9 for a specific symbol.
+    # Example:
+    # if symbol == "BTCUSDT":
+    #     return {'sentiment_score': -0.9, 'error': None, 'source': 'Simulated Extreme Bearish'}
+    return {'sentiment_score': 0.0, 'error': None, 'source': 'Placeholder Neutral'}
+
+# --- New Function: Check News Impact ---
+def check_news_impact(symbol: str) -> bool:
+    """
+    Checks if trading should be paused based on news sentiment.
+    Args:
+        symbol (str): The trading symbol.
+    Returns:
+        bool: True if trading is allowed, False if trading should be paused.
+    """
+    news_data = fetch_news_sentiment(symbol)
+
+    if news_data.get('error'):
+        print(f"WARNING (check_news_impact {symbol}): Error fetching news sentiment: {news_data['error']}. Assuming safe to trade.")
+        return True # Allow trading if news fetch fails, to avoid unintended halt
+
+    sentiment_score = news_data.get('sentiment_score')
+    if sentiment_score is None:
+        print(f"WARNING (check_news_impact {symbol}): Sentiment score not found in news data. Assuming safe to trade.")
+        return True # Allow trading if score is missing
+
+    # Explicitly check type of sentiment_score to be safe
+    if not isinstance(sentiment_score, (float, int)):
+        print(f"WARNING (check_news_impact {symbol}): Sentiment score is not a valid number ({sentiment_score}). Assuming safe to trade.")
+        return True
+
+
+    if sentiment_score < -0.8:  # Extreme bearish news
+        print(f"NEWS IMPACT ({symbol}): Extreme bearish news detected (Score: {sentiment_score}). Pausing trading for this symbol.")
+        return False # Pause trading
+    
+    # print(f"News sentiment for {symbol}: {sentiment_score}. Trading allowed.") # Can be noisy
+    return True # Otherwise, allow trading
+
 def get_active_positions_data(): # Renamed from get_pos for clarity
     global client, status_var, root
     if not client:
@@ -6628,6 +6830,15 @@ def run_bot_logic():
                         sleep(0.1) 
                         continue # Skip to the next symbol
                     # --- END MODIFICATION ---
+
+                    # --- Integration of News Impact Check ---
+                    if not check_news_impact(sym_to_check):
+                        _activity_set(f"Trading for {sym_to_check} paused due to news.")
+                        # Status var update can also be added here if desired for more prominent display
+                        # status_var.set(f"Status: {sym_to_check} paused (News). Bal: ...")
+                        sleep(0.1) # Small delay before checking next symbol
+                        continue # Skip strategy evaluation and trading for this symbol
+                    # --- End Integration of News Impact Check ---
                     
                     current_active_strategy_id = ACTIVE_STRATEGY_ID 
                     
