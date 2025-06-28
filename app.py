@@ -467,6 +467,85 @@ def supertrend_numerical_bt(high_series, low_series, close_series, atr_period, m
     return numerical_signal.values # self.I expects a numpy array or list
 
 # --- Candlestick Pattern Helper Functions (Strategy 7) ---
+
+# --- BEGIN CORE STRATEGY ENHANCEMENT HELPER FUNCTIONS ---
+def validate_confluence(rsi_value: float, ema_value: float, current_price: float) -> str | None:
+    """
+    Checks for confluence between RSI, EMA, and price.
+    Args:
+        rsi_value: The current RSI value.
+        ema_value: The current EMA (e.g., EMA50) value.
+        current_price: The current closing price.
+    Returns:
+        "Bullish Confluence", "Bearish Confluence", or None.
+    """
+    if rsi_value < 30 and current_price > ema_value:
+        return "Bullish Confluence"
+    elif rsi_value > 70 and current_price < ema_value:
+        return "Bearish Confluence"
+    return None
+
+def is_volume_valid(kl_df: pd.DataFrame, threshold_multiplier: float = 2.0) -> bool:
+    """
+    Checks if the current volume is significantly higher than the recent average volume.
+    Args:
+        kl_df: Pandas DataFrame with kline data, must include 'Volume'.
+        threshold_multiplier: Multiplier for average volume to define "significant".
+    Returns:
+        True if volume is valid (high), False otherwise.
+    """
+    if kl_df is None or 'Volume' not in kl_df.columns or len(kl_df['Volume']) < 21: # Need 20 for rolling mean + 1 current
+        print("is_volume_valid: Insufficient data or Volume column missing.")
+        return False 
+    try:
+        # Calculate average volume of the 20 candles *before* the latest one
+        avg_volume = kl_df['Volume'].iloc[-21:-1].mean() 
+        current_volume = kl_df['Volume'].iloc[-1]
+        
+        if pd.isna(avg_volume) or pd.isna(current_volume):
+            print("is_volume_valid: NaN value in volume data.")
+            return False
+        if avg_volume == 0: # Avoid division by zero or issues if avg volume is zero
+            return current_volume > 0 # Consider valid if current volume is positive and avg was zero
+            
+        return current_volume > (avg_volume * threshold_multiplier)
+    except Exception as e:
+        print(f"Error in is_volume_valid: {e}")
+        return False
+
+def calculate_position_size(account_balance: float, risk_pct: float, entry_price: float, sl_price: float) -> float:
+    """
+    Calculates position size based on account balance, risk percentage, entry price, and stop-loss price.
+    Args:
+        account_balance: Total account balance.
+        risk_pct: Account risk percentage (e.g., 0.01 for 1%).
+        entry_price: The intended entry price for the trade.
+        sl_price: The intended stop-loss price for the trade.
+    Returns:
+        The calculated position size in terms of the asset quantity. Returns 0 if inputs are invalid.
+    """
+    if account_balance <= 0 or risk_pct <= 0 or risk_pct >= 1:
+        print("calculate_position_size: Invalid account_balance or risk_pct.")
+        return 0.0
+    if entry_price <= 0 or sl_price <= 0:
+        print("calculate_position_size: Entry price or SL price cannot be zero or negative.")
+        return 0.0
+    if entry_price == sl_price:
+        print("calculate_position_size: Entry price and SL price cannot be the same.")
+        return 0.0
+
+    risk_amount_per_trade = account_balance * risk_pct
+    stop_distance_per_unit = abs(entry_price - sl_price)
+
+    if stop_distance_per_unit == 0: # Should be caught by entry_price == sl_price, but as a safeguard
+        print("calculate_position_size: Stop distance is zero.")
+        return 0.0
+        
+    position_size_asset_qty = risk_amount_per_trade / stop_distance_per_unit
+    return position_size_asset_qty
+
+# --- END CORE STRATEGY ENHANCEMENT HELPER FUNCTIONS ---
+
 def get_candle_metrics(candle_series: pd.Series) -> dict:
     """Extracts OHLC and calculates body, wicks, and range from a candle series."""
     # --- S7 DEBUG LOG ---
@@ -1197,9 +1276,21 @@ class BacktestStrategyWrapper(Strategy):
         # Use self.sl_tp_mode_bt (or whatever name is chosen for the class attribute)
         print(f"DEBUG BacktestStrategyWrapper.init: Initializing for strategy ID {self.current_strategy_id}, SL/TP Mode: {getattr(self, 'sl_tp_mode_bt', 'N/A')}, Leverage: {self.leverage}")
         print(f"DEBUG BacktestStrategyWrapper.init: Trailing Stop Enabled (BT): {getattr(self, 'trailing_stop_enabled_bt', 'N/A')}, Trailing ATR Multi (BT): {getattr(self, 'trailing_stop_atr_multiplier_bt', 'N/A')}")
+        
+        # Ensure self.data.df is available and populated for logging
+        if hasattr(self.data, 'df') and self.data.df is not None and not self.data.df.empty:
+            symbol_for_log = self.data.symbol if hasattr(self.data, 'symbol') else 'N/A'
+            print(f"[BT Strategy LOG for {symbol_for_log}] init() called.")
+            print(f"[BT Strategy LOG for {symbol_for_log}] Data received by strategy: self.data.df shape: {self.data.df.shape}")
+            print(f"[BT Strategy LOG for {symbol_for_log}] Data head:\n{self.data.df.head()}")
+            print(f"[BT Strategy LOG for {symbol_for_log}] Data tail:\n{self.data.df.tail()}")
+            print(f"[BT Strategy LOG for {symbol_for_log}] Data NaN sum:\n{self.data.df.isnull().sum()}")
+        else:
+            print(f"[BT Strategy LOG for {self.data.symbol if hasattr(self.data, 'symbol') else 'N/A'}] init() called, but self.data.df is None, empty, or not available.")
+
         # --- Jules's Logging ---
-        print(f"[BT Strategy LOG for {self.data.symbol if hasattr(self.data, 'symbol') else 'N/A'}] init() called.")
-        print(f"[BT Strategy LOG for {self.data.symbol if hasattr(self.data, 'symbol') else 'N/A'}] Data received by strategy: self.data.df shape: {self.data.df.shape}")
+        # print(f"[BT Strategy LOG for {self.data.symbol if hasattr(self.data, 'symbol') else 'N/A'}] init() called.") # Moved up with check
+        # print(f"[BT Strategy LOG for {self.data.symbol if hasattr(self.data, 'symbol') else 'N/A'}] Data received by strategy: self.data.df shape: {self.data.df.shape}")
         print(f"[BT Strategy LOG for {self.data.symbol if hasattr(self.data, 'symbol') else 'N/A'}] Data head:\n{self.data.df.head()}")
         print(f"[BT Strategy LOG for {self.data.symbol if hasattr(self.data, 'symbol') else 'N/A'}] Data tail:\n{self.data.df.tail()}")
         print(f"[BT Strategy LOG for {self.data.symbol if hasattr(self.data, 'symbol') else 'N/A'}] Data NaN sum:\n{self.data.df.isnull().sum()}")
@@ -5203,225 +5294,186 @@ def open_order(symbol, side, strategy_sl=None, strategy_tp=None, strategy_accoun
     original_side_param = side # Store original for logging
     if side == 'up':
         side = 'buy'
-        print(f"INFO: Mapped side parameter from 'up' to 'buy' for symbol {symbol}")
+        # print(f"INFO: Mapped side parameter from 'up' to 'buy' for symbol {symbol}") # Reduced verbosity
     elif side == 'down':
         side = 'sell'
-        print(f"INFO: Mapped side parameter from 'down' to 'sell' for symbol {symbol}")
-    elif side not in ['buy', 'sell']: # If it's already 'buy' or 'sell', do nothing, otherwise error
-        print(f"ERROR: Invalid side parameter '{original_side_param}' received in open_order for symbol {symbol}. Expected 'up', 'down', 'buy', or 'sell'. Aborting order.")
+        # print(f"INFO: Mapped side parameter from 'down' to 'sell' for symbol {symbol}") # Reduced verbosity
+    elif side not in ['buy', 'sell']: 
+        print(f"ERROR: Invalid side parameter '{original_side_param}' received in open_order for {symbol}. Aborting.")
         return
 
     try:
-        price = float(client.ticker_price(symbol)['price'])
+        price = float(client.ticker_price(symbol)['price']) # This is the current market price, used as entry
         qty_precision = get_qty_precision(symbol)
         price_precision = get_price_precision(symbol)
-        print(f"DEBUG: open_order: Initial price={price}, qty_precision={qty_precision}, price_precision={price_precision}")
+        # print(f"DEBUG: open_order: Initial price={price}, qty_precision={qty_precision}, price_precision={price_precision}")
         if not isinstance(price_precision, int) or price_precision < 0:
-            print(f"Warning: Invalid price_precision '{price_precision}' for {symbol}. Defaulting to 4.")
-            price_precision = 4
+            print(f"Warning: Invalid price_precision '{price_precision}' for {symbol}. Defaulting to 2.")
+            price_precision = 2
 
         account_balance = get_balance_usdt()
-        if account_balance is None or account_balance <= 0: return
-
-        capital_to_risk_usdt = 0.0
-        sl_for_sizing_percentage = 0.0
-
-        print(f"INFO: Current SL/TP Mode: {SL_TP_MODE} for {symbol}")
-
-        if SL_TP_MODE == "Fixed PnL":
-            if SL_PNL_AMOUNT <= 0:
-                print(f"Warning: SL PnL Amount ($ {SL_PNL_AMOUNT}) must be positive for 'Fixed PnL' mode. Aborting order for {symbol}.")
-                return
-            capital_to_risk_usdt = SL_PNL_AMOUNT  # The fixed $ amount to risk
-            # For Fixed PnL, quantity is determined by this risk amount and the price difference to SL.
-            # The SL price itself will be entry_price - (SL_PNL_AMOUNT / quantity).
-            # So, sl_for_sizing_percentage is not directly used to set the SL distance here,
-            # but rather to estimate a reasonable notional position size.
-            # We can use a reference SL_PERCENT for this initial notional sizing.
-            sl_for_sizing_percentage = SL_PERCENT 
-            print(f"Using Fixed PnL mode: Capital to Risk = ${capital_to_risk_usdt:.2f}, SL_PERCENT for initial sizing ref = {sl_for_sizing_percentage*100:.2f}%")
-        else: # Percentage or ATR/Dynamic mode
-            current_account_risk = ACCOUNT_RISK_PERCENT # Global default
-            if strategy_account_risk_percent is not None and 0 < strategy_account_risk_percent < 1:
-                current_account_risk = strategy_account_risk_percent
-                print(f"Using strategy-defined account risk: {current_account_risk*100:.2f}% for {symbol}")
-            else:
-                print(f"Using global account risk: {current_account_risk*100:.2f}% for {symbol}")
-            capital_to_risk_usdt = account_balance * current_account_risk
-
-            if SL_TP_MODE == "ATR/Dynamic" and strategy_sl is not None:
-                # Ensure strategy_sl is valid for the side before calculating percentage
-                if (side == 'buy' and strategy_sl < price) or \
-                   (side == 'sell' and strategy_sl > price):
-                    sl_for_sizing_percentage = abs(price - strategy_sl) / price
-                else:
-                    print(f"Warning: Invalid strategy_sl ({strategy_sl}) for ATR/Dynamic sizing on {symbol} {side} at price {price}. Defaulting to global SL_PERCENT.")
-                    sl_for_sizing_percentage = SL_PERCENT
-                print(f"Using ATR/Dynamic mode: SL for sizing derived from strategy_sl ({strategy_sl}), effective SL % for sizing: {sl_for_sizing_percentage*100:.2f}%")
-            else: # Percentage mode (or ATR/Dynamic without strategy_sl, fallback to Percentage)
-                sl_for_sizing_percentage = SL_PERCENT
-                if SL_TP_MODE == "ATR/Dynamic": # Log if ATR/Dynamic is falling back
-                     print(f"INFO: SL_TP_MODE is 'ATR/Dynamic' but strategy_sl not provided. Falling back to SL_PERCENT for sizing reference.")
-                print(f"Using Percentage mode (or fallback): SL_PERCENT for sizing = {sl_for_sizing_percentage*100:.2f}%")
-
-        if capital_to_risk_usdt <= 0:
-            print(f"Warning: Capital to risk is {capital_to_risk_usdt:.2f} for {symbol}. Aborting order.")
-            return
-        if sl_for_sizing_percentage <= 0: # This check is crucial
-            print(f"Warning: SL for sizing percentage is {sl_for_sizing_percentage*100:.2f}%. Cannot calculate position size. Aborting order for {symbol}.")
+        if account_balance is None or account_balance <= 0:
+            print(f"Order Error ({symbol}): Account balance is {account_balance}. Aborting.")
             return
 
-        position_size_usdt_notional = capital_to_risk_usdt / sl_for_sizing_percentage
-        
-        CAP_FRACTION_OF_BALANCE = 0.50 
-        max_permissible_notional_value = account_balance * CAP_FRACTION_OF_BALANCE
-        if position_size_usdt_notional > max_permissible_notional_value:
-            original_calculated_pos_size_usdt = position_size_usdt_notional
-            position_size_usdt_notional = max_permissible_notional_value
-            print(f"INFO: Position size capped for {symbol}. Original calc: {original_calculated_pos_size_usdt:.2f} USDT, Capped to: {position_size_usdt_notional:.2f} USDT.")
-        
-        calculated_qty_asset = round(position_size_usdt_notional / price, qty_precision)
-        if calculated_qty_asset <= 0:
-            print(f"Warning: Calculated quantity is {calculated_qty_asset} for {symbol}. Aborting order.")
-            return
+        # --- Determine current_account_risk ---
+        current_account_risk = ACCOUNT_RISK_PERCENT # Global default
+        if strategy_account_risk_percent is not None and 0 < strategy_account_risk_percent < 1:
+            current_account_risk = strategy_account_risk_percent
+            # print(f"Using strategy-defined account risk: {current_account_risk*100:.2f}% for {symbol}") # Reduced verbosity
+        # else:
+            # print(f"Using global account risk: {current_account_risk*100:.2f}% for {symbol}") # Reduced verbosity
+        if not (0 < current_account_risk < 1): # Ensure risk percent is valid
+            print(f"Order Error ({symbol}): Invalid account risk percentage {current_account_risk*100:.2f}%. Aborting."); return
 
-        print(f"Order Details ({symbol}): SL/TP Mode='{SL_TP_MODE}', Bal={account_balance:.2f}, RiskCap=${capital_to_risk_usdt:.2f}, SL_Sizing%={sl_for_sizing_percentage*100:.2f}%, NotionalPosUSD={position_size_usdt_notional:.2f}, Qty={calculated_qty_asset}")
-
+        # --- Determine SL Price (sl_actual) & TP Price (tp_actual) ---
         sl_actual, tp_actual = None, None
 
         if SL_TP_MODE == "Fixed PnL":
-            if TP_PNL_AMOUNT <= 0: 
-                print(f"Warning: TP PnL Amount ($ {TP_PNL_AMOUNT}) must be positive for 'Fixed PnL' mode. Aborting order for {symbol}.")
-                return
-            if calculated_qty_asset == 0: 
-                print(f"Error: Calculated quantity is zero for Fixed PnL mode, cannot determine PnL-based SL/TP for {symbol}. Aborting.")
-                return
-
-            if side == 'buy':
-                sl_actual = round(price - (SL_PNL_AMOUNT / calculated_qty_asset), price_precision)
-                tp_actual = round(price + (TP_PNL_AMOUNT / calculated_qty_asset), price_precision)
-            elif side == 'sell':
-                sl_actual = round(price + (SL_PNL_AMOUNT / calculated_qty_asset), price_precision)
-                tp_actual = round(price - (TP_PNL_AMOUNT / calculated_qty_asset), price_precision)
-            print(f"Using Fixed PnL: SL: {sl_actual}, TP: {tp_actual} for {symbol} {side} (Qty: {calculated_qty_asset})")
-
-        elif SL_TP_MODE == "ATR/Dynamic" or SL_TP_MODE == "StrategyDefined_SD": # Modified to include new mode
+            # SL/TP for Fixed PnL depends on quantity, which is determined below.
+            # So, defer final sl_actual, tp_actual calculation for Fixed PnL.
+            pass
+        elif SL_TP_MODE == "ATR/Dynamic" or SL_TP_MODE == "StrategyDefined_SD":
             if strategy_sl is not None and strategy_tp is not None:
                 sl_actual = strategy_sl
                 tp_actual = strategy_tp
-                print(f"Using {SL_TP_MODE} (strategy-defined): SL: {sl_actual}, TP: {tp_actual} for {symbol} {side}")
-            else:
-                # Fallback to percentage if strategy doesn't provide SL/TP for these modes
-                print(f"INFO: {SL_TP_MODE} mode selected but no strategy_sl/tp provided for {symbol}. Falling back to Percentage SL/TP.")
+            else: # Fallback to Percentage SL/TP
+                print(f"INFO: {SL_TP_MODE} selected for {symbol} but no strategy_sl/tp. Falling back to Percentage SL/TP.")
                 if side == 'buy':
                     sl_actual = round(price - price * SL_PERCENT, price_precision)
                     tp_actual = round(price + price * TP_PERCENT, price_precision)
                 elif side == 'sell':
                     sl_actual = round(price + price * SL_PERCENT, price_precision)
                     tp_actual = round(price - price * TP_PERCENT, price_precision)
-                print(f"Using Fallback Percentage for ATR/Dynamic: SL: {sl_actual}, TP: {tp_actual} for {symbol} {side}")
-        
-        elif SL_TP_MODE == "Percentage": # Explicitly Percentage Mode
+        elif SL_TP_MODE == "Percentage":
             if side == 'buy':
                 sl_actual = round(price - price * SL_PERCENT, price_precision)
                 tp_actual = round(price + price * TP_PERCENT, price_precision)
             elif side == 'sell':
                 sl_actual = round(price + price * SL_PERCENT, price_precision)
                 tp_actual = round(price - price * TP_PERCENT, price_precision)
-            print(f"Using Percentage-based: SL: {sl_actual} (from {SL_PERCENT*100}%), TP: {tp_actual} (from {TP_PERCENT*100}%) for {symbol} {side}")
+        else:
+            print(f"Order Error ({symbol}): Unknown SL_TP_MODE '{SL_TP_MODE}'. Aborting."); return
         
-        else: # Should not be reached if SL_TP_MODE is validated earlier
-            print(f"Error: Unknown SL_TP_MODE '{SL_TP_MODE}' in open_order. Aborting.")
+        # --- Calculate Quantity (calculated_qty_asset) ---
+        calculated_qty_asset = 0.0
+        position_size_usdt_notional = 0.0
+
+        if SL_TP_MODE == "Fixed PnL":
+            if SL_PNL_AMOUNT <= 0: print(f"Order Warning ({symbol}): SL PnL Amount ($ {SL_PNL_AMOUNT}) invalid for Fixed PnL. Aborting."); return
+            # For Fixed PnL, risk amount is SL_PNL_AMOUNT.
+            # Use a reference SL percentage to derive an initial notional size.
+            reference_sl_percentage_for_fixed_pnl = SL_PERCENT 
+            if reference_sl_percentage_for_fixed_pnl <=0: print(f"Order Warning ({symbol}): Reference SL_PERCENT invalid for Fixed PnL sizing. Aborting."); return
+            
+            # Notional size based on fixed PnL amount and reference stop distance percentage
+            position_size_usdt_notional = SL_PNL_AMOUNT / reference_sl_percentage_for_fixed_pnl
+            # print(f"Fixed PnL Mode ({symbol}): SL PnL=${SL_PNL_AMOUNT:.2f}, Ref SL%={reference_sl_percentage_for_fixed_pnl*100:.2f}%, InitNotional=${position_size_usdt_notional:.2f}")
+        
+        elif SL_TP_MODE == "Percentage" or SL_TP_MODE == "ATR/Dynamic" or SL_TP_MODE == "StrategyDefined_SD":
+            if sl_actual is None: # SL price must be known for these modes to use calculate_position_size
+                print(f"Order Error ({symbol}): SL price (sl_actual) is None for {SL_TP_MODE}. Cannot size. Aborting."); return
+            if price == sl_actual: # Prevent division by zero in calculate_position_size
+                 print(f"Order Error ({symbol}): Entry price and SL price are identical ({price}). Cannot size. Aborting."); return
+
+            asset_qty_from_calc = calculate_position_size(account_balance, current_account_risk, price, sl_actual)
+            calculated_qty_asset = round(asset_qty_from_calc, qty_precision) # Round here
+            position_size_usdt_notional = calculated_qty_asset * price # Notional based on calculated & rounded quantity
+            # print(f"{SL_TP_MODE} Mode ({symbol}): asset_qty_from_calc={asset_qty_from_calc:.8f}, rounded_qty={calculated_qty_asset}, Notional=${position_size_usdt_notional:.2f}")
+        
+        else: # Should not be reached
+            print(f"Order Error ({symbol}): Unhandled SL_TP_MODE '{SL_TP_MODE}' for quantity calculation. Aborting."); return
+
+        # --- Apply Notional Cap (common for all modes) ---
+        CAP_FRACTION_OF_BALANCE = 0.50 
+        max_permissible_notional_value = account_balance * CAP_FRACTION_OF_BALANCE
+        if position_size_usdt_notional > max_permissible_notional_value:
+            # print(f"INFO: Position size for {symbol} being capped. Original notional: {position_size_usdt_notional:.2f} USDT.") # Reduced verbosity
+            position_size_usdt_notional = max_permissible_notional_value
+            # Recalculate quantity based on capped notional value
+            if price <= 0: print(f"Order Error ({symbol}): Price is {price}. Cannot recalculate quantity after cap. Aborting."); return
+            calculated_qty_asset = round(position_size_usdt_notional / price, qty_precision)
+            # print(f"INFO: Capped notional: {position_size_usdt_notional:.2f} USDT, New capped quantity: {calculated_qty_asset} for {symbol}.")
+        
+        if calculated_qty_asset <= 0:
+            print(f"Order Warning ({symbol}): Final calculated quantity is {calculated_qty_asset}. Aborting order.")
             return
 
+        # --- Finalize SL/TP for Fixed PnL (now that quantity is known) ---
+        if SL_TP_MODE == "Fixed PnL":
+            if TP_PNL_AMOUNT <= 0: print(f"Order Warning ({symbol}): TP PnL Amount ($ {TP_PNL_AMOUNT}) invalid. Aborting."); return
+            if calculated_qty_asset == 0: print(f"Order Error ({symbol}): Quantity is zero for Fixed PnL SL/TP calc. Aborting."); return
+            if side == 'buy':
+                sl_actual = round(price - (SL_PNL_AMOUNT / calculated_qty_asset), price_precision)
+                tp_actual = round(price + (TP_PNL_AMOUNT / calculated_qty_asset), price_precision)
+            elif side == 'sell':
+                sl_actual = round(price + (SL_PNL_AMOUNT / calculated_qty_asset), price_precision)
+                tp_actual = round(price - (TP_PNL_AMOUNT / calculated_qty_asset), price_precision)
+            # print(f"Final Fixed PnL SL/TP ({symbol} {side}): SL={sl_actual}, TP={tp_actual} (Qty={calculated_qty_asset})")
+
+        # --- Validate SL/TP Prices (common for all modes) ---
         if sl_actual is None or tp_actual is None:
-            print(f"Error: SL or TP price could not be determined for {symbol} {side} with mode {SL_TP_MODE}. Aborting order.")
+            print(f"Order Error ({symbol} {side}): SL or TP price is None after all calculations. Mode: {SL_TP_MODE}. Aborting.")
             return
-        
-        # Validate that SL and TP are not impossible 
         if side == 'buy':
-            if sl_actual >= price: print(f"Warning: SL price {sl_actual} is at or above entry price {price} for BUY order on {symbol}. Check logic."); return
-            if tp_actual <= price: print(f"Warning: TP price {tp_actual} is at or below entry price {price} for BUY order on {symbol}. Check logic."); return
+            if sl_actual >= price: print(f"Order Warning ({symbol} BUY): SL price {sl_actual} >= entry {price}. Aborting."); return
+            if tp_actual <= price: print(f"Order Warning ({symbol} BUY): TP price {tp_actual} <= entry {price}. Aborting."); return
         elif side == 'sell':
-            if sl_actual <= price: print(f"Warning: SL price {sl_actual} is at or below entry price {price} for SELL order on {symbol}. Check logic."); return
-            if tp_actual >= price: print(f"Warning: TP price {tp_actual} is at or above entry price {price} for SELL order on {symbol}. Check logic."); return
+            if sl_actual <= price: print(f"Order Warning ({symbol} SELL): SL price {sl_actual} <= entry {price}. Aborting."); return
+            if tp_actual >= price: print(f"Order Warning ({symbol} SELL): TP price {tp_actual} >= entry {price}. Aborting."); return
+        
+        print(f"Final Order Details ({symbol} {side}): Mode='{SL_TP_MODE}', Qty={calculated_qty_asset}, EntryP={price}, SLP={sl_actual}, TPP={tp_actual}")
 
-
+        # --- Place Orders ---
         if side == 'buy':
             resp1 = client.new_order(symbol=symbol, side='BUY', type='LIMIT', quantity=calculated_qty_asset, timeInForce='GTC', price=price, newOrderRespType='FULL')
-            print(f"BUY {symbol}: {resp1}")
+            print(f"BUY {symbol}: {resp1.get('orderId', 'N/A')}")
             sleep(0.2)
             resp2 = client.new_order(symbol=symbol, side='SELL', type='STOP_MARKET', quantity=calculated_qty_asset, timeInForce='GTC', stopPrice=sl_actual, reduceOnly=True, newOrderRespType='FULL')
-            print(f"SL for BUY {symbol}: {resp2}")
+            print(f"SL for BUY {symbol}: {resp2.get('orderId', 'N/A')}")
             sleep(0.2)
             resp3 = client.new_order(symbol=symbol, side='SELL', type='TAKE_PROFIT_MARKET', quantity=calculated_qty_asset, timeInForce='GTC', stopPrice=tp_actual, reduceOnly=True, newOrderRespType='FULL')
-            print(f"TP for BUY {symbol}: {resp3}")
-
-            # --- BEGIN MODIFICATION: Update UI after BUY order ---
-            sleep(0.5) # Allow time for Binance backend to process
-            fresh_positions, fresh_open_orders = get_active_positions_data() # MODIFIED
-            formatted_positions = format_positions_for_display(fresh_positions, fresh_open_orders) # MODIFIED
-            if root and root.winfo_exists() and positions_text_widget:
-                root.after(0, update_text_widget_content, positions_text_widget, formatted_positions)
-
-            fresh_history = get_trade_history(symbol_list=TARGET_SYMBOLS, limit_per_symbol=10)
-            if root and root.winfo_exists() and history_text_widget:
-                root.after(0, update_text_widget_content, history_text_widget, fresh_history)
-            # --- END MODIFICATION ---
-
+            print(f"TP for BUY {symbol}: {resp3.get('orderId', 'N/A')}")
         elif side == 'sell':
             resp1 = client.new_order(symbol=symbol, side='SELL', type='LIMIT', quantity=calculated_qty_asset, timeInForce='GTC', price=price, newOrderRespType='FULL')
-            print(f"SELL {symbol}: {resp1}")
+            print(f"SELL {symbol}: {resp1.get('orderId', 'N/A')}")
             sleep(0.2)
             resp2 = client.new_order(symbol=symbol, side='BUY', type='STOP_MARKET', quantity=calculated_qty_asset, timeInForce='GTC', stopPrice=sl_actual, reduceOnly=True, newOrderRespType='FULL')
-            print(f"SL for SELL {symbol}: {resp2}")
+            print(f"SL for SELL {symbol}: {resp2.get('orderId', 'N/A')}")
             sleep(0.2)
             resp3 = client.new_order(symbol=symbol, side='BUY', type='TAKE_PROFIT_MARKET', quantity=calculated_qty_asset, timeInForce='GTC', stopPrice=tp_actual, reduceOnly=True, newOrderRespType='FULL')
-            print(f"TP for SELL {symbol}: {resp3}")
-
-            # --- BEGIN MODIFICATION: Update UI after SELL order ---
-            sleep(0.5) # Allow time for Binance backend to process
-            fresh_positions, fresh_open_orders = get_active_positions_data() # MODIFIED
-            formatted_positions = format_positions_for_display(fresh_positions, fresh_open_orders) # MODIFIED
-            if root and root.winfo_exists() and positions_text_widget:
-                root.after(0, update_text_widget_content, positions_text_widget, formatted_positions)
-
-            fresh_history = get_trade_history(symbol_list=TARGET_SYMBOLS, limit_per_symbol=10)
-            if root and root.winfo_exists() and history_text_widget:
-                root.after(0, update_text_widget_content, history_text_widget, fresh_history)
-            # --- END MODIFICATION ---
+            print(f"TP for SELL {symbol}: {resp3.get('orderId', 'N/A')}")
+        
+        # --- Update UI (common for buy/sell) ---
+        sleep(0.5) 
+        fresh_positions, fresh_open_orders = get_active_positions_data()
+        formatted_positions = format_positions_for_display(fresh_positions, fresh_open_orders)
+        if root and root.winfo_exists() and positions_text_widget:
+            root.after(0, update_text_widget_content, positions_text_widget, formatted_positions)
+        fresh_history = get_trade_history(symbol_list=TARGET_SYMBOLS, limit_per_symbol=10)
+        if root and root.winfo_exists() and history_text_widget:
+            root.after(0, update_text_widget_content, history_text_widget, fresh_history)
 
     except ClientError as error:
         err_msg_prefix = f"Order Err ({symbol}, {side})"
-        if error.error_code == -1111: # Standard Binance code for precision issues
-            print(f"{err_msg_prefix}: PRECISION ISSUE. Check quantity/price decimal places. Binance msg: {error.error_message}")
-        elif error.error_code == -4014: # Often related to MIN_NOTIONAL for Spot/Margin, UMFutures might use a different one like -4104
-            print(f"{err_msg_prefix}: MIN_NOTIONAL or similar filter failure (Code -4014). Order value potentially too small. Binance msg: {error.error_message}")
-        elif error.error_code == -4104: # Specific to UMFutures for MIN_NOTIONAL
-            print(f"{err_msg_prefix}: MIN_NOTIONAL filter failure (Code -4104). Order value too small. Binance msg: {error.error_message}")
-        elif error.error_code == -4003: # Often PRICE_FILTER for Spot/Margin, UMFutures might use -4105
-            print(f"{err_msg_prefix}: PRICE_FILTER or similar failure (Code -4003). Price out of bounds or invalid. Binance msg: {error.error_message}")
-        elif error.error_code == -4105: # Specific to UMFutures for PRICE_FILTER
-            print(f"{err_msg_prefix}: PRICE_FILTER failure (Code -4105). Price out of bounds or invalid. Binance msg: {error.error_message}")
-        elif error.error_code == -2010: # Typical for insufficient balance
-            print(f"{err_msg_prefix}: INSUFFICIENT BALANCE (Code -2010). Check available margin/funds. Binance msg: {error.error_message}")
-        else:
-            print(f"{err_msg_prefix}: Code {error.error_code} - {error.error_message if error.error_message else error}")
-        return None # Return None on ClientError
+        if error.error_code == -1111: print(f"{err_msg_prefix}: PRECISION ISSUE. Binance msg: {error.error_message}")
+        elif error.error_code == -4014: print(f"{err_msg_prefix}: MIN_NOTIONAL (Code -4014). Binance msg: {error.error_message}")
+        elif error.error_code == -4104: print(f"{err_msg_prefix}: MIN_NOTIONAL (Code -4104). Binance msg: {error.error_message}")
+        elif error.error_code == -4003: print(f"{err_msg_prefix}: PRICE_FILTER (Code -4003). Binance msg: {error.error_message}")
+        elif error.error_code == -4105: print(f"{err_msg_prefix}: PRICE_FILTER (Code -4105). Binance msg: {error.error_message}")
+        elif error.error_code == -2010: print(f"{err_msg_prefix}: INSUFFICIENT BALANCE or other issue (Code -2010). Binance msg: {error.error_message}")
+        else: print(f"{err_msg_prefix}: Code {error.error_code} - {error.error_message if error.error_message else error}")
+        return None
     except Exception as e:
-        print(f"Order Unexpected Err ({symbol}, {side}): {e}")
-        return None # Return None on other exceptions
+        print(f"Order Unexpected Err ({symbol}, {side}): {e} (Line: {e.__traceback__.tb_lineno if e.__traceback__ else 'N/A'})")
+        return None
     
-    # If all orders are successful, return their details
     order_details = {
-        'entry_order_id': resp1.get('orderId') if resp1 else None,
-        'sl_order_id': resp2.get('orderId') if resp2 else None,
-        'tp_order_id': resp3.get('orderId') if resp3 else None,
-        'sl_price': sl_actual,
-        'tp_price': tp_actual,
-        'entry_price': price, # The price at which the LIMIT order was placed
-        'qty': calculated_qty_asset,
-        'side': side # 'buy' or 'sell'
+        'entry_order_id': resp1.get('orderId') if 'resp1' in locals() and resp1 else None,
+        'sl_order_id': resp2.get('orderId') if 'resp2' in locals() and resp2 else None,
+        'tp_order_id': resp3.get('orderId') if 'resp3' in locals() and resp3 else None,
+        'sl_price': sl_actual, 'tp_price': tp_actual, 'entry_price': price,
+        'qty': calculated_qty_asset, 'side': side
     }
     return order_details
 
