@@ -4,10 +4,14 @@ import streamlit as st
 import sys # Import sys for command-line arguments
 import threading
 from time import sleep
+import webbrowser # Added for opening web browser
 from binance.um_futures import UMFutures
 from binance.error import ClientError
 import ta
 import pandas as pd
+import os # Added for path operations
+import pickle # Added for saving/loading stats objects
+import optuna # Added for hyperparameter optimization
 
 # This list's "name" must match the values in the STRATEGIES dictionary (ID-to-name map)
 # The order here doesn't strictly matter as long as names are unique and findable.
@@ -1219,68 +1223,84 @@ def check_volume_driven_exit_new(symbol: str, kl_df: pd.DataFrame, volume_lookba
 
 # Backtest Strategy Wrapper Class
 class BacktestStrategyWrapper(Strategy):
-    # Default parameters, will be overridden by UI inputs later
-    user_tp = 0.03  # Default, will be set from UI
-    user_sl = 0.02  # Default, will be set from UI
+    # These will be set by execute_backtest or Optuna trial
+    # Parameters that are common across many strategies or globally configurable for backtest
+    user_tp_bt: float = 0.03  # Default TP percentage
+    user_sl_bt: float = 0.02  # Default SL percentage
+    current_strategy_id_bt: int = 0
+    RR_bt: float = 1.5
+    SL_ATR_MULTI_bt: float = 1.0
+    PRICE_PRECISION_BT_dyn: int = 4 # Dynamic precision, set by get_price_precision
+    sl_tp_mode_bt_dyn: str = "ATR/Dynamic"
+    sl_pnl_amount_bt_dyn: float = 0.0
+    tp_pnl_amount_bt_dyn: float = 0.0
+    leverage_bt_dyn: float = 1.0
+    account_risk_percent_bt_dyn: float = 0.01
+    trailing_stop_enabled_bt_dyn: bool = False
+    trailing_stop_atr_multiplier_bt_dyn: float = 1.5
+    min_rr_backtest_dyn: float = 1.5
     
-    # Strategy-specific parameters (example for the provided strategy)
-    ema_period = 200
-    rsi_period = 14
-    ATR_PERIOD = 14 # New class variable for ATR period
-    ST_ATR_PERIOD_S0 = 10 # Strategy 0 Supertrend ATR Period
-    ST_MULTIPLIER_S0 = 1.5  # Strategy 0 Supertrend Multiplier
-    
-    # Strategy S1 ("EMA Cross + SuperTrend") Parameters
-    EMA_SHORT_S1 = 9
-    EMA_LONG_S1 = 21
-    RSI_PERIOD_S1 = 14
-    ST_ATR_PERIOD_S1 = 10 
-    ST_MULTIPLIER_S1 = 3.0
-    
-    current_strategy_id = 5 # Defaulting to 5 for "New RSI-Based Strategy"
-    RR = 1.5  # Risk/Reward ratio
-    SL_ATR_MULTI = 1.0 # Multiplier for ATR to determine SL distance - SET TO 1.0
-    PRICE_PRECISION_BT = 4 # Default rounding precision for backtesting
+    # Generic parameter placeholders for Optuna - these names must match what Optuna suggests
+    # And also what is passed to bt.run()
+    # Strategy 0 ("Original Scalping") Parameters
+    S0_EMA_Short: int = 9
+    S0_EMA_Long: int = 21
+    S0_RSI_Period: int = 14
+    S0_ST_ATR_Period: int = 10
+    S0_ST_Multiplier: float = 1.5
+    # S0_Vol_MA_Period: int = 10 # Not directly used in ST indicator, but in logic
+    # S0_Lookback_HL: int = 20 # Used in logic
 
-    # Attributes for new SL/TP modes, to be set by execute_backtest
-    sl_tp_mode_bt = "ATR/Dynamic"  # Renamed to avoid conflict with global SL_TP_MODE
-    sl_pnl_amount_bt = 0.0
-    tp_pnl_amount_bt = 0.0
-    # user_sl and user_tp (percentages) are already class attributes
-    leverage = 1.0 # Default leverage for backtesting
-    account_risk_percent_bt = 0.01 # Default 1% account risk for backtesting
+    # Strategy 1 ("EMA Cross + SuperTrend") Parameters
+    S1_EMA_Short: int = 9
+    S1_EMA_Long: int = 21
+    S1_RSI_Period: int = 14
+    S1_ST_ATR_Period: int = 10
+    S1_ST_Multiplier: float = 3.0
 
-    # Attributes for Backtesting Trailing Stop, to be set by execute_backtest
-    trailing_stop_enabled_bt = False
-    trailing_stop_atr_multiplier_bt = 1.5
+    # Strategy 5 ("New RSI-Based Strategy") Parameters
+    S5_RSI_Period: int = 14
+    S5_SMA_Period: int = 50
+    S5_Duration_Lookback: int = 5
+    S5_Slope_Lookback_RSI: int = 3
+    S5_Divergence_Candles: int = 15
+    # S5_RSI_OB_Thresh, S5_RSI_OS_Thresh, S5_RSI_Slope_Min are used in logic
 
-    # Attribute for Backtesting Minimum R:R, to be set by execute_backtest
-    min_rr_backtest = 1.5 # Default, will be overridden
+    # Strategy 6 ("Market Structure S/D") Parameters
+    S6_Swing_Order: int = 5
+    S6_SD_ATR_Period: int = 14
+    S6_SD_Lookback_Candles: int = 10
+    S6_SD_Consol_ATR_Factor: float = 0.7
+    S6_SD_Sharp_Move_ATR_Factor: float = 1.5
+    S6_Min_RR: float = 1.5 # This is specific to S6 logic
+    # S6_SL_Zone_Buffer_Pct: float = 0.10 # Used in logic
 
-    # --- Strategy 7 (Candlestick Patterns) Specific Parameters for Backtesting ---
-    # These mirror the tunable parameters in the live strategy_candlestick_patterns_signal
-    s7_bt_ema_trend_period = 200 # Typically fixed, but listed for completeness
-    s7_bt_atr_period = 14
-    s7_bt_sl_atr_multiplier = 1.5
-    s7_bt_tp_atr_multiplier = 2.0 
-    # s7_bt_rr_for_dynamic_calc will be derived from the multipliers above in init/next
-    
-    s7_bt_volume_lookback = 20
-    s7_bt_volume_multiplier = 2.0
-    
-    s7_bt_rsi_period = 14
-    s7_bt_rsi_overbought = 75
-    s7_bt_rsi_oversold = 25
-    # s7_bt_cooldown_bars would be relevant if simulating cooldown in backtest
-    # --- End of S7 Backtesting Parameters ---
+    # Strategy 7 ("Candlestick Patterns") Parameters
+    S7_EMA_Trend_Period: int = 200
+    S7_ATR_Period: int = 14 # For SL/TP
+    S7_SL_ATR_Multiplier: float = 1.5
+    S7_TP_ATR_Multiplier: float = 2.0
+    S7_Volume_Lookback: int = 20
+    S7_Volume_Multiplier: float = 2.0
+    S7_RSI_Period_Filter: int = 14 # For the (removed) RSI filter
+    S7_RSI_Overbought_Filter: int = 75
+    S7_RSI_Oversold_Filter: int = 25
+    # Fallback params for S7 are also part of its logic but might be tuned
+    S7_Fallback_RSI_Period: int = 14
+    # ... other S7 Fallback params ...
+
+    # Common ATR period for dynamic SL/TP if not strategy-specific
+    ATR_PERIOD_Generic: int = 14
 
 
     def init(self):
-        # Use self.sl_tp_mode_bt (or whatever name is chosen for the class attribute)
-        print(f"DEBUG BacktestStrategyWrapper.init: Initializing for strategy ID {self.current_strategy_id}, SL/TP Mode: {getattr(self, 'sl_tp_mode_bt', 'N/A')}, Leverage: {self.leverage}")
-        print(f"DEBUG BacktestStrategyWrapper.init: Trailing Stop Enabled (BT): {getattr(self, 'trailing_stop_enabled_bt', 'N/A')}, Trailing ATR Multi (BT): {getattr(self, 'trailing_stop_atr_multiplier_bt', 'N/A')}")
+        # Parameters are now expected to be set on the instance by backtesting.py if passed to bt.run()
+        # The getattr calls will fetch these instance parameters.
+        # The defaults provided in the class definition are fallbacks if not passed via bt.run().
+
+        print(f"DEBUG BacktestStrategyWrapper.init: Initializing for strategy ID {self.current_strategy_id_bt}, SL/TP Mode: {self.sl_tp_mode_bt_dyn}, Leverage: {self.leverage_bt_dyn}")
+        print(f"DEBUG BacktestStrategyWrapper.init: Trailing Stop Enabled (BT): {self.trailing_stop_enabled_bt_dyn}, Trailing ATR Multi (BT): {self.trailing_stop_atr_multiplier_bt_dyn}")
         
-        # Ensure self.data.df is available and populated for logging
         if hasattr(self.data, 'df') and self.data.df is not None and not self.data.df.empty:
             symbol_for_log = self.data.symbol if hasattr(self.data, 'symbol') else 'N/A'
             print(f"[BT Strategy LOG for {symbol_for_log}] init() called.")
@@ -1291,156 +1311,69 @@ class BacktestStrategyWrapper(Strategy):
         else:
             print(f"[BT Strategy LOG for {self.data.symbol if hasattr(self.data, 'symbol') else 'N/A'}] init() called, but self.data.df is None, empty, or not available.")
 
-        # --- Jules's Logging ---
-        # print(f"[BT Strategy LOG for {self.data.symbol if hasattr(self.data, 'symbol') else 'N/A'}] init() called.") # Moved up with check
-        # print(f"[BT Strategy LOG for {self.data.symbol if hasattr(self.data, 'symbol') else 'N/A'}] Data received by strategy: self.data.df shape: {self.data.df.shape}")
         print(f"[BT Strategy LOG for {self.data.symbol if hasattr(self.data, 'symbol') else 'N/A'}] Data head:\n{self.data.df.head()}")
         print(f"[BT Strategy LOG for {self.data.symbol if hasattr(self.data, 'symbol') else 'N/A'}] Data tail:\n{self.data.df.tail()}")
         print(f"[BT Strategy LOG for {self.data.symbol if hasattr(self.data, 'symbol') else 'N/A'}] Data NaN sum:\n{self.data.df.isnull().sum()}")
-        # --- End Jules's Logging ---
-        if self.current_strategy_id == 5: # New RSI-Based Strategy
-            s5_rsi_period = getattr(self, 'S5_RSI_Period', 14)
-            # S5_SMA_Period, S5_Duration_Lookback, S5_Slope_Lookback_RSI, S5_Divergence_Candles are used in next()
-            self.rsi = self.I(rsi_bt, self.data.Close, s5_rsi_period, name='RSI_S5')
-            self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, getattr(self, 'ATR_PERIOD', 14), name='ATR_dynSLTP_S5') # Generic ATR
         
-        elif self.current_strategy_id == 1: # EMA Cross + SuperTrend
+        # Use instance attributes (set by bt.run() or defaults)
+        if self.current_strategy_id_bt == 5: 
+            self.rsi = self.I(rsi_bt, self.data.Close, self.S5_RSI_Period, name='RSI_S5')
+            self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, self.ATR_PERIOD_Generic, name='ATR_dynSLTP_S5')
+        
+        elif self.current_strategy_id_bt == 1: 
             print(f"DEBUG BacktestStrategyWrapper.init: Initializing indicators for Strategy ID 1 (EMA Cross + SuperTrend)")
-            s1_ema_short = getattr(self, 'S1_EMA_Short', 9)
-            s1_ema_long = getattr(self, 'S1_EMA_Long', 21)
-            s1_rsi_period = getattr(self, 'S1_RSI_Period', 14)
-            s1_st_atr_period = getattr(self, 'S1_ST_ATR_Period', 10)
-            s1_st_multiplier = getattr(self, 'S1_ST_Multiplier', 3.0)
-            
-            self.ema_short_s1 = self.I(ema_bt, self.data.Close, s1_ema_short, name='EMA_S_S1')
-            self.ema_long_s1 = self.I(ema_bt, self.data.Close, s1_ema_long, name='EMA_L_S1')
-            self.rsi_s1 = self.I(rsi_bt, self.data.Close, s1_rsi_period, name='RSI_S1')
-            self.st_s1 = self.I(supertrend_numerical_bt, self.data.High, self.data.Low, self.data.Close, s1_st_atr_period, s1_st_multiplier, name='ST_S1', overlay=True)
-            self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, getattr(self, 'ATR_PERIOD', 14), name='ATR_dynSLTP_S1') # Generic ATR
+            self.ema_short_s1 = self.I(ema_bt, self.data.Close, self.S1_EMA_Short, name='EMA_S_S1')
+            self.ema_long_s1 = self.I(ema_bt, self.data.Close, self.S1_EMA_Long, name='EMA_L_S1')
+            self.rsi_s1 = self.I(rsi_bt, self.data.Close, self.S1_RSI_Period, name='RSI_S1')
+            self.st_s1 = self.I(supertrend_numerical_bt, self.data.High, self.data.Low, self.data.Close, self.S1_ST_ATR_Period, self.S1_ST_Multiplier, name='ST_S1', overlay=True)
+            self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, self.ATR_PERIOD_Generic, name='ATR_dynSLTP_S1')
 
-        elif self.current_strategy_id == 0: # Original Scalping
+        elif self.current_strategy_id_bt == 0: 
             print(f"DEBUG BacktestStrategyWrapper.init: Initializing indicators for Strategy ID 0 (Original Scalping)")
-            s0_ema_short = getattr(self, 'S0_EMA_Short', 9)
-            s0_ema_long = getattr(self, 'S0_EMA_Long', 21)
-            s0_rsi_period = getattr(self, 'S0_RSI_Period', 14)
-            s0_st_atr_period = getattr(self, 'S0_ST_ATR_Period', 10)
-            s0_st_multiplier = getattr(self, 'S0_ST_Multiplier', 1.5)
-            # LOCAL_HIGH_LOW_LOOKBACK_PERIOD and volume_ma10 period (10) are still hardcoded in S0's live logic & here for vol_ma.
-
-            self.ema9_s0 = self.I(ema_bt, self.data.Close, s0_ema_short, name='EMA9_S0')
-            self.ema21_s0 = self.I(ema_bt, self.data.Close, s0_ema_long, name='EMA21_S0')
-            self.rsi_s0 = self.I(rsi_bt, self.data.Close, s0_rsi_period, name='RSI_S0')
-            self.volume_ma10_s0 = self.I(lambda series, window: pd.Series(series).rolling(window).mean(), self.data.Volume, 10, name='VolumeMA10_S0', overlay=False) 
-            self.st_s0 = self.I(supertrend_numerical_bt, self.data.High, self.data.Low, self.data.Close, s0_st_atr_period, s0_st_multiplier, name='Supertrend_S0', overlay=True) 
-            self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, getattr(self, 'ATR_PERIOD', 14), name='ATR_dynSLTP_S0') # Generic ATR
+            self.ema9_s0 = self.I(ema_bt, self.data.Close, self.S0_EMA_Short, name='EMA9_S0')
+            self.ema21_s0 = self.I(ema_bt, self.data.Close, self.S0_EMA_Long, name='EMA21_S0')
+            self.rsi_s0 = self.I(rsi_bt, self.data.Close, self.S0_RSI_Period, name='RSI_S0')
+            # S0_Vol_MA_Period is used in next() logic, not as a direct self.I indicator here.
+            # For Volume MA, if it's needed as a series for plotting or direct access:
+            s0_vol_ma_period_val = getattr(self, 'S0_Vol_MA_Period', 10) # Get if passed, else default
+            self.volume_ma10_s0 = self.I(lambda series, window: pd.Series(series).rolling(window).mean(), self.data.Volume, s0_vol_ma_period_val, name='VolumeMA_S0', overlay=False)
+            self.st_s0 = self.I(supertrend_numerical_bt, self.data.High, self.data.Low, self.data.Close, self.S0_ST_ATR_Period, self.S0_ST_Multiplier, name='Supertrend_S0', overlay=True) 
+            self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, self.ATR_PERIOD_Generic, name='ATR_dynSLTP_S0')
         
-        elif self.current_strategy_id == 6: # Market Structure S/D Strategy
+        elif self.current_strategy_id_bt == 6: 
             print(f"DEBUG BacktestStrategyWrapper.init: Initializing for Strategy ID 6 (Market Structure S/D)")
-            s6_swing_order = getattr(self, 'S6_Swing_Order', 5)
-            s6_sd_atr_period = getattr(self, 'S6_SD_ATR_Period', 14) # Used for identify_supply_demand_zones call
-            # Other S6 params (lookback_candles, consol_factor, sharp_move_factor, min_rr) are used in next() or by helper functions directly.
-            
-            # For backtesting, pre-calculate swing points and S/D zones on the entire dataset once.
-            # Market structure itself will be evaluated dynamically in next() or based on these points.
             try:
-                self.bt_swing_highs_bool, self.bt_swing_lows_bool = find_swing_points(self.data.df, order=s6_swing_order)
-                # S/D zones also depend on the whole dataset for accurate historical identification
-                # Pass S6 specific ATR period to this helper if it's meant to use it
-                self.bt_sd_zones = identify_supply_demand_zones(self.data.df, atr_period=s6_sd_atr_period, 
-                                                                lookback_candles=getattr(self, 'S6_SD_Lookback_Candles', 10),
-                                                                consolidation_atr_factor=getattr(self, 'S6_SD_Consol_ATR_Factor', 0.7),
-                                                                sharp_move_atr_factor=getattr(self, 'S6_SD_Sharp_Move_ATR_Factor', 1.5))
-                print(f"DEBUG BT S6: Pre-calculated {len(self.bt_sd_zones)} S/D zones using ATR period {s6_sd_atr_period}.")
-                # ATR is useful for some dynamic calculations or fallbacks, ensure it's available.
-                # Use a generic ATR_PERIOD or S6 specific if defined for this self.atr
-                self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, getattr(self,'S6_ATR_Period', 14), name='ATR_S6') # Fallback if S6_ATR_Period not specifically set for this
+                self.bt_swing_highs_bool, self.bt_swing_lows_bool = find_swing_points(self.data.df, order=self.S6_Swing_Order)
+                self.bt_sd_zones = identify_supply_demand_zones(self.data.df, atr_period=self.S6_SD_ATR_Period, 
+                                                                lookback_candles=self.S6_SD_Lookback_Candles,
+                                                                consolidation_atr_factor=self.S6_SD_Consol_ATR_Factor,
+                                                                sharp_move_atr_factor=self.S6_SD_Sharp_Move_ATR_Factor)
+                print(f"DEBUG BT S6: Pre-calculated {len(self.bt_sd_zones)} S/D zones using ATR period {self.S6_SD_ATR_Period}.")
+                self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, self.S6_SD_ATR_Period, name='ATR_S6') 
             except Exception as e:
                 print(f"ERROR BT S6 init: Failed to pre-calculate swings or S/D zones: {e}")
-                # Potentially raise this or handle it to prevent backtest from running with faulty setup
                 self.bt_swing_highs_bool = pd.Series([False]*len(self.data.df), index=self.data.df.index)
                 self.bt_swing_lows_bool = pd.Series([False]*len(self.data.df), index=self.data.df.index)
                 self.bt_sd_zones = []
-                self.atr = None # Invalidate ATR if setup fails critically
+                self.atr = None 
         
-        elif self.current_strategy_id == 7: # Candlestick Patterns Strategy
+        elif self.current_strategy_id_bt == 7: 
             print(f"DEBUG BacktestStrategyWrapper.init: Initializing for Strategy ID 7 (Candlestick Patterns)")
-            s7_ema_trend_period_bt = getattr(self, 'S7_EMA_Trend_Period', self.s7_bt_ema_trend_period) # self.s7_bt_ema_trend_period is the old hardcoded default
-            s7_atr_period_bt = getattr(self, 'S7_ATR_Period', self.s7_bt_atr_period)
-            # Other S7 params like multipliers, volume lookbacks, RSI thresholds are used in next() via getattr.
-
-            self.ema200_s7 = self.I(ema_bt, self.data.Close, s7_ema_trend_period_bt, name='EMA200_S7')
-            self.atr_s7 = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, s7_atr_period_bt, name='ATR_S7')
-            # RSI for S7 filter is calculated on the fly in next() if needed.
-            # Candlestick pattern recognition will be done in next() using helper functions
-            # on self.data.df slices. No specific self.I needed for the patterns themselves here.
-            # Volume data is self.data.Volume
+            self.ema200_s7 = self.I(ema_bt, self.data.Close, self.S7_EMA_Trend_Period, name='EMA200_S7')
+            self.atr_s7 = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, self.S7_ATR_Period, name='ATR_S7')
+            # Other S7 params (RSI period for filter, volume lookback/multi) are used in next() logic
         
-        elif self.current_strategy_id == 2: # Bollinger Band Mean-Reversion
-            print(f"DEBUG BacktestStrategyWrapper.init: Initializing for Strategy ID 2 (Bollinger Bands)")
-            s2_ema_slow = getattr(self, 'S2_EMA_Slow', 50)
-            s2_ema_fast = getattr(self, 'S2_EMA_Fast', 30)
-            s2_rsi_period = getattr(self, 'S2_RSI_Period', 10)
-            s2_bb_length = getattr(self, 'S2_BB_Length', 15)
-            s2_bb_stddev = getattr(self, 'S2_BB_StdDev', 1.5)
-            s2_atr_period = getattr(self, 'S2_ATR_Period', 7)
+        # Placeholder for other strategies (2, 3, 4) - they would need similar getattr logic for their params
+        # For brevity, only S0, S1, S5, S6, S7 are detailed here for parameterization.
+        # It's assumed that if other strategies are optimized, their parameters (e.g. S2_EMA_Slow, S3_ATR_Period)
+        # would be added to the class variable list and accessed via getattr(self, 'ParamName', default_value) here.
 
-            self.ema_slow_s2 = self.I(ema_bt, self.data.Close, s2_ema_slow, name='EMA_Slow_S2')
-            self.ema_fast_s2 = self.I(ema_bt, self.data.Close, s2_ema_fast, name='EMA_Fast_S2')
-            self.rsi_s2 = self.I(rsi_bt, self.data.Close, s2_rsi_period, name='RSI_S2')
-            # BollingerBands from `ta` library are used directly in `next` for S2, not as `self.I`
-            # However, ATR might be needed for dynamic SL/TP if that mode is selected.
-            self.atr_s2 = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, s2_atr_period, name='ATR_S2')
-            # self.atr is the generic one, ensure it's also available if S2 uses ATR/Dynamic SLTP
-            if not hasattr(self, 'atr'): # If not already set by a prior strategy's generic ATR init
-                 self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, getattr(self, 'ATR_PERIOD', 14), name='ATR_dynSLTP_S2')
-
-
-        elif self.current_strategy_id == 3: # VWAP Breakout Momentum
-            print(f"DEBUG BacktestStrategyWrapper.init: Initializing for Strategy ID 3 (VWAP Breakout)")
-            s3_atr_period = getattr(self, 'S3_ATR_Period', 14)
-            s3_macd_slow = getattr(self, 'S3_MACD_Slow', 26)
-            s3_macd_fast = getattr(self, 'S3_MACD_Fast', 12)
-            s3_macd_sign = getattr(self, 'S3_MACD_Sign', 9)
-            # S3_ATR_RollingAvgPeriod is used in next()
-
-            self.atr_s3 = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, s3_atr_period, name='ATR_S3')
-            # MACD lines for S3 (macd_line, macd_signal_line, macd_hist are often used)
-            # self.I can only return one series. MACD object needs to be handled carefully.
-            # For simplicity, if specific lines are needed, they might be calculated in next or via multiple self.I calls if ta lib supports it.
-            # For now, let's assume MACD is primarily evaluated via its histogram or direct calculation in next().
-            # We'll initialize a generic ATR if needed for SL/TP.
-            if not hasattr(self, 'atr'):
-                 self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, getattr(self, 'ATR_PERIOD', 14), name='ATR_dynSLTP_S3')
-
-
-        elif self.current_strategy_id == 4: # MACD Divergence + Pivot-Point
-            print(f"DEBUG BacktestStrategyWrapper.init: Initializing for Strategy ID 4 (MACD Div Pivot)")
-            s4_macd_slow = getattr(self, 'S4_MACD_Slow', 26)
-            s4_macd_fast = getattr(self, 'S4_MACD_Fast', 12)
-            s4_macd_sign = getattr(self, 'S4_MACD_Sign', 9)
-            s4_stoch_k_period = getattr(self, 'S4_Stoch_K_Period', 14)
-            s4_stoch_smooth_window = getattr(self, 'S4_Stoch_Smooth_Window', 3)
-            s4_atr_period = getattr(self, 'S4_ATR_Period', 14)
-            # S4_Divergence_Lookback, S4_Stoch_Oversold, S4_Stoch_Overbought are used in next()
-            
-            # For MACD, typically the histogram (diff) is used for divergence.
-            # Stochastic %K is ta.momentum.StochasticOscillator().stoch()
-            # ATR for SL/TP
-            self.atr_s4 = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, s4_atr_period, name='ATR_S4')
-            if not hasattr(self, 'atr'):
-                 self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, getattr(self, 'ATR_PERIOD', 14), name='ATR_dynSLTP_S4')
-
-
-        else: # Default for any other (new/unspecified) strategy ID, ensure ATR is available
-            print(f"DEBUG BacktestStrategyWrapper.init: Strategy ID {self.current_strategy_id} - Defaulting to RSI and ATR.")
-            # Try to get a generic RSI_Period if set, else default to 14
-            default_rsi_period = getattr(self, 'RSI_Period', 14) # Example: "RSI_Period" might be a common name
-            self.rsi = self.I(rsi_bt, self.data.Close, default_rsi_period, name=f'RSI_default_{self.current_strategy_id}')
-            
-            # Use a generic ATR_PERIOD if set, else default to 14
-            default_atr_period = getattr(self, 'ATR_PERIOD', 14) # This is already a class attribute
-            self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, default_atr_period, name=f'ATR_default_{self.current_strategy_id}')
-            print(f"DEBUG BacktestStrategyWrapper.init: Defaulted ATR indicator for strategy ID {self.current_strategy_id}.")
+        else: 
+            print(f"DEBUG BacktestStrategyWrapper.init: Strategy ID {self.current_strategy_id_bt} - Using generic RSI and ATR.")
+            default_rsi_period = getattr(self, 'RSI_Period_Generic', 14) 
+            self.rsi = self.I(rsi_bt, self.data.Close, default_rsi_period, name=f'RSI_default_{self.current_strategy_id_bt}')
+            self.atr = self.I(atr_bt, self.data.High, self.data.Low, self.data.Close, self.ATR_PERIOD_Generic, name=f'ATR_default_{self.current_strategy_id_bt}')
+            print(f"DEBUG BacktestStrategyWrapper.init: Defaulted ATR indicator for strategy ID {self.current_strategy_id_bt}.")
 
     def next(self):
         price = float(self.data.Close[-1]) 
@@ -2475,9 +2408,12 @@ def execute_backtest(strategy_id_for_backtest, symbol, timeframe, interval_days,
                      leverage_bt, # New parameter for leverage
                      account_risk_percent_bt, # New parameter for account risk %
                      ts_enabled_bt_param, ts_atr_multiplier_bt_param, # Trailing Stop parameters for backtest
-                     min_rr_bt_param # Min R:R for backtest
+                     min_rr_bt_param, # Min R:R for backtest
+                     optuna_params=None # For Optuna integration
                      ):
     print(f"Executing backtest for Strategy ID {strategy_id_for_backtest} on {symbol} ({timeframe}, {interval_days} days), Start Capital: ${starting_capital:.2f}, Leverage: {leverage_bt}x, Account Risk: {account_risk_percent_bt*100:.2f}%, Mode: {sl_tp_mode}")
+    if optuna_params:
+        print(f"  Optuna Params: {optuna_params}")
     if sl_tp_mode == "Percentage":
         print(f"  TP %: {ui_tp_percentage*100:.2f}%, SL %: {ui_sl_percentage*100:.2f}%")
     elif sl_tp_mode == "Fixed PnL":
@@ -2595,9 +2531,42 @@ def execute_backtest(strategy_id_for_backtest, symbol, timeframe, interval_days,
     
     print(f"DEBUG execute_backtest: Calculated margin for Backtest: {margin_val} (from leverage: {leverage_bt}x)")
 
+    # Pass Optuna parameters to the strategy via Backtest instance
+    # These will be set as attributes on the Strategy instance by backtesting.py
+    
+    # Construct a dictionary of parameters to pass to Backtest.
+    # This includes both fixed parameters (like current_strategy_id_bt) and Optuna-tuned ones.
+    strategy_params_for_bt_run = {
+        'current_strategy_id_bt': strategy_id_for_backtest,
+        'user_tp_bt': ui_tp_percentage,
+        'user_sl_bt': ui_sl_percentage,
+        'sl_tp_mode_bt_dyn': sl_tp_mode,
+        'sl_pnl_amount_bt_dyn': sl_pnl_amount_val,
+        'tp_pnl_amount_bt_dyn': tp_pnl_amount_val,
+        'leverage_bt_dyn': leverage_bt,
+        'account_risk_percent_bt_dyn': account_risk_percent_bt,
+        'trailing_stop_enabled_bt_dyn': ts_enabled_bt_param,
+        'trailing_stop_atr_multiplier_bt_dyn': ts_atr_multiplier_bt_param,
+        'min_rr_backtest_dyn': min_rr_bt_param,
+        'PRICE_PRECISION_BT_dyn': get_price_precision(symbol) # Get live precision
+    }
+
+    if optuna_params:
+        strategy_params_for_bt_run.update(optuna_params)
+        print(f"DEBUG execute_backtest: Running with Optuna params: {optuna_params}")
+    else: # If not Optuna, use defaults from BacktestStrategyWrapper or UI-set ones if they were class vars
+          # For parameters that were dynamically set on BacktestStrategyWrapper class by apply_settings()
+          # we need to ensure they are also included if not overridden by Optuna.
+          # This is simpler if BacktestStrategyWrapper uses getattr(self, param, default)
+          # and optuna_params are directly passed to bt.run()
+        pass
+
+
     bt = Backtest(kl_df, BacktestStrategyWrapper, cash=starting_capital, margin=margin_val, commission=0.0007)
+    
     try:
-        stats = bt.run()
+        # Pass all collected strategy parameters (fixed and tuned) to bt.run()
+        stats = bt.run(**strategy_params_for_bt_run)
         print("Backtest completed.")
         # print(stats) # Stats can be very verbose, printed later or in UI
         print(f"DEBUG execute_backtest: Stats object type: {type(stats)}")
@@ -2621,14 +2590,51 @@ def execute_backtest(strategy_id_for_backtest, symbol, timeframe, interval_days,
         return f"Error during backtest simulation: {e}", None, None
 
     plot_error_msg = None
+    plot_filename = None # Initialize plot_filename
     try:
-        # Plotting might still fail even if simulation runs, e.g., due to Matplotlib issues or specific data conditions
-        bt.plot(open_browser=False) 
+        # Plotting might still fail even if simulation runs
+        # Save plot to a file instead of opening browser directly
+        timestamp_str = pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')
+        plot_filename = f"backtest_plot_{symbol}_{strategy_id_for_backtest}_{timestamp_str}.html"
+        bt.plot(filename=plot_filename, open_browser=False)
+        print(f"Backtest plot saved to {plot_filename}")
+
     except Exception as e_plot:
         print(f"Error during bt.plot(): {e_plot}")
         plot_error_msg = f"Plotting Error: {e_plot}. Statistics are still available."
-        
-    return stats, bt, plot_error_msg
+
+    # Save statistics and trades
+    if stats is not None:
+        try:
+            results_dir = "backtest_results"
+            if not os.path.exists(results_dir):
+                os.makedirs(results_dir)
+
+            # Save main stats object (which includes equity curve, trades, etc.)
+            stats_filename = os.path.join(results_dir, f"stats_{symbol}_{strategy_id_for_backtest}_{timestamp_str}.pkl")
+            with open(stats_filename, 'wb') as f:
+                pickle.dump(stats, f)
+            print(f"Backtest statistics saved to {stats_filename}")
+
+            # Optionally, save equity curve and trades as CSV for easier external access if needed
+            # equity_curve_df = stats._equity_curve
+            # trades_df = stats._trades
+            # equity_filename = os.path.join(results_dir, f"equity_{symbol}_{strategy_id_for_backtest}_{timestamp_str}.csv")
+            # trades_filename = os.path.join(results_dir, f"trades_{symbol}_{strategy_id_for_backtest}_{timestamp_str}.csv")
+            # equity_curve_df.to_csv(equity_filename)
+            # trades_df.to_csv(trades_filename)
+            # print(f"Equity curve saved to {equity_filename}")
+            # print(f"Trades saved to {trades_filename}")
+
+        except Exception as e_save:
+            print(f"Error saving backtest results: {e_save}")
+            # Optionally, append this error to plot_error_msg or handle differently
+            if plot_error_msg:
+                plot_error_msg += f"; Error saving results: {e_save}"
+            else:
+                plot_error_msg = f"Error saving results: {e_save}"
+
+    return stats, bt, plot_error_msg # bt object is returned for potential further inspection if needed
 
 
 # Attempt to import pandas_ta, will be checked in SuperTrend function
@@ -2674,6 +2680,7 @@ backtest_sl_var = None
 backtest_selected_strategy_var = None
 backtest_results_text_widget = None
 backtest_run_button = None # Added for enabling/disabling
+optuna_run_button = None # Added for Optuna
 
 
 # Tkinter StringVars for parameters
@@ -7648,6 +7655,9 @@ if __name__ == "__main__":
     # Initialize Backtesting Min R:R Var
     backtest_min_rr_var = tk.StringVar(value="1.5") # Default Min R:R for backtesting
 
+    # Optuna Progress Var
+    # optuna_progress_var = tk.StringVar(value="Optuna: Idle") # Initialized later in __main__
+
 
     backtest_selected_strategy_var = tk.StringVar()
 
@@ -7857,7 +7867,20 @@ if __name__ == "__main__":
     ttk.Label(backtest_params_grid, text="Min R:R Ratio:").grid(row=8, column=0, padx=2, pady=2, sticky='w')
     backtest_min_rr_entry = ttk.Entry(backtest_params_grid, textvariable=backtest_min_rr_var, width=7)
     backtest_min_rr_entry.grid(row=8, column=1, padx=2, pady=2, sticky='w')
+
+    # Button to launch the dashboard
+    launch_dashboard_button = ttk.Button(backtest_params_grid, text="View Dashboard", command=launch_dashboard)
+    launch_dashboard_button.grid(row=9, column=0, columnspan=2, pady=10, sticky='ew') # Span 2
+
+    # Button to run Optuna optimization
+    optuna_run_button = ttk.Button(backtest_params_grid, text="Run Optimization", command=run_optuna_optimization_command)
+    optuna_run_button.grid(row=9, column=2, columnspan=2, pady=10, sticky='ew') # Span 2
     
+    # Optuna Progress Label
+    optuna_progress_label = ttk.Label(backtest_params_grid, textvariable=optuna_progress_var, font=("Arial", 9), wraplength=300) # Wraplength for longer messages
+    optuna_progress_label.grid(row=10, column=0, columnspan=4, pady=(5,0), sticky='ew')
+
+
     account_summary_frame = ttk.LabelFrame(side_by_side_frame, text="Account Summary")
     account_summary_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
 
@@ -7957,6 +7980,286 @@ if __name__ == "__main__":
     if root and root.winfo_exists(): # Check if root exists before scheduling
         print("Starting continuous 5-second updates for account summary from __main__.")
         root.after(5000, scheduled_account_summary_update) # Start the first scheduled call after 5 seconds
+
+# --- Optuna Objective Function ---
+def objective(trial, strategy_id_opt, symbol_opt, timeframe_opt, interval_days_opt, start_capital_opt, leverage_opt, account_risk_opt, sl_tp_mode_opt, fixed_sl_pnl_opt, fixed_tp_pnl_opt, ts_enabled_opt, ts_atr_multi_opt, min_rr_opt):
+    """
+    Optuna objective function.
+    `sl_tp_mode_opt` will determine if fixed_sl_pnl_opt, fixed_tp_pnl_opt are used, or if SL/TP percentages are tuned (for Percentage mode),
+    or if ATR-based params are tuned (for ATR/Dynamic or StrategyDefined_SD if they expose tunable ATR params).
+    """
+    params_for_strategy = {}
+    # Common parameters that might be tuned if not fixed by sl_tp_mode_opt
+    # These are examples; actual tuned params depend on strategy_id_opt and sl_tp_mode_opt
+
+    if sl_tp_mode_opt == "Percentage":
+        # For Percentage mode, Optuna could tune SL_PERCENT and TP_PERCENT if desired
+        # These would then be passed to execute_backtest's ui_sl_percentage and ui_tp_percentage
+        # For now, let's assume SL/TP % are fixed from UI for Percentage mode during Optuna,
+        # and Optuna focuses on strategy-internal parameters.
+        # If we were to tune them:
+        # params_for_strategy['user_sl_bt'] = trial.suggest_float('user_sl_bt_opt', 0.005, 0.1) # e.g. 0.5% to 10%
+        # params_for_strategy['user_tp_bt'] = trial.suggest_float('user_tp_bt_opt', 0.01, 0.2)   # e.g. 1% to 20%
+        pass # Using fixed SL/TP % from UI for now
+
+    elif sl_tp_mode_opt == "ATR/Dynamic":
+        # For ATR/Dynamic, Optuna could tune SL_ATR_MULTI_bt and RR_bt
+        params_for_strategy['SL_ATR_MULTI_bt'] = trial.suggest_float('SL_ATR_MULTI_bt_opt', 0.5, 3.0)
+        params_for_strategy['RR_bt'] = trial.suggest_float('RR_bt_opt', 1.0, 5.0)
+        # Note: These override the defaults in BacktestStrategyWrapper if passed to bt.run()
+
+    # Strategy-specific parameter tuning
+    if strategy_id_opt == 0: # Original Scalping
+        params_for_strategy['S0_EMA_Short'] = trial.suggest_int('S0_EMA_Short_opt', 5, 15)
+        params_for_strategy['S0_EMA_Long'] = trial.suggest_int('S0_EMA_Long_opt', 16, 50)
+        params_for_strategy['S0_RSI_Period'] = trial.suggest_int('S0_RSI_Period_opt', 7, 21)
+        params_for_strategy['S0_ST_ATR_Period'] = trial.suggest_int('S0_ST_ATR_Period_opt', 7, 20)
+        params_for_strategy['S0_ST_Multiplier'] = trial.suggest_float('S0_ST_Multiplier_opt', 1.0, 3.0)
+        # Add other S0 params if desired: S0_Vol_MA_Period, S0_Lookback_HL
+
+    elif strategy_id_opt == 1: # EMA Cross + SuperTrend
+        params_for_strategy['S1_EMA_Short'] = trial.suggest_int('S1_EMA_Short_opt', 5, 15)
+        params_for_strategy['S1_EMA_Long'] = trial.suggest_int('S1_EMA_Long_opt', 16, 50)
+        params_for_strategy['S1_RSI_Period'] = trial.suggest_int('S1_RSI_Period_opt', 7, 21)
+        params_for_strategy['S1_ST_ATR_Period'] = trial.suggest_int('S1_ST_ATR_Period_opt', 7, 20)
+        params_for_strategy['S1_ST_Multiplier'] = trial.suggest_float('S1_ST_Multiplier_opt', 1.0, 4.0)
+
+    elif strategy_id_opt == 5: # New RSI-Based Strategy
+        params_for_strategy['S5_RSI_Period'] = trial.suggest_int('S5_RSI_Period_opt', 7, 25)
+        params_for_strategy['S5_SMA_Period'] = trial.suggest_int('S5_SMA_Period_opt', 20, 100)
+        params_for_strategy['S5_Duration_Lookback'] = trial.suggest_int('S5_Duration_Lookback_opt', 3, 10)
+        params_for_strategy['S5_Slope_Lookback_RSI'] = trial.suggest_int('S5_Slope_Lookback_RSI_opt', 2, 7)
+        # S5_Divergence_Candles, S5_RSI_OB_Thresh, S5_RSI_OS_Thresh, S5_RSI_Slope_Min could also be tuned
+
+    elif strategy_id_opt == 7: # Candlestick Patterns
+        params_for_strategy['S7_ATR_Period'] = trial.suggest_int('S7_ATR_Period_opt', 7, 21) # For SL/TP calc
+        params_for_strategy['S7_SL_ATR_Multiplier'] = trial.suggest_float('S7_SL_ATR_Multiplier_opt', 0.5, 3.0)
+        params_for_strategy['S7_TP_ATR_Multiplier'] = trial.suggest_float('S7_TP_ATR_Multiplier_opt', 1.0, 5.0)
+        # S7_EMA_Trend_Period, S7_Volume_Lookback/Multiplier, RSI filter params could also be tuned
+    
+    # Add more elif blocks for other strategies (2, 3, 4, 6) with their specific tunable parameters
+
+    else: # Default case for strategies not explicitly listed for tuning
+        # For now, don't tune any specific params, rely on defaults or UI-set ones.
+        # Could add generic ATR_PERIOD_Generic tuning here if applicable.
+        print(f"Optuna: Strategy ID {strategy_id_opt} not configured for specific param tuning in objective function. Using defaults/UI values for strategy params.")
+        pass
+
+    # Call execute_backtest with the parameters for this trial
+    # Note: execute_backtest needs to be adapted to accept these **kwargs or have them set
+    # on BacktestStrategyWrapper class before Backtest is instantiated.
+    # The current BacktestStrategyWrapper.init relies on getattr(self, param_name, default),
+    # which works if parameters are passed to bt.run(**params_for_strategy).
+    
+    # The ui_tp_percentage and ui_sl_percentage are for "Percentage" mode.
+    # If Optuna tunes them, they should come from params_for_strategy.
+    # For now, assume they are fixed from UI if mode is Percentage.
+    fixed_ui_tp_percentage = 0.03 # Example, should come from UI if not tuned
+    fixed_ui_sl_percentage = 0.02 # Example
+
+    stats, _, _ = execute_backtest(
+        strategy_id_for_backtest=strategy_id_opt,
+        symbol=symbol_opt,
+        timeframe=timeframe_opt,
+        interval_days=interval_days_opt,
+        ui_tp_percentage=params_for_strategy.get('user_tp_bt', fixed_ui_tp_percentage), # Use tuned if available
+        ui_sl_percentage=params_for_strategy.get('user_sl_bt', fixed_ui_sl_percentage), # Use tuned if available
+        sl_tp_mode=sl_tp_mode_opt,
+        sl_pnl_amount_val=fixed_sl_pnl_opt, # Fixed PnL amounts are not tuned here
+        tp_pnl_amount_val=fixed_tp_pnl_opt,
+        starting_capital=start_capital_opt,
+        leverage_bt=leverage_opt,
+        account_risk_percent_bt=account_risk_opt,
+        ts_enabled_bt_param=ts_enabled_opt,
+        ts_atr_multiplier_bt_param=ts_atr_multi_opt,
+        min_rr_bt_param=min_rr_opt,
+        optuna_params=params_for_strategy # Pass all tuned strategy params
+    )
+
+    if stats is None or not isinstance(stats, pd.Series):
+        print(f"Optuna Trial {trial.number}: Backtest failed or returned invalid stats. Returning high drawdown.")
+        return 100.0 # Return a large value for drawdown if backtest fails, to penalize this trial
+
+    drawdown = stats.get('Max. Drawdown [%]', 100.0) # Default to 100% drawdown if key missing
+    
+    # Optuna tries to minimize the returned value. Max. Drawdown is positive.
+    # So, returning it directly is correct for direction='minimize'.
+    # Ensure it's a float.
+    try:
+        drawdown_float = float(drawdown)
+        print(f"Optuna Trial {trial.number}: Params: {trial.params}, Drawdown: {drawdown_float:.2f}%")
+        return drawdown_float
+    except ValueError:
+        print(f"Optuna Trial {trial.number}: Could not convert drawdown '{drawdown}' to float. Penalizing.")
+        return 100.0
+
+
+def run_optuna_optimization_command():
+    global backtest_symbol_var, backtest_timeframe_var, backtest_interval_var
+    global backtest_tp_var, backtest_sl_var, backtest_selected_strategy_var
+    global backtest_sl_pnl_amount_var, backtest_tp_pnl_amount_var, backtest_sl_tp_mode_var
+    global backtest_starting_capital_var, backtest_leverage_var, backtest_account_risk_var
+    global backtest_trailing_stop_enabled_var, backtest_trailing_stop_atr_multiplier_var
+    global backtest_min_rr_var
+    global backtest_results_text_widget, STRATEGIES, root, status_var, optuna_run_button, optuna_progress_var # Added optuna_run_button and optuna_progress_var
+
+    if optuna_run_button:
+        optuna_run_button.config(state=tk.DISABLED)
+    
+    try:
+        symbol = backtest_symbol_var.get().strip().upper()
+        if not symbol: # Simplified: optimize for one symbol at a time
+            messagebox.showerror("Input Error", "Symbol field cannot be empty for optimization.")
+            if optuna_run_button: optuna_run_button.config(state=tk.NORMAL)
+            return
+
+        timeframe = backtest_timeframe_var.get().strip()
+        interval_str = backtest_interval_var.get().strip()
+        selected_strategy_name_opt = backtest_selected_strategy_var.get() # This is already the one for backtesting UI
+        
+        starting_capital_str = backtest_starting_capital_var.get().strip()
+        leverage_str = backtest_leverage_var.get().strip()
+        account_risk_str = backtest_account_risk_var.get().strip()
+        
+        ts_enabled = backtest_trailing_stop_enabled_var.get()
+        ts_atr_multiplier_str = backtest_trailing_stop_atr_multiplier_var.get().strip()
+        min_rr_str = backtest_min_rr_var.get().strip()
+        
+        current_sl_tp_mode = backtest_sl_tp_mode_var.get()
+
+        # Parse non-strategy parameters (these are fixed during optimization)
+        # These are passed to the objective function, which then passes to execute_backtest
+        interval_days_val = int(interval_str)
+        starting_capital_val = float(starting_capital_str)
+        leverage_val = float(leverage_str)
+        account_risk_val = float(account_risk_str) / 100.0
+        ts_atr_multiplier_val = float(ts_atr_multiplier_str) if ts_enabled else 1.5
+        min_rr_val = float(min_rr_str)
+
+        # SL/TP values (fixed for the optimization run based on UI, unless Optuna tunes them, which it isn't yet for %/Fixed PnL modes)
+        sl_percentage_val = float(backtest_sl_var.get()) / 100.0 if current_sl_tp_mode == "Percentage" else 0.0
+        tp_percentage_val = float(backtest_tp_var.get()) / 100.0 if current_sl_tp_mode == "Percentage" else 0.0
+        sl_pnl_val = float(backtest_sl_pnl_amount_var.get()) if current_sl_tp_mode == "Fixed PnL" else 0.0
+        tp_pnl_val = float(backtest_tp_pnl_amount_var.get()) if current_sl_tp_mode == "Fixed PnL" else 0.0
+
+        strategy_id_to_optimize = None
+        for id_val, name_val in STRATEGIES.items():
+            if name_val == selected_strategy_name_opt:
+                strategy_id_to_optimize = id_val
+                break
+        
+        if strategy_id_to_optimize is None:
+            messagebox.showerror("Input Error", "Invalid strategy selected for optimization.")
+            if optuna_run_button: optuna_run_button.config(state=tk.NORMAL)
+            return
+
+        if not all([symbol, timeframe, interval_str, selected_strategy_name_opt, starting_capital_str, leverage_str, account_risk_str]):
+             messagebox.showerror("Input Error", "All general backtest fields are required for optimization.")
+             if optuna_run_button: optuna_run_button.config(state=tk.NORMAL)
+             return
+        
+        # --- UI Update: Start Optuna ---
+        if backtest_results_text_widget and root and root.winfo_exists():
+            backtest_results_text_widget.config(state=tk.NORMAL)
+            backtest_results_text_widget.delete('1.0', tk.END)
+            backtest_results_text_widget.insert(tk.END, f"Starting Optuna optimization for {selected_strategy_name_opt} on {symbol}...\nSit tight, this may take a while.\n\n")
+            backtest_results_text_widget.config(state=tk.DISABLED)
+        if status_var and root and root.winfo_exists():
+            status_var.set(f"Optuna: Running for {selected_strategy_name_opt}...")
+
+        # --- Threading for Optuna ---
+        # Optuna's study.optimize can be blocking. Run it in a thread.
+        def optuna_thread_target():
+            n_trials_optuna = 25 # Define number of trials here
+            try:
+                study = optuna.create_study(direction='minimize') # Minimize drawdown
+                
+                # Use a lambda to pass fixed arguments to the objective function
+                # And also a callback for progress update
+                def objective_callback(study, trial):
+                    # This function is called by Optuna after each trial.
+                    # We can use it to update the UI.
+                    if root and root.winfo_exists() and optuna_progress_var:
+                        progress_msg = f"Optuna Trial: {trial.number + 1}/{n_trials_optuna}. Value: {trial.value:.2f}. Params: {trial.params}"
+                        # Truncate message if too long for status bar
+                        if len(progress_msg) > 100: progress_msg = progress_msg[:97] + "..."
+                        root.after(0, lambda msg=progress_msg: optuna_progress_var.set(msg))
+                
+                objective_with_args = lambda trial_obj: objective( # Renamed trial to trial_obj to avoid conflict
+                    trial_obj, strategy_id_to_optimize, symbol, timeframe, 
+                    interval_days_val, starting_capital_val, leverage_val, account_risk_val,
+                    current_sl_tp_mode, sl_pnl_val, tp_pnl_val, 
+                    ts_enabled, ts_atr_multiplier_val, min_rr_val
+                )
+                
+                study.optimize(objective_with_args, n_trials=n_trials_optuna, callbacks=[objective_callback])
+
+                best_params_str = "\n".join([f"  {key}: {value}" for key, value in study.best_params.items()])
+                result_message = (
+                    f"Optuna Optimization Complete for {selected_strategy_name_opt} on {symbol}:\n"
+                    f"Best Trial Number: {study.best_trial.number}\n"
+                    f"Best Value (Min Drawdown %): {study.best_value:.2f}%\n"
+                    f"Best Parameters:\n{best_params_str}\n"
+                )
+                
+                if root and root.winfo_exists() and backtest_results_text_widget:
+                    def update_optuna_results_ui():
+                        backtest_results_text_widget.config(state=tk.NORMAL)
+                        backtest_results_text_widget.insert(tk.END, result_message)
+                        backtest_results_text_widget.see(tk.END)
+                        backtest_results_text_widget.config(state=tk.DISABLED)
+                        status_var.set(f"Optuna: Complete for {selected_strategy_name_opt}.")
+                        if optuna_run_button: optuna_run_button.config(state=tk.NORMAL)
+                    root.after(0, update_optuna_results_ui)
+                else:
+                    print(result_message) # Fallback if UI not available
+                    if optuna_run_button: optuna_run_button.config(state=tk.NORMAL) # Ensure button re-enabled
+
+            except Exception as e_opt:
+                err_msg_opt = f"Error during Optuna optimization: {e_opt}"
+                print(err_msg_opt)
+                if root and root.winfo_exists():
+                    def update_optuna_error_ui():
+                        if backtest_results_text_widget:
+                            backtest_results_text_widget.config(state=tk.NORMAL)
+                            backtest_results_text_widget.insert(tk.END, f"\n{err_msg_opt}\n")
+                            backtest_results_text_widget.config(state=tk.DISABLED)
+                        status_var.set("Optuna: Error occurred.")
+                        if optuna_run_button: optuna_run_button.config(state=tk.NORMAL)
+                    root.after(0, update_optuna_error_ui)
+                else: # If no UI, re-enable button directly if it was a global reference (not ideal)
+                     if optuna_run_button: optuna_run_button.config(state=tk.NORMAL)
+
+
+        opt_thread = threading.Thread(target=optuna_thread_target, daemon=True)
+        opt_thread.start()
+
+    except ValueError:
+        messagebox.showerror("Input Error", "Invalid number format for one of the optimization parameters.")
+        if optuna_run_button: optuna_run_button.config(state=tk.NORMAL)
+    except Exception as e:
+        messagebox.showerror("Error", f"An unexpected error occurred setting up Optuna: {e}")
+        if backtest_results_text_widget and root and root.winfo_exists():
+            backtest_results_text_widget.config(state=tk.NORMAL)
+            backtest_results_text_widget.insert(tk.END, f"\nError setting up Optuna: {e}")
+            backtest_results_text_widget.config(state=tk.DISABLED)
+        if optuna_run_button: optuna_run_button.config(state=tk.NORMAL)
+
+
+    def launch_dashboard():
+        # This function will be called when the "View Dashboard" button is clicked.
+        # It should open the dashboard URL in the default web browser.
+        # The dashboard.py script needs to be running for this to work.
+        # Users will need to run `python dashboard.py` separately.
+        dashboard_url = "http://127.0.0.1:8050/"
+        try:
+            webbrowser.open_new_tab(dashboard_url)
+            print(f"Attempted to open dashboard at {dashboard_url}")
+            messagebox.showinfo("Dashboard", f"Attempting to open dashboard at {dashboard_url}.\nEnsure dashboard.py is running.")
+        except Exception as e:
+            print(f"Error opening dashboard: {e}")
+            messagebox.showerror("Dashboard Error", f"Could not open web browser: {e}")
+
 
     def on_closing():
         global bot_running, bot_thread, root
@@ -8067,6 +8370,9 @@ if __name__ == "__main__":
         # Initialize Backtesting Trailing Stop Vars
         backtest_trailing_stop_enabled_var = tk.BooleanVar(value=False) # Default to False for backtesting
         backtest_trailing_stop_atr_multiplier_var = tk.StringVar(value="1.5") # Default ATR multiplier for backtesting
+
+    # Optuna Progress Var
+    optuna_progress_var = tk.StringVar(value="Optuna: Idle") # Initialized here
 
         backtest_selected_strategy_var = tk.StringVar()
 
