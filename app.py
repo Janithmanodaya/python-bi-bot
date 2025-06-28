@@ -1,11 +1,21 @@
 import tkinter as tk
 from tkinter import ttk, messagebox, scrolledtext
+import streamlit as st
+import sys # Import sys for command-line arguments
 import threading
 from time import sleep
 from binance.um_futures import UMFutures
 from binance.error import ClientError
 import ta
 import pandas as pd
+
+strategies = [
+    {"name": "Moving Average Crossover", "parameters": ["SMA1", "SMA2", "ATR"]},
+    {"name": "RSI Divergence", "parameters": ["RSI Period", "Lookback Window", "ATR"]},
+    {"name": "ATR Trailing Stop", "parameters": ["ATR Period", "ATR Multiplier"]},
+    {"name": "Bollinger Bands", "parameters": ["Period", "Standard Deviations", "ATR"]},
+    {"name": "MACD", "parameters": ["Fast Period", "Slow Period", "Signal Period", "ATR"]},
+]
 
 from backtesting import Backtest, Strategy
 # from backtesting.lib import crossover
@@ -529,6 +539,10 @@ def strategy_candlestick_patterns_signal(symbol: str) -> dict:
     
     current_price = kl_df['Close'].iloc[-1]
     price_precision = get_price_precision(symbol)
+
+    # Define S7 volume spike parameters (should match the optimization hooks section)
+    s7_volume_lookback_period = 20
+    s7_volume_spike_multiplier = 2.0
 
     # Volume spike check using S7 specific parameters
     volume_spike_detected = check_volume_spike(kl_df, lookback_period=s7_volume_lookback_period, multiplier=s7_volume_spike_multiplier)
@@ -7181,3 +7195,373 @@ if __name__ == "__main__":
 
 # Note: Many variables in this script are intentionally unused for clarity, debugging, or future use.
 # If you want to further reduce warnings, consider using linters or IDE settings to ignore unused-variable warnings.
+
+# --- Streamlit UI Function ---
+def run_streamlit_ui():
+    st.title("Trading Strategy Parameters")
+
+    strategy_names = [s["name"] for s in strategies]
+    selected_strategy_name = st.selectbox("Select a Strategy:", strategy_names)
+
+    if selected_strategy_name:
+        selected_strategy_info = next((s for s in strategies if s["name"] == selected_strategy_name), None)
+        if selected_strategy_info:
+            st.subheader(f"Parameters for {selected_strategy_name}:")
+            if selected_strategy_info["parameters"]:
+                for param in selected_strategy_info["parameters"]:
+                    st.text(param)
+            else:
+                st.text("No parameters defined for this strategy.")
+
+if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == 'streamlit':
+        run_streamlit_ui()
+    else:
+        root = tk.Tk(); root.title("Binance Scalping Bot")
+
+        # --- Scrollable Main Container Setup ---
+        # Create a main frame that will hold the canvas and scrollbars
+        scrollable_canvas_frame = ttk.Frame(root)
+        scrollable_canvas_frame.pack(fill=tk.BOTH, expand=True)
+
+        canvas = tk.Canvas(scrollable_canvas_frame)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        v_scrollbar = ttk.Scrollbar(scrollable_canvas_frame, orient=tk.VERTICAL, command=canvas.yview)
+        v_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        h_scrollbar = ttk.Scrollbar(root, orient=tk.HORIZONTAL, command=canvas.xview) # Place h_scrollbar in root to be below canvas
+        h_scrollbar.pack(fill=tk.X, side=tk.BOTTOM)
+
+
+        canvas.configure(yscrollcommand=v_scrollbar.set, xscrollcommand=h_scrollbar.set)
+        
+        # This frame will contain all the application's content and be placed inside the canvas
+        main_content_frame = ttk.Frame(canvas)
+        canvas.create_window((0, 0), window=main_content_frame, anchor="nw")
+
+        def on_main_content_configure(event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def on_canvas_configure(event):
+            # Adjust the width of the main_content_frame to the canvas width for horizontal scrolling
+            canvas.itemconfig(main_content_window_id, width=event.width)
+
+
+        main_content_frame.bind("<Configure>", on_main_content_configure)
+        # Store the window ID for later use in on_canvas_configure
+        main_content_window_id = canvas.create_window((0,0), window=main_content_frame, anchor='nw')
+        canvas.bind('<Configure>', on_canvas_configure)
+
+
+        # --- End Scrollable Main Container Setup ---
+
+
+        current_price_var = None # Will be initialized after root Tk()
+
+        status_var = tk.StringVar(value="Welcome! Select environment."); current_env_var = tk.StringVar(value=current_env); balance_var = tk.StringVar(value="N/A")
+        activity_status_var = tk.StringVar(value="Bot Idle") # Initialize activity status
+        selected_strategy_var = tk.IntVar(value=ACTIVE_STRATEGY_ID)
+
+        # Account Summary StringVars
+        account_summary_balance_var = tk.StringVar(value="N/A") # Dedicated for account summary section
+        last_7_days_profit_var = tk.StringVar(value="N/A")
+        overall_profit_loss_var = tk.StringVar(value="N/A")
+        total_unrealized_pnl_var = tk.StringVar(value="N/A")
+
+        # Tkinter Vars for Trailing Stop (Live Trading) - Initialized here
+        trailing_stop_enabled_var = tk.BooleanVar(value=TRAILING_STOP_ENABLED)
+        trailing_stop_atr_multiplier_var = tk.StringVar(value=str(TRAILING_STOP_ATR_MULTIPLIER))
+
+        # Backtesting StringVars
+        backtest_symbol_var = tk.StringVar(value="XRPUSDT")
+        backtest_timeframe_var = tk.StringVar(value="5m")
+        backtest_interval_var = tk.StringVar(value="30")
+        # SL/TP Percentage Vars for Backtesting (still needed for "Percentage" mode)
+        backtest_tp_var = tk.StringVar(value="3.0") # Represents percentage if mode is Percentage
+        backtest_sl_var = tk.StringVar(value="2.0") # Represents percentage if mode is Percentage
+        # New PnL and Mode Vars for Backtesting
+        backtest_sl_pnl_amount_var = tk.StringVar(value="10") # Default $10 SL PnL
+        backtest_tp_pnl_amount_var = tk.StringVar(value="20") # Default $20 TP PnL
+        backtest_sl_tp_mode_var = tk.StringVar(value="ATR/Dynamic") # Default mode
+        backtest_starting_capital_var = tk.StringVar(value="10000") # Default starting capital
+        backtest_leverage_var = tk.StringVar(value="1") # New StringVar for backtest leverage, default 1x
+        backtest_account_risk_var = tk.StringVar(value="1.0") # Default 1.0% account risk
+        
+        # Initialize Backtesting Trailing Stop Vars
+        backtest_trailing_stop_enabled_var = tk.BooleanVar(value=False) # Default to False for backtesting
+        backtest_trailing_stop_atr_multiplier_var = tk.StringVar(value="1.5") # Default ATR multiplier for backtesting
+
+        backtest_selected_strategy_var = tk.StringVar()
+
+        # --- All main UI elements will be children of main_content_frame ---
+        controls_frame = ttk.LabelFrame(main_content_frame, text="Controls"); controls_frame.pack(padx=10, pady=(5,0), fill="x") # Changed parent
+        env_frame = ttk.Frame(controls_frame); env_frame.pack(pady=2, fill="x")
+        ttk.Label(env_frame, text="Env:").pack(side=tk.LEFT, padx=(5,2))
+        testnet_radio = ttk.Radiobutton(env_frame, text="Testnet", variable=current_env_var, value="testnet", command=toggle_environment); testnet_radio.pack(side=tk.LEFT, padx=2)
+        mainnet_radio = ttk.Radiobutton(env_frame, text="Mainnet", variable=current_env_var, value="mainnet", command=toggle_environment); mainnet_radio.pack(side=tk.LEFT, padx=2)
+
+        # Parameter Inputs Frame
+        params_input_frame = ttk.LabelFrame(controls_frame, text="Trading Parameters")
+        params_input_frame.pack(fill="x", padx=5, pady=5)
+
+        # Row 0: Account Risk %, SL/TP Mode
+        ttk.Label(params_input_frame, text="Account Risk %:").grid(row=0, column=0, padx=2, pady=2, sticky='w')
+        account_risk_percent_var = tk.StringVar(value=str(ACCOUNT_RISK_PERCENT * 100))
+        account_risk_percent_entry = ttk.Entry(params_input_frame, textvariable=account_risk_percent_var, width=10)
+        account_risk_percent_entry.grid(row=0, column=1, padx=2, pady=2, sticky='w')
+
+        ttk.Label(params_input_frame, text="SL/TP Mode:").grid(row=0, column=2, padx=2, pady=2, sticky='w')
+        sl_tp_modes = ["Percentage", "ATR/Dynamic", "Fixed PnL", "StrategyDefined_SD"] # Added new mode
+        sl_tp_mode_var = tk.StringVar(value=SL_TP_MODE) 
+        sl_tp_mode_combobox = ttk.Combobox(params_input_frame, textvariable=sl_tp_mode_var, values=sl_tp_modes, width=17, state="readonly") # Increased width
+        sl_tp_mode_combobox.grid(row=0, column=3, padx=2, pady=2, sticky='w')
+
+        # Row 1: SL Percent, TP Percent (for Percentage mode)
+        ttk.Label(params_input_frame, text="Stop Loss %:").grid(row=1, column=0, padx=2, pady=2, sticky='w')
+        sl_percent_var = tk.StringVar(value=str(SL_PERCENT * 100))
+        sl_percent_entry = ttk.Entry(params_input_frame, textvariable=sl_percent_var, width=10)
+        sl_percent_entry.grid(row=1, column=1, padx=2, pady=2, sticky='w')
+
+        ttk.Label(params_input_frame, text="Take Profit %:").grid(row=1, column=2, padx=2, pady=2, sticky='w')
+        tp_percent_var = tk.StringVar(value=str(TP_PERCENT * 100))
+        tp_percent_entry = ttk.Entry(params_input_frame, textvariable=tp_percent_var, width=10)
+        tp_percent_entry.grid(row=1, column=3, padx=2, pady=2, sticky='w')
+
+        # Row 2: SL PnL Amount ($), TP PnL Amount ($) (for Fixed PnL mode)
+        ttk.Label(params_input_frame, text="SL PnL Amount ($):").grid(row=2, column=0, padx=2, pady=2, sticky='w')
+        sl_pnl_amount_var = tk.StringVar(value=str(SL_PNL_AMOUNT)) 
+        sl_pnl_amount_entry = ttk.Entry(params_input_frame, textvariable=sl_pnl_amount_var, width=10)
+        sl_pnl_amount_entry.grid(row=2, column=1, padx=2, pady=2, sticky='w')
+
+        ttk.Label(params_input_frame, text="TP PnL Amount ($):").grid(row=2, column=2, padx=2, pady=2, sticky='w')
+        tp_pnl_amount_var = tk.StringVar(value=str(TP_PNL_AMOUNT)) 
+        tp_pnl_amount_entry = ttk.Entry(params_input_frame, textvariable=tp_pnl_amount_var, width=10)
+        tp_pnl_amount_entry.grid(row=2, column=3, padx=2, pady=2, sticky='w')
+        
+        # Row 3: Leverage, Max Open Pos
+        ttk.Label(params_input_frame, text="Leverage:").grid(row=3, column=0, padx=2, pady=2, sticky='w')
+        leverage_var = tk.StringVar(value=str(leverage))
+        leverage_entry = ttk.Entry(params_input_frame, textvariable=leverage_var, width=10)
+        leverage_entry.grid(row=3, column=1, padx=2, pady=2, sticky='w')
+
+        ttk.Label(params_input_frame, text="Max Open Pos:").grid(row=3, column=2, padx=2, pady=2, sticky='w')
+        qty_concurrent_positions_var = tk.StringVar(value=str(qty_concurrent_positions))
+        qty_concurrent_positions_entry = ttk.Entry(params_input_frame, textvariable=qty_concurrent_positions_var, width=10)
+        qty_concurrent_positions_entry.grid(row=3, column=3, padx=2, pady=2, sticky='w')
+
+        # Row 4: Lookback, Margin Type
+        ttk.Label(params_input_frame, text="Lookback (Breakout):").grid(row=4, column=0, padx=2, pady=2, sticky='w')
+        local_high_low_lookback_var = tk.StringVar(value=str(LOCAL_HIGH_LOW_LOOKBACK_PERIOD))
+        local_high_low_lookback_entry = ttk.Entry(params_input_frame, textvariable=local_high_low_lookback_var, width=10)
+        local_high_low_lookback_entry.grid(row=4, column=1, padx=2, pady=2, sticky='w')
+
+        ttk.Label(params_input_frame, text="Margin Type:").grid(row=4, column=2, padx=2, pady=2, sticky='w')
+        margin_type_var = tk.StringVar(value=margin_type_setting)
+        margin_type_frame = ttk.Frame(params_input_frame) 
+        margin_type_frame.grid(row=4, column=3, padx=2, pady=2, sticky='w')
+        margin_type_isolated_radio = ttk.Radiobutton(margin_type_frame, text="ISOLATED", variable=margin_type_var, value="ISOLATED")
+        margin_type_isolated_radio.pack(side=tk.LEFT)
+        margin_type_cross_radio = ttk.Radiobutton(margin_type_frame, text="CROSS", variable=margin_type_var, value="CROSS")
+        margin_type_cross_radio.pack(side=tk.LEFT, padx=(5,0))
+
+
+        # Row 5: Target Symbols Entry
+        ttk.Label(params_input_frame, text="Target Symbols (CSV):").grid(row=5, column=0, padx=2, pady=2, sticky='w')
+        target_symbols_var = tk.StringVar(value=",".join(TARGET_SYMBOLS))
+        target_symbols_entry = ttk.Entry(params_input_frame, textvariable=target_symbols_var, width=40) 
+        target_symbols_entry.grid(row=5, column=1, columnspan=3, padx=2, pady=2, sticky='we')
+
+        # Row 6: Trailing Stop Configuration
+        trailing_stop_enabled_checkbox = ttk.Checkbutton(params_input_frame, text="Enable Trailing Stop", variable=trailing_stop_enabled_var)
+        trailing_stop_enabled_checkbox.grid(row=6, column=0, padx=2, pady=2, sticky='w')
+
+        ttk.Label(params_input_frame, text="Trailing ATR Multiplier:").grid(row=6, column=2, padx=2, pady=2, sticky='w')
+        trailing_stop_atr_multiplier_entry = ttk.Entry(params_input_frame, textvariable=trailing_stop_atr_multiplier_var, width=10)
+        trailing_stop_atr_multiplier_entry.grid(row=6, column=3, padx=2, pady=2, sticky='w')
+
+        params_widgets = [
+            account_risk_percent_entry, sl_tp_mode_combobox,
+            sl_percent_entry, tp_percent_entry,
+            sl_pnl_amount_entry, tp_pnl_amount_entry,
+            leverage_entry, qty_concurrent_positions_entry,
+            local_high_low_lookback_entry, margin_type_isolated_radio, margin_type_cross_radio,
+            target_symbols_entry,
+            trailing_stop_enabled_checkbox, trailing_stop_atr_multiplier_entry # Added new widgets
+        ]
+        params_input_frame.columnconfigure(1, weight=1) 
+        params_input_frame.columnconfigure(3, weight=1) 
+
+        strategy_frame = ttk.LabelFrame(controls_frame, text="Strategy Selection")
+        strategy_frame.pack(fill="x", padx=5, pady=5)
+        
+        if strategy_radio_buttons: 
+            params_widgets = [widget for widget in params_widgets if widget not in strategy_radio_buttons]
+            strategy_radio_buttons.clear() 
+
+        for strategy_id, strategy_name in STRATEGIES.items():
+            var = tk.BooleanVar(value=(strategy_id == selected_strategy_var.get()))
+            strategy_checkbox_vars[strategy_id] = var
+            cb = ttk.Checkbutton(strategy_frame, 
+                                 text=strategy_name, 
+                                 variable=var, 
+                                 command=lambda sid=strategy_id: handle_strategy_checkbox_select(sid))
+            cb.pack(anchor='w', padx=5)
+            params_widgets.append(cb) 
+        
+        api_key_info_label = ttk.Label(controls_frame, text="API Keys from keys.py"); api_key_info_label.pack(pady=2)
+        timeframe_label = ttk.Label(controls_frame, text="Timeframe: 5m (fixed)"); timeframe_label.pack(pady=2)
+
+        buttons_frame = ttk.Frame(controls_frame); buttons_frame.pack(pady=2)
+        start_button = ttk.Button(buttons_frame, text="Start Bot", command=start_bot); start_button.pack(side=tk.LEFT, padx=5)
+        stop_button = ttk.Button(buttons_frame, text="Stop Bot", command=stop_bot, state=tk.DISABLED); stop_button.pack(side=tk.LEFT, padx=5)
+        
+        data_frame = ttk.LabelFrame(main_content_frame, text="Live Data & History"); data_frame.pack(padx=10, pady=5, fill="both", expand=True) # Changed parent
+
+        side_by_side_frame = ttk.Frame(data_frame)
+        side_by_side_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        backtesting_frame = ttk.LabelFrame(side_by_side_frame, text="Backtesting Engine")
+        backtesting_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 5), expand=False) 
+
+        backtest_params_grid = ttk.Frame(backtesting_frame)
+        backtest_params_grid.pack(fill="x", padx=5, pady=5)
+
+        ttk.Label(backtest_params_grid, text="Symbol:").grid(row=0, column=0, padx=2, pady=2, sticky='w')
+        backtest_symbol_entry = ttk.Entry(backtest_params_grid, textvariable=backtest_symbol_var, width=12)
+        backtest_symbol_entry.grid(row=0, column=1, padx=2, pady=2, sticky='w')
+
+        ttk.Label(backtest_params_grid, text="Timeframe:").grid(row=0, column=2, padx=2, pady=2, sticky='w')
+        backtest_timeframe_entry = ttk.Entry(backtest_params_grid, textvariable=backtest_timeframe_var, width=7)
+        backtest_timeframe_entry.grid(row=0, column=3, padx=2, pady=2, sticky='w')
+
+        ttk.Label(backtest_params_grid, text="Interval (days):").grid(row=1, column=0, padx=2, pady=2, sticky='w')
+        backtest_interval_entry = ttk.Entry(backtest_params_grid, textvariable=backtest_interval_var, width=7)
+        backtest_interval_entry.grid(row=1, column=1, padx=2, pady=2, sticky='w')
+        
+        ttk.Label(backtest_params_grid, text="SL/TP Mode:").grid(row=1, column=2, padx=2, pady=2, sticky='w')
+        backtest_sl_tp_mode_combobox = ttk.Combobox(backtest_params_grid, textvariable=backtest_sl_tp_mode_var, values=sl_tp_modes, width=17, state="readonly") # Increased width
+        backtest_sl_tp_mode_combobox.grid(row=1, column=3, padx=2, pady=2, sticky='w')
+
+        ttk.Label(backtest_params_grid, text="Stop Loss %:").grid(row=2, column=0, padx=2, pady=2, sticky='w')
+        backtest_sl_entry = ttk.Entry(backtest_params_grid, textvariable=backtest_sl_var, width=7) 
+        backtest_sl_entry.grid(row=2, column=1, padx=2, pady=2, sticky='w')
+
+        ttk.Label(backtest_params_grid, text="Take Profit %:").grid(row=2, column=2, padx=2, pady=2, sticky='w')
+        backtest_tp_entry = ttk.Entry(backtest_params_grid, textvariable=backtest_tp_var, width=7) 
+        backtest_tp_entry.grid(row=2, column=3, padx=2, pady=2, sticky='w')
+
+        ttk.Label(backtest_params_grid, text="SL PnL Amt ($):").grid(row=3, column=0, padx=2, pady=2, sticky='w')
+        backtest_sl_pnl_amount_entry = ttk.Entry(backtest_params_grid, textvariable=backtest_sl_pnl_amount_var, width=7)
+        backtest_sl_pnl_amount_entry.grid(row=3, column=1, padx=2, pady=2, sticky='w')
+
+        ttk.Label(backtest_params_grid, text="TP PnL Amt ($):").grid(row=3, column=2, padx=2, pady=2, sticky='w')
+        backtest_tp_pnl_amount_entry = ttk.Entry(backtest_params_grid, textvariable=backtest_tp_pnl_amount_var, width=7)
+        backtest_tp_pnl_amount_entry.grid(row=3, column=3, padx=2, pady=2, sticky='w')
+
+        ttk.Label(backtest_params_grid, text="Start Capital ($):").grid(row=4, column=0, padx=2, pady=2, sticky='w')
+        backtest_starting_capital_entry = ttk.Entry(backtest_params_grid, textvariable=backtest_starting_capital_var, width=12)
+        backtest_starting_capital_entry.grid(row=4, column=1, padx=2, pady=2, sticky='w')
+
+        ttk.Label(backtest_params_grid, text="Leverage (e.g., 10):").grid(row=5, column=0, padx=2, pady=2, sticky='w')
+        backtest_leverage_entry = ttk.Entry(backtest_params_grid, textvariable=backtest_leverage_var, width=7)
+        backtest_leverage_entry.grid(row=5, column=1, padx=2, pady=2, sticky='w')
+
+        ttk.Label(backtest_params_grid, text="Account Risk %:").grid(row=5, column=2, padx=2, pady=2, sticky='w') # New Row 5, Col 2
+        backtest_account_risk_entry = ttk.Entry(backtest_params_grid, textvariable=backtest_account_risk_var, width=7) # New Entry
+        backtest_account_risk_entry.grid(row=5, column=3, padx=2, pady=2, sticky='w') # New Entry position
+        
+        ttk.Label(backtest_params_grid, text="Backtest Strategy:").grid(row=6, column=0, padx=2, pady=2, sticky='w')
+        backtest_strategy_combobox = ttk.Combobox(backtest_params_grid, textvariable=backtest_selected_strategy_var, values=list(STRATEGIES.values()), width=25, state="readonly")
+        if STRATEGIES: backtest_strategy_combobox.current(ACTIVE_STRATEGY_ID if ACTIVE_STRATEGY_ID in STRATEGIES else 0) 
+        backtest_strategy_combobox.grid(row=6, column=1, columnspan=3, padx=2, pady=2, sticky='w')
+
+        # Row 7: Backtesting Trailing Stop Configuration
+        backtest_ts_enabled_checkbox = ttk.Checkbutton(backtest_params_grid, text="Enable Trailing Stop", variable=backtest_trailing_stop_enabled_var)
+        backtest_ts_enabled_checkbox.grid(row=7, column=0, columnspan=2, padx=2, pady=2, sticky='w')
+
+        ttk.Label(backtest_params_grid, text="Trailing ATR Multiplier:").grid(row=7, column=2, padx=2, pady=2, sticky='w')
+        backtest_ts_atr_multiplier_entry = ttk.Entry(backtest_params_grid, textvariable=backtest_trailing_stop_atr_multiplier_var, width=7)
+        backtest_ts_atr_multiplier_entry.grid(row=7, column=3, padx=2, pady=2, sticky='w')
+        
+        account_summary_frame = ttk.LabelFrame(side_by_side_frame, text="Account Summary")
+        account_summary_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+
+        ttk.Label(account_summary_frame, text="Account Balance:").grid(row=0, column=0, sticky="w", padx=5, pady=2)
+        ttk.Label(account_summary_frame, textvariable=account_summary_balance_var).grid(row=0, column=1, sticky="w", padx=5, pady=2)
+
+        ttk.Label(account_summary_frame, text="Last 7 Days Profit:").grid(row=1, column=0, sticky="w", padx=5, pady=2)
+        ttk.Label(account_summary_frame, textvariable=last_7_days_profit_var).grid(row=1, column=1, sticky="w", padx=5, pady=2)
+
+        ttk.Label(account_summary_frame, text="Overall Profit/Loss:").grid(row=2, column=0, sticky="w", padx=5, pady=2)
+        ttk.Label(account_summary_frame, textvariable=overall_profit_loss_var).grid(row=2, column=1, sticky="w", padx=5, pady=2)
+
+        ttk.Label(account_summary_frame, text="Total Unrealized PNL:").grid(row=3, column=0, sticky="w", padx=5, pady=2)
+        ttk.Label(account_summary_frame, textvariable=total_unrealized_pnl_var).grid(row=3, column=1, sticky="w", padx=5, pady=2)
+        
+        activity_display_frame = ttk.Frame(data_frame)
+        activity_display_frame.pack(pady=(2,2), padx=5, fill="x")
+        ttk.Label(activity_display_frame, text="Current Activity:").pack(side=tk.LEFT, padx=(0,5))
+        ttk.Label(activity_display_frame, textvariable=activity_status_var).pack(side=tk.LEFT)
+
+        price_display_frame = ttk.Frame(data_frame)
+        price_display_frame.pack(pady=(2,2), padx=5, fill="x")
+        current_price_var = tk.StringVar(value="Scanning: N/A - Price: N/A") 
+        price_label = ttk.Label(price_display_frame, textvariable=current_price_var)
+        price_label.pack(side=tk.LEFT)
+
+        balance_display_frame = ttk.Frame(data_frame); balance_display_frame.pack(pady=(5,2), padx=5, fill="x")
+        ttk.Label(balance_display_frame, text="Account Balance:").pack(side=tk.LEFT, padx=(0,5))
+        ttk.Label(balance_display_frame, textvariable=balance_var).pack(side=tk.LEFT)
+        
+        positions_display_frame = ttk.LabelFrame(data_frame, text="Current Open Positions"); positions_display_frame.pack(pady=2, padx=5, fill="both", expand=True)
+        positions_text_widget = scrolledtext.ScrolledText(positions_display_frame, height=6, width=70, state=tk.DISABLED, wrap=tk.WORD); positions_text_widget.pack(pady=5, padx=5, fill="both", expand=True)
+        history_display_frame = ttk.LabelFrame(data_frame, text="Recent Trade History (BTC, ETH)"); history_display_frame.pack(pady=(2,5), padx=5, fill="both", expand=True)
+        history_text_widget = scrolledtext.ScrolledText(history_display_frame, height=10, width=70, state=tk.DISABLED, wrap=tk.WORD); history_text_widget.pack(pady=5, padx=5, fill="both", expand=True)
+        
+        conditions_frame = ttk.LabelFrame(data_frame, text="Signal Conditions")
+        conditions_frame.pack(pady=5, padx=5, fill="both", expand=True)
+        conditions_text_widget = scrolledtext.ScrolledText(conditions_frame, height=8, width=70, state=tk.DISABLED, wrap=tk.WORD)
+        conditions_text_widget.pack(pady=5, padx=5, fill="both", expand=True)
+
+        backtest_results_frame = ttk.LabelFrame(backtesting_frame, text="Backtest Results") 
+        backtest_results_frame.pack(pady=(2,5), padx=5, fill="both", expand=True) 
+        backtest_results_text_widget = scrolledtext.ScrolledText(backtest_results_frame, height=10, width=70, state=tk.DISABLED, wrap=tk.WORD)
+        backtest_results_text_widget.pack(pady=5, padx=5, fill="both", expand=True)
+
+        backtest_run_button = ttk.Button(backtesting_frame, text="Run Backtest", command=run_backtest_command) 
+        backtest_run_button.pack(pady=5)
+
+        # Status label is now a child of root, packed after scrollable_canvas_frame and h_scrollbar
+        status_label = ttk.Label(root, textvariable=status_var, relief=tk.SUNKEN, anchor=tk.W)
+        status_label.pack(padx=10, pady=(0,5), fill="x", side=tk.BOTTOM) # Keep it at the very bottom
+        root.update_idletasks(); status_label.config(wraplength=root.winfo_width() - 20)
+        root.bind("<Configure>", lambda event, widget=status_label: widget.config(wraplength=root.winfo_width() - 20))
+        
+        print("Attempting initial client initialization on startup...")
+        initial_conditions_msg = "Bot Idle - Ready"
+        if not reinitialize_client() or client is None:
+            start_button.config(state=tk.DISABLED); status_var.set("Client not initialized. Start disabled."); activity_status_var.set("Bot Idle - Client Error")
+            initial_conditions_msg = "Client not initialized."
+        else:
+            status_var.set(f"Client initialized for {current_env}. Bot ready.")
+            activity_status_var.set("Bot Idle - Ready")
+        
+        update_conditions_display_content("System", None, initial_conditions_msg) # Initial display
+
+        # Initial data load for Account Summary
+        update_account_summary_data() 
+
+        # Start the continuous 5-second update cycle for Account Summary
+        if root and root.winfo_exists(): # Check if root exists before scheduling
+            print("Starting continuous 5-second updates for account summary from __main__.")
+            root.after(5000, scheduled_account_summary_update) # Start the first scheduled call after 5 seconds
+
+        def on_closing():
+            global bot_running, bot_thread, root
+            if bot_running:
+                if messagebox.askokcancel("Quit", "Bot is running. Quit anyway?"):
+                    bot_running = False
+                    if bot_thread and bot_thread.is_alive(): bot_thread.join(timeout=2)
+                    root.destroy()
+            else: root.destroy()
+        root.protocol("WM_DELETE_WINDOW", on_closing); root.minsize(450, 500); root.mainloop()
