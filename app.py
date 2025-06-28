@@ -159,9 +159,9 @@ strategies = [
         {"name": "Enable Two Candle Patterns", "id": "s7_two_candle_patterns", "enabled": True, "parameters": []},
         {"name": "Enable Three+ Candle Patterns", "id": "s7_three_plus_candle_patterns", "enabled": True, "parameters": []},
         # Filters (these were removed from live code, but can be re-added as configurable conditions)
-        {"name": "EMA Trend Filter", "id": "s7_ema_trend_filter", "enabled": True, "parameters": []}, # Uses S7_EMA_Trend_Period
-        {"name": "Volume Spike Filter", "id": "s7_volume_filter", "enabled": True, "parameters": []}, # Uses S7_Volume_Lookback, S7_Volume_Multiplier
-        {"name": "RSI Entry Filter", "id": "s7_rsi_entry_filter", "enabled": True, "parameters": []}, # Uses S7_RSI_Period_Filter, S7_RSI_OB/OS_Filter
+        # {"name": "EMA Trend Filter", "id": "s7_ema_trend_filter", "enabled": True, "parameters": []}, # Uses S7_EMA_Trend_Period
+        # {"name": "Volume Spike Filter", "id": "s7_volume_filter", "enabled": True, "parameters": []}, # Uses S7_Volume_Lookback, S7_Volume_Multiplier
+        # {"name": "RSI Entry Filter", "id": "s7_rsi_entry_filter", "enabled": True, "parameters": []}, # Uses S7_RSI_Period_Filter, S7_RSI_OB/OS_Filter
         {"name": "Enable RSI Fallback Logic", "id": "s7_rsi_fallback", "enabled": True, "parameters": []} # Uses S7_Fallback params
      ]}
 ]
@@ -649,34 +649,16 @@ def is_spinning_top(metrics: dict, body_to_range_ratio_threshold=0.3, min_wick_t
     return small_body and long_wicks
 
 # --- Strategy 7: Candlestick Patterns ---
-def strategy_candlestick_patterns_signal(symbol: str, condition_configs=None) -> dict: # Added condition_configs
-    if condition_configs is None:
-        condition_configs = { # Default to all enabled for standalone testing
-            "s7_single_candle_patterns": True, "s7_two_candle_patterns": True, 
-            "s7_three_plus_candle_patterns": True, "s7_ema_trend_filter": True,
-            "s7_volume_filter": True, "s7_rsi_entry_filter": True, "s7_rsi_fallback": True
-        }
-        print(f"Warning: strategy_candlestick_patterns_signal for {symbol} called without condition_configs. Using defaults.")
-
+def strategy_candlestick_patterns_signal(symbol: str) -> dict:
     base_return = {
         'signal': 'none', 'sl_price': None, 'tp_price': None, 'error': None,
         'account_risk_percent': 0.005, 
-        'all_conditions_status': {
-            's7_single_candle_patterns': {'detected_pattern': 'None', 'is_enabled': condition_configs.get("s7_single_candle_patterns", True)},
-            's7_two_candle_patterns': {'detected_pattern': 'None', 'is_enabled': condition_configs.get("s7_two_candle_patterns", True)},
-            's7_three_plus_candle_patterns': {'detected_pattern': 'None', 'is_enabled': condition_configs.get("s7_three_plus_candle_patterns", True)},
-            's7_ema_trend_filter': {'evaluated_to': False, 'is_enabled': condition_configs.get("s7_ema_trend_filter", True)},
-            's7_volume_filter': {'evaluated_to': False, 'is_enabled': condition_configs.get("s7_volume_filter", True)},
-            's7_rsi_entry_filter': {'evaluated_to': False, 'is_enabled': condition_configs.get("s7_rsi_entry_filter", True)},
-            's7_rsi_fallback': {'triggered': False, 'is_enabled': condition_configs.get("s7_rsi_fallback", True)},
-            'overall_pattern_detected': 'None', # To store the final detected pattern name after group checks
-            'filters_passed_for_pattern': False, # True if all enabled filters passed for a detected pattern
-        },
+        'all_conditions_status': {},
         'signal_candle_timestamp': None
     }
     s7_log_prefix = f"[S7 {symbol}]"
 
-    min_klines_needed = 205
+    min_klines_needed = 205 
     kl_df = klines(symbol)
     if kl_df is None or len(kl_df) < min_klines_needed:
         base_return['error'] = f"S7: Insufficient klines (need {min_klines_needed}, got {len(kl_df) if kl_df is not None else 0})"
@@ -724,39 +706,30 @@ def strategy_candlestick_patterns_signal(symbol: str, condition_configs=None) ->
     df_last5 = kl_df.iloc[-5:] if len(kl_df) >= 5 else None
 
 
-    detected_pattern_name = "None" # This will be the final pattern chosen
-    pattern_side = "none"
-    sl_ref_price = None
+    detected_pattern_name = "None"
+    pattern_side = "none" 
+    sl_ref_price = None 
 
-    # Check pattern groups based on condition_configs
-    if condition_configs.get("s7_single_candle_patterns", True):
-        if is_hammer(m_curr): detected_pattern_name, pattern_side, sl_ref_price = "Hammer", "up", m_curr['l']
-        elif is_hanging_man(m_curr): detected_pattern_name, pattern_side, sl_ref_price = "Hanging Man", "down", m_curr['h']
-        elif is_inverted_hammer(m_curr): detected_pattern_name, pattern_side, sl_ref_price = "Inverted Hammer", "up", m_curr['l']
-        elif is_shooting_star(m_curr): detected_pattern_name, pattern_side, sl_ref_price = "Shooting Star", "down", m_curr['h']
-        if detected_pattern_name != "None": base_return['all_conditions_status']['s7_single_candle_patterns']['detected_pattern'] = detected_pattern_name
+    if m_prev2 and m_prev and is_morning_star(m_prev2, m_prev, m_curr): detected_pattern_name, pattern_side, sl_ref_price = "Morning Star", "up", min(m_prev2['l'], m_prev['l'], m_curr['l'])
+    elif m_prev2 and m_prev and is_evening_star(m_prev2, m_prev, m_curr): detected_pattern_name, pattern_side, sl_ref_price = "Evening Star", "down", max(m_prev2['h'], m_prev['h'], m_curr['h'])
+    elif m_prev and is_bullish_engulfing(m_prev, m_curr): detected_pattern_name, pattern_side, sl_ref_price = "Bullish Engulfing", "up", m_curr['l'] 
+    elif m_prev and is_bearish_engulfing(m_prev, m_curr): detected_pattern_name, pattern_side, sl_ref_price = "Bearish Engulfing", "down", m_curr['h'] 
+    elif is_hammer(m_curr): detected_pattern_name, pattern_side, sl_ref_price = "Hammer", "up", m_curr['l']
+    elif is_hanging_man(m_curr): detected_pattern_name, pattern_side, sl_ref_price = "Hanging Man", "down", m_curr['h']
+    elif is_inverted_hammer(m_curr): detected_pattern_name, pattern_side, sl_ref_price = "Inverted Hammer", "up", m_curr['l']
+    elif is_shooting_star(m_curr): detected_pattern_name, pattern_side, sl_ref_price = "Shooting Star", "down", m_curr['h']
+    elif m_prev and is_piercing_line(m_prev, m_curr): detected_pattern_name, pattern_side, sl_ref_price = "Piercing Line", "up", m_curr['l']
+    elif m_prev and is_dark_cloud_cover(m_prev, m_curr): detected_pattern_name, pattern_side, sl_ref_price = "Dark Cloud Cover", "down", m_curr['h']
+    elif m_prev2 and m_prev and is_three_white_soldiers(m_prev2, m_prev, m_curr): detected_pattern_name, pattern_side, sl_ref_price = "Three White Soldiers", "up", m_prev2['l']
+    elif m_prev2 and m_prev and is_three_black_crows(m_prev2, m_prev, m_curr): detected_pattern_name, pattern_side, sl_ref_price = "Three Black Crows", "down", m_prev2['h']
+    elif df_last5 is not None and is_rising_three_methods(df_last5): detected_pattern_name, pattern_side, sl_ref_price = "Rising Three Methods", "up", df_last5.iloc[0]['Low']
+    elif df_last5 is not None and is_falling_three_methods(df_last5): detected_pattern_name, pattern_side, sl_ref_price = "Falling Three Methods", "down", df_last5.iloc[0]['High']
+
+    base_return['all_conditions_status']['detected_pattern'] = detected_pattern_name
+    base_return['all_conditions_status']['current_price_for_ema_check'] = f"{current_price:.{price_precision}f}"
+    base_return['all_conditions_status']['last_ema200'] = f"{last_ema200:.{price_precision}f}" if not pd.isna(last_ema200) else "N/A"
     
-    if detected_pattern_name == "None" and condition_configs.get("s7_two_candle_patterns", True): # Only check if no single pattern found yet
-        if m_prev and is_bullish_engulfing(m_prev, m_curr): detected_pattern_name, pattern_side, sl_ref_price = "Bullish Engulfing", "up", m_curr['l']
-        elif m_prev and is_bearish_engulfing(m_prev, m_curr): detected_pattern_name, pattern_side, sl_ref_price = "Bearish Engulfing", "down", m_curr['h']
-        elif m_prev and is_piercing_line(m_prev, m_curr): detected_pattern_name, pattern_side, sl_ref_price = "Piercing Line", "up", m_curr['l']
-        elif m_prev and is_dark_cloud_cover(m_prev, m_curr): detected_pattern_name, pattern_side, sl_ref_price = "Dark Cloud Cover", "down", m_curr['h']
-        if detected_pattern_name != "None": base_return['all_conditions_status']['s7_two_candle_patterns']['detected_pattern'] = detected_pattern_name
-
-    if detected_pattern_name == "None" and condition_configs.get("s7_three_plus_candle_patterns", True):
-        if m_prev2 and m_prev and is_morning_star(m_prev2, m_prev, m_curr): detected_pattern_name, pattern_side, sl_ref_price = "Morning Star", "up", min(m_prev2['l'], m_prev['l'], m_curr['l'])
-        elif m_prev2 and m_prev and is_evening_star(m_prev2, m_prev, m_curr): detected_pattern_name, pattern_side, sl_ref_price = "Evening Star", "down", max(m_prev2['h'], m_prev['h'], m_curr['h'])
-        elif m_prev2 and m_prev and is_three_white_soldiers(m_prev2, m_prev, m_curr): detected_pattern_name, pattern_side, sl_ref_price = "Three White Soldiers", "up", m_prev2['l']
-        elif m_prev2 and m_prev and is_three_black_crows(m_prev2, m_prev, m_curr): detected_pattern_name, pattern_side, sl_ref_price = "Three Black Crows", "down", m_prev2['h']
-        elif df_last5 is not None and is_rising_three_methods(df_last5): detected_pattern_name, pattern_side, sl_ref_price = "Rising Three Methods", "up", df_last5.iloc[0]['Low']
-        elif df_last5 is not None and is_falling_three_methods(df_last5): detected_pattern_name, pattern_side, sl_ref_price = "Falling Three Methods", "down", df_last5.iloc[0]['High']
-        if detected_pattern_name != "None": base_return['all_conditions_status']['s7_three_plus_candle_patterns']['detected_pattern'] = detected_pattern_name
-    
-    base_return['all_conditions_status']['overall_pattern_detected'] = detected_pattern_name
-    base_return['all_conditions_status']['current_price_for_ema_check'] = f"{current_price:.{price_precision}f}" # Keep for info
-    base_return['all_conditions_status']['last_ema200'] = f"{last_ema200:.{price_precision}f}" if not pd.isna(last_ema200) else "N/A" # Keep for info
-
-    # EMA200 Slope Calculation for Trend Filter (always calculate, use if filter enabled)
+    # EMA200 Slope Calculation for Trend Filter
     prev_ema200 = None
     ema200_slope_up = False
     ema200_slope_down = False
@@ -772,167 +745,204 @@ def strategy_candlestick_patterns_signal(symbol: str, condition_configs=None) ->
     base_return['all_conditions_status']['ema200_slope_up'] = ema200_slope_up
     base_return['all_conditions_status']['ema200_slope_down'] = ema200_slope_down
 
-    # --- Strategy 7: Candlestick Patterns - Parameters ---
-    # These will be sourced from global settings or strategy-specific UI settings if available
-    # For now, using the defaults from the original function for parameters not in `strategies` list
-    s7_ema_trend_period = current_strategy_active_params.get('S7_EMA_Trend_Period', 200)
-    s7_atr_period = current_strategy_active_params.get('S7_ATR_Period_SLTP', 14)
-    s7_sl_atr_multiplier = current_strategy_active_params.get('S7_SL_ATR_Multiplier', 1.5)
-    s7_tp_atr_multiplier = current_strategy_active_params.get('S7_TP_ATR_Multiplier', 2.0)
-    s7_rr_for_dynamic_calc = s7_tp_atr_multiplier / s7_sl_atr_multiplier if s7_sl_atr_multiplier > 0 else 1.5
+    # --- Strategy 7: Candlestick Patterns - Parameter Optimization Hooks ---
+    # These parameters are candidates for walk-forward optimization.
     
-    # Parameters for filters (if they were to be configurable beyond just enabled/disabled)
-    s7_volume_lookback = current_strategy_active_params.get('S7_Volume_Lookback', 20) # Example if it were a param
-    s7_volume_multiplier = current_strategy_active_params.get('S7_Volume_Multiplier', 2.0) # Example
-    s7_rsi_period_filter = current_strategy_active_params.get('S7_RSI_Period_Filter', 14) # Example
-    s7_rsi_overbought_filter = current_strategy_active_params.get('S7_RSI_Overbought_Filter', 75) # Example
-    s7_rsi_oversold_filter = current_strategy_active_params.get('S7_RSI_Oversold_Filter', 25) # Example
-    
-    # Fallback parameters
-    s7_fallback_rsi_period = current_strategy_active_params.get('S7_Fallback_RSI_Period', 14)
-    s7_fallback_rsi_os = current_strategy_active_params.get('S7_Fallback_RSI_OS', 30)
-    s7_fallback_rsi_ob = current_strategy_active_params.get('S7_Fallback_RSI_OB', 70)
-    s7_fallback_atr_period_sltp = current_strategy_active_params.get('S7_Fallback_ATR_Period_SLTP', 14)
-    s7_fallback_sl_atr_multi = current_strategy_active_params.get('S7_Fallback_SL_ATR_Multi', 1.5)
-    s7_fallback_tp_atr_multi = current_strategy_active_params.get('S7_Fallback_TP_ATR_Multi', 1.5)
+    # EMA Trend Filter Parameters
+    s7_ema_trend_period = 200 # Used by ta.trend.EMAIndicator call earlier
+
+    # ATR/Dynamic SL/TP Parameters
+    s7_atr_period = 14         # ATR period for SL/TP calculation
+    s7_sl_atr_multiplier = 1.5 # SL = s7_sl_atr_multiplier * ATR
+    s7_tp_atr_multiplier = 2.0 # TP = s7_tp_atr_multiplier * ATR (from entry)
+    # Risk/Reward ratio for calculate_dynamic_sl_tp is derived from SL and TP ATR multipliers
+    s7_rr_for_dynamic_calc = s7_tp_atr_multiplier / s7_sl_atr_multiplier if s7_sl_atr_multiplier > 0 else 1.5 
+
+    # Volume Filter Parameters (used by check_volume_spike called earlier)
+    # s7_volume_lookback_period = 20 # Filter removed
+    # s7_volume_spike_multiplier = 2.0 # Filter removed
+    # Note: check_volume_spike is called with these defaults. For optimization, 
+    # these might be passed into strategy_candlestick_patterns_signal or changed globally.
 
 
-    if pattern_side != "none": # A pattern was detected by one of the enabled groups
+    if pattern_side != "none":
+        # Log detected pattern before filters
         print(f"[S7 {symbol}] Pattern detected: {detected_pattern_name} ({pattern_side}) at price {current_price}")
-        base_return['all_conditions_status']['overall_pattern_detected'] = detected_pattern_name # Update this field
 
-        # --- Apply Filters if Enabled ---
-        all_enabled_filters_passed = True
-
-        # EMA Trend Filter
-        if condition_configs.get("s7_ema_trend_filter", True):
-            ema_filter_passed = False
-            if pattern_side == "up" and current_price > last_ema200 and ema200_slope_up:
-                ema_filter_passed = True
-            elif pattern_side == "down" and current_price < last_ema200 and ema200_slope_down:
-                ema_filter_passed = True
-            base_return['all_conditions_status']['s7_ema_trend_filter']['evaluated_to'] = ema_filter_passed
-            if not ema_filter_passed: all_enabled_filters_passed = False
-        else: # Filter disabled
-            base_return['all_conditions_status']['s7_ema_trend_filter']['evaluated_to'] = "Disabled"
-
-        # Volume Spike Filter
-        if condition_configs.get("s7_volume_filter", True):
-            # Volume spike check (volume_spike_detected) was done earlier
-            base_return['all_conditions_status']['s7_volume_filter']['evaluated_to'] = volume_spike_detected
-            if not volume_spike_detected: all_enabled_filters_passed = False
-        else: # Filter disabled
-             base_return['all_conditions_status']['s7_volume_filter']['evaluated_to'] = "Disabled"
-
-        # RSI Entry Filter
-        if condition_configs.get("s7_rsi_entry_filter", True) and all_enabled_filters_passed: # Only check if prior enabled filters passed
-            rsi_filter_passed_for_entry = True # Assume true until check
-            try:
-                rsi_series_s7_entry = ta.momentum.RSIIndicator(close=kl_df['Close'], window=s7_rsi_period_filter).rsi()
-                if rsi_series_s7_entry is None or rsi_series_s7_entry.empty or pd.isna(rsi_series_s7_entry.iloc[-1]):
-                    base_return['error'] = (base_return['error'] or "") + "; S7 RSI entry filter calc failed or NaN"
-                    rsi_filter_passed_for_entry = False
-                else:
-                    last_rsi_s7_entry = rsi_series_s7_entry.iloc[-1]
-                    if pattern_side == "up" and last_rsi_s7_entry > s7_rsi_overbought_filter:
-                        rsi_filter_passed_for_entry = False
-                    elif pattern_side == "down" and last_rsi_s7_entry < s7_rsi_oversold_filter:
-                        rsi_filter_passed_for_entry = False
-                base_return['all_conditions_status']['s7_rsi_entry_filter']['evaluated_to'] = rsi_filter_passed_for_entry
-                if not rsi_filter_passed_for_entry: all_enabled_filters_passed = False
-            except Exception as e_rsi_entry:
-                base_return['error'] = (base_return['error'] or "") + f"; S7 RSI entry filter exception: {str(e_rsi_entry)}"
-                base_return['all_conditions_status']['s7_rsi_entry_filter']['evaluated_to'] = False
-                all_enabled_filters_passed = False
-        elif not condition_configs.get("s7_rsi_entry_filter", True): # RSI filter disabled
-             base_return['all_conditions_status']['s7_rsi_entry_filter']['evaluated_to'] = "Disabled"
+        # --- FILTERS REMOVED ---
+        # # EMA Trend Filter
+        # ema_filter_passed = False
+        # if pattern_side == "up":
+        #     if current_price > last_ema200 and ema200_slope_up:
+        #         ema_filter_passed = True
+        #     base_return['all_conditions_status']['ema_trend_filter_long_eval'] = f"Price ({current_price:.{price_precision}f}) > EMA200 ({last_ema200:.{price_precision}f}) AND Slope Up ({ema200_slope_up})"
+        # elif pattern_side == "down":
+        #     if current_price < last_ema200 and ema200_slope_down:
+        #         ema_filter_passed = True
+        #     base_return['all_conditions_status']['ema_trend_filter_short_eval'] = f"Price ({current_price:.{price_precision}f}) < EMA200 ({last_ema200:.{price_precision}f}) AND Slope Down ({ema200_slope_down})"
+        # base_return['all_conditions_status']['ema_filter_passed'] = ema_filter_passed
         
-        base_return['all_conditions_status']['filters_passed_for_pattern'] = all_enabled_filters_passed
+        # # Volume Filter (using check_volume_spike output)
+        # volume_filter_passed = volume_spike_detected 
+        # base_return['all_conditions_status']['volume_spike_filter_passed'] = volume_filter_passed
+        # base_return['all_conditions_status']['original_volume_spike_detected'] = volume_spike_detected
 
-        if all_enabled_filters_passed:
-            entry_price = current_price
-            print(f"{s7_log_prefix} All enabled filters PASSED for {detected_pattern_name} ({pattern_side}). Attempting ATR SL/TP.")
-            dynamic_sl_tp_result = calculate_dynamic_sl_tp(
-                symbol=symbol, entry_price=entry_price, side=pattern_side,
-                atr_period=s7_atr_period, rr=s7_rr_for_dynamic_calc, atr_multiplier=s7_sl_atr_multiplier
-            )
-            if dynamic_sl_tp_result['error']:
-                rejection_reason_sltp = f"ATR SL/TP calc failed for {detected_pattern_name}: {dynamic_sl_tp_result['error']}"
-                base_return['error'] = (base_return['error'] or "") + f"; S7: {rejection_reason_sltp}"
-                print(f"{s7_log_prefix} REJECTED (SL/TP CALC): {rejection_reason_sltp}")
-                base_return['signal'] = 'none'
-            elif dynamic_sl_tp_result['sl_price'] is not None and dynamic_sl_tp_result['tp_price'] is not None:
-                base_return['signal'] = pattern_side
-                base_return['sl_price'] = dynamic_sl_tp_result['sl_price']
-                base_return['tp_price'] = dynamic_sl_tp_result['tp_price']
-                print(f"{s7_log_prefix} ATR SL/TP successful for {detected_pattern_name}: SL={base_return['sl_price']}, TP={base_return['tp_price']}")
-            else:
-                rejection_reason_sltp = f"ATR SL/TP calc for {detected_pattern_name} resulted in None SL/TP without explicit error."
-                base_return['error'] = (base_return['error'] or "") + f"; S7: {rejection_reason_sltp}"
-                print(f"{s7_log_prefix} REJECTED (SL/TP CALC NONE): {rejection_reason_sltp}")
-                base_return['signal'] = 'none'
-        else:
-            print(f"{s7_log_prefix} Pattern {detected_pattern_name} detected, but one or more enabled filters failed. No trade.")
-            base_return['signal'] = 'none'
-            if not base_return['error']: base_return['error'] = f"S7: Pattern {detected_pattern_name} filters failed."
+        # # RSI Entry Filter Parameters
+        # s7_rsi_period = 14                 
+        # s7_rsi_overbought_threshold = 75   
+        # s7_rsi_oversold_threshold = 25     
+        # # --- End of Parameter Optimization Hooks for Strategy 7 ---
+
+        # rsi_filter_passed = True 
+        # base_return['all_conditions_status']['rsi_entry_filter_passed'] = "Not Evaluated (Filter Removed)"
+        # --- END OF FILTERS REMOVED ---
+
+        # Directly proceed to SL/TP if pattern is found, as filters are removed.
+        # if ema_filter_passed and volume_filter_passed: # This condition is now effectively always true for pattern trades
+            # try:
+            #     rsi_series_s7_filter = ta.momentum.RSIIndicator(close=kl_df['Close'], window=s7_rsi_period).rsi()
+            #     if rsi_series_s7_filter is None or rsi_series_s7_filter.empty or pd.isna(rsi_series_s7_filter.iloc[-1]):
+            #         base_return['error'] = (base_return['error'] or "") + "; S7 RSI filter calc failed or NaN (Filter Removed)"
+            #         # rsi_filter_passed = False # Filter removed
+            #     else:
+            #         last_rsi_s7 = rsi_series_s7_filter.iloc[-1]
+            #         base_return['all_conditions_status']['rsi_for_filter'] = f"{last_rsi_s7:.2f} (Filter Removed)"
+            #         # RSI checks removed
+            # except Exception as e_rsi_filt:
+            #     base_return['error'] = (base_return['error'] or "") + f"; S7 RSI filter exception: {str(e_rsi_filt)} (Filter Removed)"
+                # rsi_filter_passed = False # Filter removed
             
-    # Fallback Logic (if no pattern signal and fallback is enabled)
-    if base_return['signal'] == 'none' and detected_pattern_name == "None" and condition_configs.get("s7_rsi_fallback", True):
-        print(f"[S7 {symbol}] No candlestick pattern. Checking RSI fallback (enabled)...")
-        base_return['all_conditions_status']['s7_rsi_fallback']['triggered'] = False # Default
-        try:
-            rsi_series_fallback = ta.momentum.RSIIndicator(close=kl_df['Close'], window=s7_fallback_rsi_period).rsi()
-            if rsi_series_fallback is None or rsi_series_fallback.empty or pd.isna(rsi_series_fallback.iloc[-1]):
-                print(f"[S7 {symbol}] RSI calculation failed for fallback.")
-                base_return['error'] = (base_return['error'] or "") + "; S7 Fallback RSI calc failed."
-            else:
-                last_rsi_fallback = rsi_series_fallback.iloc[-1]
-                print(f"[S7 {symbol}] Last RSI for fallback: {last_rsi_fallback:.2f}")
-                rsi_fallback_signal_side = "none"
-                
-                if last_rsi_fallback < s7_fallback_rsi_os: rsi_fallback_signal_side = "up"
-                elif last_rsi_fallback > s7_fallback_rsi_ob: rsi_fallback_signal_side = "down"
-                
-                if rsi_fallback_signal_side != "none":
-                    base_return['all_conditions_status']['s7_rsi_fallback']['triggered'] = True
-                    base_return['all_conditions_status']['overall_pattern_detected'] = f"RSI Fallback ({rsi_fallback_signal_side})"
-                    
-                    entry_price_rsi_fb = current_price 
-                    fallback_rr = s7_fallback_tp_atr_multi / s7_fallback_sl_atr_multi if s7_fallback_sl_atr_multi > 0 else 1.0
-                    
-                    print(f"{s7_log_prefix} RSI Fallback: Attempting ATR SL/TP. SL_ATR_Multi: {s7_fallback_sl_atr_multi}, RR for Calc: {fallback_rr:.2f}")
-                    dynamic_sl_tp_rsi_fb = calculate_dynamic_sl_tp(
-                        symbol, entry_price_rsi_fb, rsi_fallback_signal_side,
-                        atr_period=s7_fallback_atr_period_sltp, rr=fallback_rr, atr_multiplier=s7_fallback_sl_atr_multi
-                    )
-                    if dynamic_sl_tp_rsi_fb['error']:
-                        base_return['error'] = (base_return['error'] or "") + f"; S7 Fallback: {dynamic_sl_tp_rsi_fb['error']}"
-                    elif dynamic_sl_tp_rsi_fb['sl_price'] is not None and dynamic_sl_tp_rsi_fb['tp_price'] is not None:
-                        base_return['signal'] = rsi_fallback_signal_side
-                        base_return['sl_price'] = dynamic_sl_tp_rsi_fb['sl_price']
-                        base_return['tp_price'] = dynamic_sl_tp_rsi_fb['tp_price']
-                        print(f"[S7 {symbol}] SIGNAL (RSI Fallback): SL={base_return['sl_price']}, TP={base_return['tp_price']}")
-                    else: # None SL/TP without explicit error
-                        base_return['error'] = (base_return['error'] or "") + "; S7 Fallback ATR SL/TP resulted in None values."
-        except Exception as e_rsi_fb:
-            print(f"{s7_log_prefix} Error during RSI fallback logic: {e_rsi_fb}")
-            base_return['error'] = (base_return['error'] or "") + f"; S7 Fallback Error: {e_rsi_fb}"
-    elif base_return['signal'] == 'none' and detected_pattern_name == "None" and not condition_configs.get("s7_rsi_fallback", True):
-         print(f"[S7 {symbol}] No pattern and RSI Fallback is disabled. No signal.")
-         if not base_return['error']: base_return['error'] = "S7: No pattern and Fallback disabled."
+            # base_return['all_conditions_status']['rsi_entry_filter_passed'] = rsi_filter_passed # Will be true or based on calc error
 
+            # if rsi_filter_passed: # This is now effectively always true if pattern found
+                # --- S7 Confluence Factor Hook (Live Strategy) ---
+                # Future enhancement: Add checks for confluence factors here.
+                # For example:
+                # - Check if the pattern occurs near a significant support/resistance level.
+                # - Check for presence of order blocks confirming the pattern's direction.
+                # - Check for fibonacci retracement levels aligning with the entry.
+                # These would require additional helper functions for S/R, order block detection, etc.
+                # confluence_passed = check_s7_confluence_factors(kl_df, pattern_side, entry_price)
+                # if not confluence_passed:
+                #     base_return['error'] = (base_return['error'] or "") + "; S7 Confluence factors not met."
+                #     base_return['signal'] = 'none'
+                #     # Potentially update all_conditions_status with confluence check result
+                # else:
+                #     Proceed with SL/TP calculation...
+                # --- End S7 Confluence Factor Hook ---
 
-    # Final error message if no signal and no specific error was set before
-    if base_return['signal'] == 'none' and not base_return['error']:
-         base_return['error'] = "S7: No trade signal based on current configuration and market conditions."
+        # Since filters are removed, if a pattern is detected, proceed to SL/TP calculation.
+        entry_price = current_price
+        # Use calculate_dynamic_sl_tp for SL/TP
+        print(f"{s7_log_prefix} Attempting ATR-based SL/TP for {detected_pattern_name} ({pattern_side}). SL_ATR_Multi: {s7_sl_atr_multiplier}, RR for Calc: {s7_rr_for_dynamic_calc:.2f} (derived from TP_ATR_Multi: {s7_tp_atr_multiplier})")
+        dynamic_sl_tp_result = calculate_dynamic_sl_tp(
+            symbol=symbol,
+            entry_price=entry_price,
+            side=pattern_side, # 'up' or 'down'
+            atr_period=s7_atr_period,
+            rr=s7_rr_for_dynamic_calc,
+            atr_multiplier=s7_sl_atr_multiplier # This is the SL ATR multiplier
+        )
+
+        if dynamic_sl_tp_result['error']:
+            rejection_reason_sltp = f"ATR SL/TP calc failed for {detected_pattern_name}: {dynamic_sl_tp_result['error']}"
+            base_return['error'] = f"S7: {rejection_reason_sltp}"
+            print(f"{s7_log_prefix} REJECTED (SL/TP CALC): {rejection_reason_sltp}") # Clarified rejection source
+            base_return['signal'] = 'none'
+        elif dynamic_sl_tp_result['sl_price'] is not None and dynamic_sl_tp_result['tp_price'] is not None:
+            base_return['signal'] = pattern_side
+            base_return['sl_price'] = dynamic_sl_tp_result['sl_price']
+            base_return['tp_price'] = dynamic_sl_tp_result['tp_price']
+            print(f"{s7_log_prefix} ATR SL/TP successful for {detected_pattern_name}: SL={base_return['sl_price']}, TP={base_return['tp_price']}")
+        else:
+            rejection_reason_sltp = f"ATR SL/TP calc for {detected_pattern_name} resulted in None SL/TP without explicit error."
+            base_return['error'] = f"S7: {rejection_reason_sltp}"
+            print(f"{s7_log_prefix} REJECTED (SL/TP CALC NONE): {rejection_reason_sltp}") # Clarified rejection source
+            base_return['signal'] = 'none'
+        # else: # This 'else' corresponded to filters failing, which are now removed.
+            # if detected_pattern_name != "None": 
+            #     # This block would have logged filter failures. Since filters are removed, this is not needed.
+            #     pass
+            # base_return['signal'] = 'none' 
+            
+    # Standard "no pattern" message if applicable
+    if base_return['signal'] == 'none' and detected_pattern_name == "None" and not base_return['error'] : # Ensure no other error already set
+         base_return['error'] = "S7: No specific candlestick pattern detected." # This is informational if no pattern found
     
-    # Log final decision
+    # Logging for errors that are not specific rejections
+    if base_return['error'] and \
+       not base_return['error'].startswith("S7: ATR SL/TP calc failed") and \
+       not base_return['error'].startswith(f"S7: {detected_pattern_name} filters failed") and \
+       base_return['error'] != "S7: No specific candlestick pattern detected.":
+        print(f"{s7_log_prefix} Setup/Data Error or other non-rejection error: {base_return['error']}")
+
     if base_return['signal'] != 'none':
-        print(f"[S7 {symbol}] FINAL SIGNAL: {base_return['all_conditions_status']['overall_pattern_detected']} @ {current_price} (SL: {base_return['sl_price']}, TP: {base_return['tp_price']})")
-    elif base_return['error']:
-         print(f"[S7 {symbol}] NO SIGNAL. Reason: {base_return['error']}")
-    else:
-         print(f"[S7 {symbol}] NO SIGNAL. Conditions not met or configuration resulted in no action.")
+        print(f"[S7 {symbol}] SIGNAL: {detected_pattern_name} @ {current_price} (SL: {base_return['sl_price']}, TP: {base_return['tp_price']})")
+    elif base_return['signal'] == 'none' and detected_pattern_name == "None" and not base_return['error']: # Check if no pattern detected and no prior error
+        # --- RSI Fallback Logic ---
+        # This part remains unchanged for now, but its SL/TP will also use calculate_dynamic_sl_tp
+        print(f"[S7 {symbol}] No candlestick pattern. Checking RSI fallback...")
+        try:
+            rsi_series = ta.momentum.RSIIndicator(close=kl_df['Close'], window=14).rsi()
+            if rsi_series is None or rsi_series.empty or rsi_series.isnull().all():
+                print(f"[S7 {symbol}] RSI calculation failed for fallback.")
+            else:
+                last_rsi = rsi_series.iloc[-1]
+                if pd.isna(last_rsi):
+                    print(f"[S7 {symbol}] RSI is NaN for fallback.")
+                else:
+                    print(f"[S7 {symbol}] Last RSI for fallback: {last_rsi:.2f}")
+                    rsi_fallback_signal_side = "none"
+                    rsi_fallback_pattern_name = "None"
+
+                    if last_rsi < 30:
+                        rsi_fallback_signal_side = "up"
+                        rsi_fallback_pattern_name = "RSI Oversold Fallback"
+                        print(f"[S7 {symbol}] RSI Fallback: Potential LONG signal (RSI < 30)")
+                    elif last_rsi > 70:
+                        rsi_fallback_signal_side = "down"
+                        rsi_fallback_pattern_name = "RSI Overbought Fallback"
+                        print(f"[S7 {symbol}] RSI Fallback: Potential SHORT signal (RSI > 70)")
+                    
+                    if rsi_fallback_signal_side != "none":
+                        # Use calculate_dynamic_sl_tp for RSI fallback SL/TP
+                        # Parameters for RSI fallback (can be tuned)
+                        rsi_fallback_atr_period = 14
+                        rsi_fallback_sl_atr_multiplier = 1.5 # Example: 1.5x ATR for SL
+                        rsi_fallback_tp_atr_multiplier = 1.5 # Example: 1.5x ATR for TP (implies RR = 1.0 if using derived RR)
+                        # Calculate RR for dynamic_sl_tp function
+                        rsi_fallback_rr = rsi_fallback_tp_atr_multiplier / rsi_fallback_sl_atr_multiplier if rsi_fallback_sl_atr_multiplier > 0 else 1.0
+
+                        entry_price_rsi = current_price 
+                        print(f"{s7_log_prefix} RSI Fallback: Attempting ATR SL/TP. SL_ATR_Multi: {rsi_fallback_sl_atr_multiplier}, RR for Calc: {rsi_fallback_rr:.2f} (derived from TP_ATR_Multi: {rsi_fallback_tp_atr_multiplier})")
+                        dynamic_sl_tp_rsi = calculate_dynamic_sl_tp(
+                            symbol, 
+                            entry_price_rsi, 
+                            rsi_fallback_signal_side,
+                            atr_period=rsi_fallback_atr_period,
+                            rr=rsi_fallback_rr,
+                            atr_multiplier=rsi_fallback_sl_atr_multiplier
+                        )
+
+                        if dynamic_sl_tp_rsi['error']:
+                            rejection_reason_rsi_sltp = f"RSI Fallback ATR SL/TP calc failed: {dynamic_sl_tp_rsi['error']}"
+                            print(f"{s7_log_prefix} REJECTED (RSI Fallback): {rejection_reason_rsi_sltp}")
+                            base_return['error'] = f"S7 RSI Fallback: {rejection_reason_rsi_sltp}"
+                        elif dynamic_sl_tp_rsi['sl_price'] is not None and dynamic_sl_tp_rsi['tp_price'] is not None:
+                            base_return['signal'] = rsi_fallback_signal_side
+                            base_return['sl_price'] = dynamic_sl_tp_rsi['sl_price']
+                            base_return['tp_price'] = dynamic_sl_tp_rsi['tp_price']
+                            detected_pattern_name = rsi_fallback_pattern_name 
+                            base_return['all_conditions_status']['detected_pattern'] = detected_pattern_name 
+                            print(f"[S7 {symbol}] SIGNAL (RSI Fallback): {detected_pattern_name} @ {entry_price_rsi} (SL: {base_return['sl_price']}, TP: {base_return['tp_price']})")
+                        else:
+                            rejection_reason_rsi_sltp_none = "RSI Fallback ATR SL/TP calculation resulted in None values without explicit error."
+                            print(f"{s7_log_prefix} REJECTED (RSI Fallback): {rejection_reason_rsi_sltp_none}")
+                            base_return['error'] = f"S7 RSI Fallback: {rejection_reason_rsi_sltp_none}"
+
+        except Exception as e_rsi_fallback:
+            print(f"{s7_log_prefix} Error during RSI fallback logic: {e_rsi_fallback}")
+            base_return['error'] = f"S7 RSI Fallback Error: {e_rsi_fallback}"
 
     return base_return
 
@@ -1181,28 +1191,12 @@ class BacktestStrategyWrapper(Strategy):
     s7_bt_rsi_oversold = 25
     # s7_bt_cooldown_bars would be relevant if simulating cooldown in backtest
     # --- End of S7 Backtesting Parameters ---
-    active_condition_configs = {} # Class attribute to store condition configs for the current strategy
+
 
     def init(self):
         # Use self.sl_tp_mode_bt (or whatever name is chosen for the class attribute)
         print(f"DEBUG BacktestStrategyWrapper.init: Initializing for strategy ID {self.current_strategy_id}, SL/TP Mode: {getattr(self, 'sl_tp_mode_bt', 'N/A')}, Leverage: {self.leverage}")
         print(f"DEBUG BacktestStrategyWrapper.init: Trailing Stop Enabled (BT): {getattr(self, 'trailing_stop_enabled_bt', 'N/A')}, Trailing ATR Multi (BT): {getattr(self, 'trailing_stop_atr_multiplier_bt', 'N/A')}")
-        
-        # --- Load condition configurations for the current strategy ---
-        self.active_condition_configs = {} # Instance variable
-        strategy_name_from_id = STRATEGIES.get(self.current_strategy_id)
-        if strategy_name_from_id:
-            strategy_def = next((s for s in strategies if s["name"] == strategy_name_from_id), None)
-            if strategy_def and "conditions" in strategy_def:
-                for cond_info in strategy_def["conditions"]:
-                    self.active_condition_configs[cond_info["id"]] = cond_info["enabled"]
-                print(f"DEBUG BacktestStrategyWrapper.init: Loaded {len(self.active_condition_configs)} condition configs for {strategy_name_from_id}: {self.active_condition_configs}")
-            else:
-                print(f"Warning: No conditions defined in 'strategies' list for {strategy_name_from_id} or strategy_def not found.")
-        else:
-            print(f"Warning: Could not find strategy name for ID {self.current_strategy_id} to load condition configs.")
-        # --- End loading condition configurations ---
-
         # --- Jules's Logging ---
         print(f"[BT Strategy LOG for {self.data.symbol if hasattr(self.data, 'symbol') else 'N/A'}] init() called.")
         print(f"[BT Strategy LOG for {self.data.symbol if hasattr(self.data, 'symbol') else 'N/A'}] Data received by strategy: self.data.df shape: {self.data.df.shape}")
@@ -1456,8 +1450,7 @@ class BacktestStrategyWrapper(Strategy):
             # This means trade sizing for ATR/Dynamic might happen *after* the strategy signal and ATR SL calc.
             # For now, we'll calculate sl_long, tp_long etc. within each strategy's ATR block.
             # sl_percentage_effective_for_sizing will also be set there.
-            # No specific SL/TP prices calculated here for ATR/Dynamic; strategy logic handles it.
-            pass 
+            pass # Defer to strategy block
 
         elif self.sl_tp_mode_bt == "Fixed PnL":
             # For Fixed PnL, the risk is `self.sl_pnl_amount_bt`.
@@ -1548,94 +1541,179 @@ class BacktestStrategyWrapper(Strategy):
         # 6. Call `self.buy()` or `self.sell()` with the calculated `size`, `sl`, and `tp`.
 
         if self.current_strategy_id == 0: # Original Scalping Strategy
-            # Call the modified strategy function, passing the condition configs
-            # The strategy function will internally use these configs
-            # For S0, the scalping_strategy_signal already has the logic to use condition_configs if passed.
-            # We need to ensure that it IS passed from here.
-            # This requires that the strategy signal functions are adapted to receive `condition_configs`.
-            # Assuming they are, the call would look like:
-            # signal_data_s0 = scalping_strategy_signal(trade_symbol, condition_configs=self.active_condition_configs)
-            # However, the existing S0 logic in BacktestStrategyWrapper.next is very detailed and replicates
-            # much of scalping_strategy_signal. For consistency and to ensure configs are used,
-            # it's better to call the centralized strategy function.
-            # This implies refactoring this block to use the strategy function.
+            if self.position:
+                # print(f"{log_prefix_bt_next} S0: Already in position. Skipping.") # Basic log, can be expanded
+                return
+
+            # Indicator calculations
+            # Ensure enough data for all indicators and lookbacks
+            min_len_s0 = max(21, LOCAL_HIGH_LOW_LOOKBACK_PERIOD + 2, 10) # Max of EMA21, lookback+prev, VolumeMA10
+            if len(self.data.Close) < min_len_s0:
+                # print(f"{log_prefix_bt_next} S0: Insufficient data length ({len(self.data.Close)} < {min_len_s0}). Skipping.")
+                return
+
+            last_ema9 = self.ema9_s0[-1]; prev_ema9 = self.ema9_s0[-2]
+            last_ema21 = self.ema21_s0[-1]; prev_ema21 = self.ema21_s0[-2]
+            last_rsi = self.rsi_s0[-1]; last_st = self.st_s0[-1]
+            last_vol = self.data.Volume[-1]; last_vol_ma10 = self.volume_ma10_s0[-1]
             
-            # For now, to minimize immediate large refactoring of this specific block if it's meant to be
-            # a direct backtest implementation of S0:
-            # We would need to replicate the condition_configs logic directly here.
-            # This is not ideal. The best path is to call the strategy function.
+            lookback = LOCAL_HIGH_LOW_LOOKBACK_PERIOD
+            recent_high = self.data.High[-lookback-1:-1].max(); recent_low = self.data.Low[-lookback-1:-1].min()
 
-            # --- Refactoring S0 logic in BacktestStrategyWrapper.next to call scalping_strategy_signal ---
-            if self.position: return
+            # Log indicator values
+            # print(f"{log_prefix_bt_next} S0 Indicators: EMA9={last_ema9:.2f}, EMA21={last_ema21:.2f}, RSI={last_rsi:.2f}, ST={last_st}, VOL={last_vol}, VOL_MA10={last_vol_ma10:.2f}, RecentHigh={recent_high:.2f}, RecentLow={recent_low:.2f}")
 
-            # Call the main strategy function
-            signal_data_s0 = scalping_strategy_signal(trade_symbol, condition_configs=self.active_condition_configs)
+            # Conditions
+            ema_up = prev_ema9 < prev_ema21 and last_ema9 > last_ema21
+            rsi_long = 50 <= last_rsi <= 70; st_green = (last_st == 1)
+            vol_strong = last_vol > last_vol_ma10 if not pd.isna(last_vol_ma10) and last_vol_ma10 != 0 else False
+            price_break_high = price > recent_high
+            buy_conds_met_list = [ema_up, rsi_long, st_green, vol_strong, price_break_high]
+            num_buy = sum(buy_conds_met_list)
+            # print(f"{log_prefix_bt_next} S0 Buy Conditions: EMA_UP={ema_up}, RSI_LONG={rsi_long}, ST_GREEN={st_green}, VOL_STRONG={vol_strong}, PRICE_BREAK_H={price_break_high} -> Met: {num_buy}")
 
-            if signal_data_s0 and signal_data_s0.get('signal') not in ['none', None] and not signal_data_s0.get('error'):
-                trade_side_s0 = signal_data_s0['signal'] # 'up' or 'down'
-                entry_price_s0 = price # Current price
+
+            ema_down = prev_ema9 > prev_ema21 and last_ema9 < last_ema21
+            rsi_short = 30 <= last_rsi <= 50; st_red = (last_st == -1) # ST is -1 for red
+            price_break_low = price < recent_low
+            sell_conds_met_list = [ema_down, rsi_short, st_red, vol_strong, price_break_low]
+            num_sell = sum(sell_conds_met_list)
+            # print(f"{log_prefix_bt_next} S0 Sell Conditions: EMA_DOWN={ema_down}, RSI_SHORT={rsi_short}, ST_RED={st_red}, VOL_STRONG={vol_strong}, PRICE_BREAK_L={price_break_low} -> Met: {num_sell}")
+
+            trade_side_s0 = None
+            if num_buy >= SCALPING_REQUIRED_BUY_CONDITIONS: trade_side_s0 = 'buy'
+            elif num_sell >= SCALPING_REQUIRED_SELL_CONDITIONS: trade_side_s0 = 'sell'
+
+            if trade_side_s0:
+                entry_price_s0 = price
                 sl_price, tp_price = None, None
                 sl_percentage_for_sizing_s0 = None
 
-                # SL/TP logic based on mode, using prices from signal_data_s0 if ATR/Dynamic
                 if self.sl_tp_mode_bt == "ATR/Dynamic":
-                    sl_price = signal_data_s0.get('sl_price')
-                    tp_price = signal_data_s0.get('tp_price')
-                    if sl_price and entry_price_s0 > 0: # Check sl_price is not None
-                        sl_diff = abs(entry_price_s0 - sl_price)
-                        if sl_diff > 0 : sl_percentage_for_sizing_s0 = sl_diff / entry_price_s0
+                    if self.atr is None or len(self.atr) < 1 or pd.isna(self.atr[-1]) or self.atr[-1] == 0:
+                        return
+                    current_atr_s0 = self.atr[-1]
+                    if trade_side_s0 == 'buy':
+                        sl_price = round(entry_price_s0 - (current_atr_s0 * self.SL_ATR_MULTI), self.PRICE_PRECISION_BT)
+                        if sl_price < entry_price_s0: # Valid SL
+                            tp_price = round(entry_price_s0 + ((entry_price_s0 - sl_price) * self.RR), self.PRICE_PRECISION_BT)
+                            sl_percentage_for_sizing_s0 = (entry_price_s0 - sl_price) / entry_price_s0 if entry_price_s0 > 0 else None
+                        else: sl_price = None # Invalidate
+                    else: # sell
+                        sl_price = round(entry_price_s0 + (current_atr_s0 * self.SL_ATR_MULTI), self.PRICE_PRECISION_BT)
+                        if sl_price > entry_price_s0: # Valid SL
+                            tp_price = round(entry_price_s0 - ((sl_price - entry_price_s0) * self.RR), self.PRICE_PRECISION_BT)
+                            sl_percentage_for_sizing_s0 = (sl_price - entry_price_s0) / entry_price_s0 if entry_price_s0 > 0 else None
+                        else: sl_price = None # Invalidate
+                
                 elif self.sl_tp_mode_bt == "Percentage":
-                    sl_price = sl_long if trade_side_s0 == 'up' else sl_short # sl_long/short are from common block
-                    tp_price = tp_long if trade_side_s0 == 'up' else tp_short # tp_long/short are from common block
+                    sl_price = sl_long if trade_side_s0 == 'buy' else sl_short
+                    tp_price = tp_long if trade_side_s0 == 'buy' else tp_short
                     if self.user_sl > 0: sl_percentage_for_sizing_s0 = self.user_sl
+
                 elif self.sl_tp_mode_bt == "Fixed PnL":
-                    sl_price = sl_long if trade_side_s0 == 'up' else sl_short
-                    tp_price = tp_long if trade_side_s0 == 'up' else tp_short
-                    sl_percentage_for_sizing_s0 = None # Use default size for Fixed PnL
+                    sl_price = sl_long if trade_side_s0 == 'buy' else sl_short
+                    tp_price = tp_long if trade_side_s0 == 'buy' else tp_short
+                    # For Fixed PnL, sl_percentage_for_sizing_s0 is not directly used from account_risk_percent_bt in current sizing model.
+                    # It would require sl_pnl_amount to be derived from equity * account_risk_percent_bt,
+                    # and then sizing based on that. For now, Fixed PnL uses its own risk definition.
+                    # We can use a default fraction for trade_size_to_use_in_order or skip sizing based on account_risk_percent_bt.
+                    # Let's use a default size for Fixed PnL for now.
+                    sl_percentage_for_sizing_s0 = None # Signal to use default size
+                
+                else: return # Unknown mode
 
                 if sl_price is None or tp_price is None or sl_price <= 0 or tp_price <= 0: return
-                if trade_side_s0 == 'up' and (sl_price >= entry_price_s0 or tp_price <= entry_price_s0): return
-                if trade_side_s0 == 'down' and (sl_price <= entry_price_s0 or tp_price >= entry_price_s0): return
+                if trade_side_s0 == 'buy' and (sl_price >= entry_price_s0 or tp_price <= entry_price_s0): return
+                if trade_side_s0 == 'sell' and (sl_price <= entry_price_s0 or tp_price >= entry_price_s0): return
 
+                # Calculate trade size
                 final_trade_size_s0 = 0.02 # Default
                 if sl_percentage_for_sizing_s0 and sl_percentage_for_sizing_s0 > 0 and self.account_risk_percent_bt > 0:
                     calculated_size = self.account_risk_percent_bt / sl_percentage_for_sizing_s0
-                    final_trade_size_s0 = min(calculated_size, 1.0)
+                    # Cap size at 1 (100% of equity as per backtesting.py `size` interpretation for fractions)
+                    # Or a more conservative cap like 0.5 (50%) might be appropriate depending on leverage.
+                    # With leverage, risking 1% with a 1% SL implies 1x equity.
+                    # If leverage is 10x, this becomes 0.1 of the leveraged equity.
+                    # backtesting.py `size` is fraction of *cash*. Margin is handled separately.
+                    # So, if cash = 10000, leverage = 1, risk % = 0.01 (1%), SL % = 0.01 (1%),
+                    # size = 0.01 / 0.01 = 1.0 (meaning 100% of cash, which becomes the position value).
+                    final_trade_size_s0 = min(calculated_size, 1.0) # Cap at 100% of cash
                     print(f"{log_prefix_bt_next} S0 Sizing: AccRisk={self.account_risk_percent_bt*100:.2f}%, SL%={sl_percentage_for_sizing_s0*100:.2f}%, CalcSize={calculated_size:.4f}, FinalSize={final_trade_size_s0:.4f}")
 
-                if trade_side_s0 == 'up': self.buy(sl=sl_price, tp=tp_price, size=final_trade_size_s0)
-                elif trade_side_s0 == 'down': self.sell(sl=sl_price, tp=tp_price, size=final_trade_size_s0)
-            # --- End of Refactored S0 logic ---
+
+                if trade_side_s0 == 'buy': self.buy(sl=sl_price, tp=tp_price, size=final_trade_size_s0)
+                else: self.sell(sl=sl_price, tp=tp_price, size=final_trade_size_s0)
+            # else:
+                # print(f"{log_prefix_bt_next} S0: No trade signal this bar.")
+
 
         elif self.current_strategy_id == 1: # EMA Cross + SuperTrend
-            if self.position: return
+            if self.position: 
+                # print(f"{log_prefix_bt_next} S1: Already in position. Skipping."); 
+                return
+            if len(self.ema_short_s1) < 2 or len(self.ema_long_s1) < 2 or len(self.rsi_s1) < 1 or len(self.st_s1) < 1: 
+                # print(f"{log_prefix_bt_next} S1: Insufficient indicator length. EMA_S={len(self.ema_short_s1)}, EMA_L={len(self.ema_long_s1)}, RSI={len(self.rsi_s1)}, ST={len(self.st_s1)}. Skipping."); 
+                return
 
-            signal_data_s1 = strategy_ema_supertrend(trade_symbol, condition_configs=self.active_condition_configs)
+            last_ema_short = self.ema_short_s1[-1]; prev_ema_short = self.ema_short_s1[-2]
+            last_ema_long = self.ema_long_s1[-1]; prev_ema_long = self.ema_long_s1[-2]
+            last_rsi_s1 = self.rsi_s1[-1]; last_st_s1 = self.st_s1[-1] # ST is numerical: 1 green, -1 red
 
-            if signal_data_s1 and signal_data_s1.get('signal') not in ['none', None] and not signal_data_s1.get('error'):
-                trade_side_s1 = signal_data_s1['signal'] # 'up' or 'down'
+            # print(f"{log_prefix_bt_next} S1 Indicators: EMA_S={last_ema_short:.2f} (Prev:{prev_ema_short:.2f}), EMA_L={last_ema_long:.2f} (Prev:{prev_ema_long:.2f}), RSI={last_rsi_s1:.2f}, ST={last_st_s1}")
+
+            ema_crossed_up_s1 = prev_ema_short < prev_ema_long and last_ema_short > last_ema_long
+            st_green_s1 = (last_st_s1 == 1); rsi_long_ok_s1 = 40 <= last_rsi_s1 <= 70
+            buy_conds_s1_met_list = [ema_crossed_up_s1, st_green_s1, rsi_long_ok_s1]
+            num_buy_s1 = sum(buy_conds_s1_met_list)
+            # print(f"{log_prefix_bt_next} S1 Buy Conditions: EMA_X_UP={ema_crossed_up_s1}, ST_GREEN={st_green_s1}, RSI_OK={rsi_long_ok_s1} -> Met: {num_buy_s1}")
+
+
+            ema_crossed_down_s1 = prev_ema_short > prev_ema_long and last_ema_short < last_ema_long
+            st_red_s1 = (last_st_s1 == -1); rsi_short_ok_s1 = 30 <= last_rsi_s1 <= 60
+            sell_conds_s1_met_list = [ema_crossed_down_s1, st_red_s1, rsi_short_ok_s1]
+            num_sell_s1 = sum(sell_conds_s1_met_list)
+            # print(f"{log_prefix_bt_next} S1 Sell Conditions: EMA_X_DOWN={ema_crossed_down_s1}, ST_RED={st_red_s1}, RSI_OK={rsi_short_ok_s1} -> Met: {num_sell_s1}")
+            
+            REQUIRED_S1 = 2; trade_side_s1 = None
+            if num_buy_s1 >= REQUIRED_S1: trade_side_s1 = 'buy'
+            elif num_sell_s1 >= REQUIRED_S1: trade_side_s1 = 'sell'
+
+            if trade_side_s1:
                 entry_price_s1 = price
                 sl_to_use_s1, tp_to_use_s1 = None, None
                 sl_percentage_for_sizing_s1 = None
 
                 if self.sl_tp_mode_bt == "ATR/Dynamic":
-                    sl_to_use_s1 = signal_data_s1.get('sl_price')
-                    tp_to_use_s1 = signal_data_s1.get('tp_price')
-                    if sl_to_use_s1 and entry_price_s1 > 0:
-                        sl_diff = abs(entry_price_s1 - sl_to_use_s1)
-                        if sl_diff > 0: sl_percentage_for_sizing_s1 = sl_diff / entry_price_s1
+                    if self.atr is None or len(self.atr) < 1 or pd.isna(self.atr[-1]) or self.atr[-1] == 0:
+                        return
+                    current_atr_s1 = self.atr[-1]
+                    if trade_side_s1 == 'buy':
+                        sl_to_use_s1 = round(entry_price_s1 - (current_atr_s1 * self.SL_ATR_MULTI), self.PRICE_PRECISION_BT)
+                        if sl_to_use_s1 < entry_price_s1:
+                            tp_to_use_s1 = round(entry_price_s1 + ((entry_price_s1 - sl_to_use_s1) * self.RR), self.PRICE_PRECISION_BT)
+                            sl_percentage_for_sizing_s1 = (entry_price_s1 - sl_to_use_s1) / entry_price_s1 if entry_price_s1 > 0 else None
+                        else: sl_to_use_s1 = None
+                    else: # sell
+                        sl_to_use_s1 = round(entry_price_s1 + (current_atr_s1 * self.SL_ATR_MULTI), self.PRICE_PRECISION_BT)
+                        if sl_to_use_s1 > entry_price_s1:
+                            tp_to_use_s1 = round(entry_price_s1 - ((sl_to_use_s1 - entry_price_s1) * self.RR), self.PRICE_PRECISION_BT)
+                            sl_percentage_for_sizing_s1 = (sl_to_use_s1 - entry_price_s1) / entry_price_s1 if entry_price_s1 > 0 else None
+                        else: sl_to_use_s1 = None
+
                 elif self.sl_tp_mode_bt == "Percentage":
-                    sl_to_use_s1 = sl_long if trade_side_s1 == 'up' else sl_short
-                    tp_to_use_s1 = tp_long if trade_side_s1 == 'up' else tp_short
+                    sl_to_use_s1 = sl_long if trade_side_s1 == 'buy' else sl_short
+                    tp_to_use_s1 = tp_long if trade_side_s1 == 'buy' else tp_short
                     if self.user_sl > 0: sl_percentage_for_sizing_s1 = self.user_sl
+                
                 elif self.sl_tp_mode_bt == "Fixed PnL":
-                    sl_to_use_s1 = sl_long if trade_side_s1 == 'up' else sl_short
-                    tp_to_use_s1 = tp_long if trade_side_s1 == 'up' else tp_short
-                    sl_percentage_for_sizing_s1 = None
+                    sl_to_use_s1 = sl_long if trade_side_s1 == 'buy' else sl_short
+                    tp_to_use_s1 = tp_long if trade_side_s1 == 'buy' else tp_short
+                    sl_percentage_for_sizing_s1 = None # Use default size
 
                 if sl_to_use_s1 is None or tp_to_use_s1 is None or sl_to_use_s1 <= 0 or tp_to_use_s1 <= 0: return
-                if trade_side_s1 == 'up' and (sl_to_use_s1 >= entry_price_s1 or tp_to_use_s1 <= entry_price_s1): return
-                if trade_side_s1 == 'down' and (sl_to_use_s1 <= entry_price_s1 or tp_to_use_s1 >= entry_price_s1): return
+                if trade_side_s1 == 'buy' and (sl_to_use_s1 >= entry_price_s1 or tp_to_use_s1 <= entry_price_s1): return
+                if trade_side_s1 == 'sell' and (sl_to_use_s1 <= entry_price_s1 or tp_to_use_s1 >= entry_price_s1): return
 
                 final_trade_size_s1 = 0.02 # Default
                 if sl_percentage_for_sizing_s1 and sl_percentage_for_sizing_s1 > 0 and self.account_risk_percent_bt > 0:
@@ -1643,131 +1721,612 @@ class BacktestStrategyWrapper(Strategy):
                     final_trade_size_s1 = min(calculated_size_s1, 1.0) 
                     print(f"{log_prefix_bt_next} S1 Sizing: AccRisk={self.account_risk_percent_bt*100:.2f}%, SL%={sl_percentage_for_sizing_s1*100:.2f}%, CalcSize={calculated_size_s1:.4f}, FinalSize={final_trade_size_s1:.4f}")
 
-                if trade_side_s1 == 'up': self.buy(sl=sl_to_use_s1, tp=tp_to_use_s1, size=final_trade_size_s1)
-                elif trade_side_s1 == 'down': self.sell(sl=sl_to_use_s1, tp=tp_to_use_s1, size=final_trade_size_s1)
-
-        elif self.current_strategy_id == 5: # New RSI-Based Strategy
-    # --- Refactor S2, S3, S4, S5, S6, S7 calls in BacktestStrategyWrapper.next ---
-    # This involves replacing their inline logic with calls to their respective 
-    # strategy functions, passing `self.active_condition_configs`.
-
-            # --- S2: Bollinger Band Mean-Reversion ---
-            elif self.current_strategy_id == 2:
-                if self.position: return
-                signal_data_s2 = strategy_bollinger_band_mean_reversion(trade_symbol, condition_configs=self.active_condition_configs)
-                if signal_data_s2 and signal_data_s2.get('signal') not in ['none', None] and not signal_data_s2.get('error'):
-                    trade_side_s2 = signal_data_s2['signal']
-                    entry_price_s2 = price
-                    sl_to_use_s2, tp_to_use_s2 = None, None
-                    sl_percentage_for_sizing_s2 = None
-
-                    if self.sl_tp_mode_bt == "ATR/Dynamic":
-                        sl_to_use_s2 = signal_data_s2.get('sl_price')
-                        tp_to_use_s2 = signal_data_s2.get('tp_price')
-                        if sl_to_use_s2 and entry_price_s2 > 0:
-                            sl_diff = abs(entry_price_s2 - sl_to_use_s2)
-                            if sl_diff > 0: sl_percentage_for_sizing_s2 = sl_diff / entry_price_s2
-                    elif self.sl_tp_mode_bt == "Percentage":
-                        sl_to_use_s2 = sl_long if trade_side_s2 == 'up' else sl_short
-                        tp_to_use_s2 = tp_long if trade_side_s2 == 'up' else tp_short
-                        if self.user_sl > 0: sl_percentage_for_sizing_s2 = self.user_sl
-                    elif self.sl_tp_mode_bt == "Fixed PnL":
-                        sl_to_use_s2 = sl_long if trade_side_s2 == 'up' else sl_short
-                        tp_to_use_s2 = tp_long if trade_side_s2 == 'up' else tp_short
-                        sl_percentage_for_sizing_s2 = None
-
-                    if sl_to_use_s2 is None or tp_to_use_s2 is None or sl_to_use_s2 <= 0 or tp_to_use_s2 <= 0: return
-                    if trade_side_s2 == 'up' and (sl_to_use_s2 >= entry_price_s2 or tp_to_use_s2 <= entry_price_s2): return
-                    if trade_side_s2 == 'down' and (sl_to_use_s2 <= entry_price_s2 or tp_to_use_s2 >= entry_price_s2): return
-                    
-                    final_trade_size_s2 = 0.02
-                    if sl_percentage_for_sizing_s2 and sl_percentage_for_sizing_s2 > 0 and self.account_risk_percent_bt > 0:
-                        calculated_size_s2 = self.account_risk_percent_bt / sl_percentage_for_sizing_s2
-                        final_trade_size_s2 = min(calculated_size_s2, 1.0)
-                        print(f"{log_prefix_bt_next} S2 Sizing: AccRisk={self.account_risk_percent_bt*100:.2f}%, SL%={sl_percentage_for_sizing_s2*100:.2f}%, FinalSize={final_trade_size_s2:.4f}")
-                    
-                    if trade_side_s2 == 'up': self.buy(sl=sl_to_use_s2, tp=tp_to_use_s2, size=final_trade_size_s2)
-                    elif trade_side_s2 == 'down': self.sell(sl=sl_to_use_s2, tp=tp_to_use_s2, size=final_trade_size_s2)
-
-            # --- S3: VWAP Breakout Momentum ---
-            elif self.current_strategy_id == 3:
-                if self.position: return
-                signal_data_s3 = strategy_vwap_breakout_momentum(trade_symbol, condition_configs=self.active_condition_configs)
-                if signal_data_s3 and signal_data_s3.get('signal') not in ['none', None] and not signal_data_s3.get('error'):
-                    trade_side_s3 = signal_data_s3['signal']
-                    entry_price_s3 = price
-                    sl_to_use_s3, tp_to_use_s3 = None, None
-                    sl_percentage_for_sizing_s3 = None
-
-                    if self.sl_tp_mode_bt == "ATR/Dynamic":
-                        sl_to_use_s3 = signal_data_s3.get('sl_price')
-                        tp_to_use_s3 = signal_data_s3.get('tp_price')
-                        if sl_to_use_s3 and entry_price_s3 > 0:
-                            sl_diff = abs(entry_price_s3 - sl_to_use_s3)
-                            if sl_diff > 0: sl_percentage_for_sizing_s3 = sl_diff / entry_price_s3
-                    elif self.sl_tp_mode_bt == "Percentage":
-                        sl_to_use_s3 = sl_long if trade_side_s3 == 'up' else sl_short
-                        tp_to_use_s3 = tp_long if trade_side_s3 == 'up' else tp_short
-                        if self.user_sl > 0: sl_percentage_for_sizing_s3 = self.user_sl
-                    elif self.sl_tp_mode_bt == "Fixed PnL":
-                        sl_to_use_s3 = sl_long if trade_side_s3 == 'up' else sl_short
-                        tp_to_use_s3 = tp_long if trade_side_s3 == 'up' else tp_short
-                        sl_percentage_for_sizing_s3 = None
-                    
-                    if sl_to_use_s3 is None or tp_to_use_s3 is None or sl_to_use_s3 <= 0 or tp_to_use_s3 <= 0: return
-                    if trade_side_s3 == 'up' and (sl_to_use_s3 >= entry_price_s3 or tp_to_use_s3 <= entry_price_s3): return
-                    if trade_side_s3 == 'down' and (sl_to_use_s3 <= entry_price_s3 or tp_to_use_s3 >= entry_price_s3): return
-
-                    final_trade_size_s3 = 0.02
-                    if sl_percentage_for_sizing_s3 and sl_percentage_for_sizing_s3 > 0 and self.account_risk_percent_bt > 0:
-                        calculated_size_s3 = self.account_risk_percent_bt / sl_percentage_for_sizing_s3
-                        final_trade_size_s3 = min(calculated_size_s3, 1.0)
-                        print(f"{log_prefix_bt_next} S3 Sizing: AccRisk={self.account_risk_percent_bt*100:.2f}%, SL%={sl_percentage_for_sizing_s3*100:.2f}%, FinalSize={final_trade_size_s3:.4f}")
-
-                    if trade_side_s3 == 'up': self.buy(sl=sl_to_use_s3, tp=tp_to_use_s3, size=final_trade_size_s3)
-                    elif trade_side_s3 == 'down': self.sell(sl=sl_to_use_s3, tp=tp_to_use_s3, size=final_trade_size_s3)
-
-            # --- S4: MACD Divergence + Pivot-Point ---
-            elif self.current_strategy_id == 4:
-                if self.position: return
-                signal_data_s4 = strategy_macd_divergence_pivot(trade_symbol, condition_configs=self.active_condition_configs)
-                if signal_data_s4 and signal_data_s4.get('signal') not in ['none', None] and not signal_data_s4.get('error'):
-                    trade_side_s4 = signal_data_s4['signal']
-                    entry_price_s4 = price
-                    sl_to_use_s4, tp_to_use_s4 = None, None
-                    sl_percentage_for_sizing_s4 = None
-
-                    if self.sl_tp_mode_bt == "ATR/Dynamic":
-                        sl_to_use_s4 = signal_data_s4.get('sl_price')
-                        tp_to_use_s4 = signal_data_s4.get('tp_price')
-                        if sl_to_use_s4 and entry_price_s4 > 0:
-                            sl_diff = abs(entry_price_s4 - sl_to_use_s4)
-                            if sl_diff > 0: sl_percentage_for_sizing_s4 = sl_diff / entry_price_s4
-                    elif self.sl_tp_mode_bt == "Percentage":
-                        sl_to_use_s4 = sl_long if trade_side_s4 == 'up' else sl_short
-                        tp_to_use_s4 = tp_long if trade_side_s4 == 'up' else tp_short
-                        if self.user_sl > 0: sl_percentage_for_sizing_s4 = self.user_sl
-                    elif self.sl_tp_mode_bt == "Fixed PnL":
-                        sl_to_use_s4 = sl_long if trade_side_s4 == 'up' else sl_short
-                        tp_to_use_s4 = tp_long if trade_side_s4 == 'up' else tp_short
-                        sl_percentage_for_sizing_s4 = None
-                    
-                    if sl_to_use_s4 is None or tp_to_use_s4 is None or sl_to_use_s4 <= 0 or tp_to_use_s4 <= 0: return
-                    if trade_side_s4 == 'up' and (sl_to_use_s4 >= entry_price_s4 or tp_to_use_s4 <= entry_price_s4): return
-                    if trade_side_s4 == 'down' and (sl_to_use_s4 <= entry_price_s4 or tp_to_use_s4 >= entry_price_s4): return
-
-                    final_trade_size_s4 = 0.02
-                    if sl_percentage_for_sizing_s4 and sl_percentage_for_sizing_s4 > 0 and self.account_risk_percent_bt > 0:
-                        calculated_size_s4 = self.account_risk_percent_bt / sl_percentage_for_sizing_s4
-                        final_trade_size_s4 = min(calculated_size_s4, 1.0)
-                        print(f"{log_prefix_bt_next} S4 Sizing: AccRisk={self.account_risk_percent_bt*100:.2f}%, SL%={sl_percentage_for_sizing_s4*100:.2f}%, FinalSize={final_trade_size_s4:.4f}")
-                    
-                    if trade_side_s4 == 'up': self.buy(sl=sl_to_use_s4, tp=tp_to_use_s4, size=final_trade_size_s4)
-                    elif trade_side_s4 == 'down': self.sell(sl=sl_to_use_s4, tp=tp_to_use_s4, size=final_trade_size_s4)
+                if trade_side_s1 == 'buy': self.buy(sl=sl_to_use_s1, tp=tp_to_use_s1, size=final_trade_size_s1)
+                else: self.sell(sl=sl_to_use_s1, tp=tp_to_use_s1, size=final_trade_size_s1)
+            # else:
+                # print(f"{log_prefix_bt_next} S1: No trade signal this bar.")
 
         elif self.current_strategy_id == 5: # New RSI-Based Strategy
             if self.position: 
                 # print(f"{log_prefix_bt_next} S5: Already in position. Skipping."); 
+                return
+
+            # S5 uses self.rsi and self.atr (ATR for dynamic SL/TP)
+            if len(self.rsi) < 1: 
+                # print(f"{log_prefix_bt_next} S5: Insufficient RSI length ({len(self.rsi)}). Skipping."); 
+                return
+            if self.sl_tp_mode_bt == "ATR/Dynamic" and (self.atr is None or len(self.atr) < 1):
+                # print(f"{log_prefix_bt_next} S5: ATR/Dynamic mode but ATR not available or too short ({len(self.atr) if self.atr else 'None'}). Skipping."); 
+                return
+
+            # print(f"{log_prefix_bt_next} S5 Indicators: RSI={self.rsi[-1]:.2f}" + (f", ATR={self.atr[-1]:.4f}" if self.sl_tp_mode_bt == "ATR/Dynamic" and self.atr and len(self.atr)>0 else ""))
+
+            take_long_s5 = self.rsi[-1] < 30
+            take_short_s5 = self.rsi[-1] > 70
+            # print(f"{log_prefix_bt_next} S5 Conditions: RSI<30={take_long_s5}, RSI>70={take_short_s5}")
+
+            trade_side_s5 = None
+            if take_long_s5: trade_side_s5 = 'buy'
+            elif take_short_s5: trade_side_s5 = 'sell'
+
+            if trade_side_s5:
+                entry_price_s5 = price
+                sl_to_use_s5, tp_to_use_s5 = None, None
+                sl_percentage_for_sizing_s5 = None
+
+                if self.sl_tp_mode_bt == "ATR/Dynamic":
+                    if pd.isna(self.atr[-1]) or self.atr[-1] == 0: 
+                        return
+                    current_atr_s5 = self.atr[-1]
+                    if trade_side_s5 == 'buy':
+                        sl_to_use_s5 = round(entry_price_s5 - (current_atr_s5 * self.SL_ATR_MULTI), self.PRICE_PRECISION_BT)
+                        if sl_to_use_s5 < entry_price_s5:
+                            tp_to_use_s5 = round(entry_price_s5 + ((entry_price_s5 - sl_to_use_s5) * self.RR), self.PRICE_PRECISION_BT)
+                            sl_percentage_for_sizing_s5 = (entry_price_s5 - sl_to_use_s5) / entry_price_s5 if entry_price_s5 > 0 else None
+                        else: sl_to_use_s5 = None
+                    else: # sell
+                        sl_to_use_s5 = round(entry_price_s5 + (current_atr_s5 * self.SL_ATR_MULTI), self.PRICE_PRECISION_BT)
+                        if sl_to_use_s5 > entry_price_s5:
+                            tp_to_use_s5 = round(entry_price_s5 - ((sl_to_use_s5 - entry_price_s5) * self.RR), self.PRICE_PRECISION_BT)
+                            sl_percentage_for_sizing_s5 = (sl_to_use_s5 - entry_price_s5) / entry_price_s5 if entry_price_s5 > 0 else None
+                        else: sl_to_use_s5 = None
+
+                elif self.sl_tp_mode_bt == "Percentage":
+                    sl_to_use_s5 = sl_long if trade_side_s5 == 'buy' else sl_short
+                    tp_to_use_s5 = tp_long if trade_side_s5 == 'buy' else tp_short
+                    if self.user_sl > 0: sl_percentage_for_sizing_s5 = self.user_sl
+
+                elif self.sl_tp_mode_bt == "Fixed PnL":
+                    sl_to_use_s5 = sl_long if trade_side_s5 == 'buy' else sl_short
+                    tp_to_use_s5 = tp_long if trade_side_s5 == 'buy' else tp_short
+                    sl_percentage_for_sizing_s5 = None # Use default size
+
+                if sl_to_use_s5 is None or tp_to_use_s5 is None or sl_to_use_s5 <= 0 or tp_to_use_s5 <= 0: return
+                if trade_side_s5 == 'buy' and (sl_to_use_s5 >= entry_price_s5 or tp_to_use_s5 <= entry_price_s5): return
+                if trade_side_s5 == 'sell' and (sl_to_use_s5 <= entry_price_s5 or tp_to_use_s5 >= entry_price_s5): return
+                
+                final_trade_size_s5 = 0.02 # Default
+                if sl_percentage_for_sizing_s5 and sl_percentage_for_sizing_s5 > 0 and self.account_risk_percent_bt > 0:
+                    calculated_size_s5 = self.account_risk_percent_bt / sl_percentage_for_sizing_s5
+                    final_trade_size_s5 = min(calculated_size_s5, 1.0)
+                    print(f"{log_prefix_bt_next} S5 Sizing: AccRisk={self.account_risk_percent_bt*100:.2f}%, SL%={sl_percentage_for_sizing_s5*100:.2f}%, CalcSize={calculated_size_s5:.4f}, FinalSize={final_trade_size_s5:.4f}")
+                
+                if trade_side_s5 == 'buy': self.buy(sl=sl_to_use_s5, tp=tp_to_use_s5, size=final_trade_size_s5)
+                else: self.sell(sl=sl_to_use_s5, tp=tp_to_use_s5, size=final_trade_size_s5)
+            # else:
+                # print(f"{log_prefix_bt_next} S5: No trade signal this bar.")
+        
+        elif self.current_strategy_id == 6: # Market Structure S/D Strategy
+            # Ensure log_prefix_bt_next uses a dynamic precision based on self.PRICE_PRECISION_BT
+            # However, price itself is already a float here. Formatting is for the print string.
+            # For consistency, let's define precision for logging here.
+            log_price_precision = getattr(self, 'PRICE_PRECISION_BT', 4) # Default to 4 if not set
+
+            if self.position:
+                print(f"{log_prefix_bt_next} S6: Already in position. Skipping.")
+                return
+
+            if not hasattr(self, 'bt_swing_highs_bool') or not hasattr(self, 'bt_sd_zones') or self.atr is None:
+                print(f"{log_prefix_bt_next} S6: Required attributes (swings, zones, atr) not initialized. Skipping.")
+                return
+            
+            current_data_slice_df = self.data.df.iloc[:len(self.data.Close)] 
+            if len(current_data_slice_df) < 20: 
+                print(f"{log_prefix_bt_next} S6: Insufficient data for S6 logic ({len(current_data_slice_df)} bars).")
+                return
+
+            current_bar_timestamp = self.data.index[-1]
+            entry_price_s6 = price # Current closing price as potential entry
+
+            # --- DEBUG PRINT: Initial Info ---
+            print(f"{log_prefix_bt_next} S6 DEBUG: Bar Timestamp: {current_bar_timestamp}, Current Price: {entry_price_s6:.{log_price_precision}f}")
+
+            current_swing_highs = self.bt_swing_highs_bool[self.bt_swing_highs_bool.index.isin(current_data_slice_df.index)]
+            current_swing_lows = self.bt_swing_lows_bool[self.bt_swing_lows_bool.index.isin(current_data_slice_df.index)]
+            
+            try:
+                market_structure = identify_market_structure(current_data_slice_df, current_swing_highs, current_swing_lows)
+                # --- DEBUG PRINT: Market Structure ---
+                print(f"{log_prefix_bt_next} S6 DEBUG: Market Bias: {market_structure['trend_bias']}, Valid High: {market_structure.get('last_valid_high_price', 'N/A')}, Valid Low: {market_structure.get('last_valid_low_price', 'N/A')}")
+            except Exception as e_ms:
+                print(f"{log_prefix_bt_next} S6: Error in identify_market_structure: {e_ms}")
+                return
+
+            historical_sd_zones = [
+                zone for zone in self.bt_sd_zones 
+                if zone['timestamp_end'] < current_bar_timestamp 
+            ]
+            
+            if not historical_sd_zones:
+                print(f"{log_prefix_bt_next} S6: No historical S/D zones found relative to current bar.")
+                return
+
+            potential_trade_s6 = None
+            
+            # Check trend bias: if 'ranging', skip (as per problem description "skips only truly ranging markets")
+            # The identify_market_structure function should ideally handle this.
+            # If it returns 'ranging', we should not proceed to look for entries.
+            if market_structure['trend_bias'] == 'ranging':
+                print(f"{log_prefix_bt_next} S6: Market trend_bias is 'ranging'. Skipping S/D zone checks.")
+                return # Do not proceed if market is ranging
+
+            if market_structure['trend_bias'] == 'bullish':
+                demand_zones = [z for z in historical_sd_zones if z['type'] == 'demand']
+                demand_zones.sort(key=lambda z: z['timestamp_end'], reverse=True) 
+                if demand_zones:
+                    zone = demand_zones[0] # Most recent historical demand zone
+                    
+                    # Add 0.5% buffer to zone edges for entry condition
+                    buffered_zone_start = zone['price_start'] * (1 - 0.005)
+                    buffered_zone_end = zone['price_end'] * (1 + 0.005)
+
+                    # --- DEBUG PRINT: Zone Info (Bullish) ---
+                    print(f"{log_prefix_bt_next} S6 DEBUG Bullish: Checking Demand Zone: Original Start={zone['price_start']:.{log_price_precision}f}, Original End={zone['price_end']:.{log_price_precision}f}. Buffered Entry Range: {buffered_zone_start:.{log_price_precision}f} - {buffered_zone_end:.{log_price_precision}f}")
+
+                    if buffered_zone_start <= entry_price_s6 <= buffered_zone_end: # Price in buffered demand zone
+                        # SL calculation uses original zone boundary + small percentage of zone height
+                        sl_s6_raw = zone['price_start'] - ((zone['price_end'] - zone['price_start']) * 0.10) # Example: 10% of zone height as SL distance from bottom
+                        sl_s6 = round(sl_s6_raw, self.PRICE_PRECISION_BT)
+                        
+                        tp_s6_raw = market_structure.get('last_valid_high_price') or market_structure.get('current_swing_high_price')
+                        if tp_s6_raw is None: 
+                            print(f"{log_prefix_bt_next} S6 BT Bullish: No valid TP target (swing high). Skipping."); return
+                        tp_s6 = round(tp_s6_raw, self.PRICE_PRECISION_BT)
+
+                        # --- DEBUG PRINT: SL/TP Info (Bullish) ---
+                        print(f"{log_prefix_bt_next} S6 DEBUG Bullish: Potential Entry: {entry_price_s6:.{log_price_precision}f}, SL: {sl_s6:.{log_price_precision}f} (RawSL based on original zone: {sl_s6_raw:.{log_price_precision}f}), TP: {tp_s6:.{log_price_precision}f} (RawTP: {tp_s6_raw:.{log_price_precision}f})")
+
+                        if tp_s6 > entry_price_s6 and sl_s6 < entry_price_s6: # Basic SL/TP validity
+                            reward = tp_s6 - entry_price_s6
+                            risk = entry_price_s6 - sl_s6
+                            if risk > 0:
+                                rr_ratio_s6 = reward / risk
+                                # --- DEBUG PRINT: R:R (Bullish) ---
+                                print(f"{log_prefix_bt_next} S6 DEBUG Bullish: Reward={reward:.{log_price_precision}f}, Risk={risk:.{log_price_precision}f}, R:R={rr_ratio_s6:.2f}")
+                                
+                                if rr_ratio_s6 >= 1.5: # Lowered R:R threshold
+                                    potential_trade_s6 = {'signal': 'buy', 'sl': sl_s6, 'tp': tp_s6}
+                                else: print(f"{log_prefix_bt_next} S6 BT Bullish: R:R too low ({rr_ratio_s6:.2f} < 1.5). Skipping.")
+                            else: print(f"{log_prefix_bt_next} S6 BT Bullish: Risk is not positive ({risk:.{log_price_precision}f}). Skipping.")
+                        else: print(f"{log_prefix_bt_next} S6 BT Bullish: SL/TP ({sl_s6}, {tp_s6}) invalid relative to entry ({entry_price_s6}). Skipping.")
+                    else: print(f"{log_prefix_bt_next} S6 BT Bullish: Price {entry_price_s6:.{log_price_precision}f} not in buffered demand zone [{buffered_zone_start:.{log_price_precision}f} - {buffered_zone_end:.{log_price_precision}f}]. Orig Zone: [{zone['price_start']:.{log_price_precision}f} - {zone['price_end']:.{log_price_precision}f}]")
+                else: print(f"{log_prefix_bt_next} S6 BT Bullish: No relevant historical demand zones found.")
+            
+            elif market_structure['trend_bias'] == 'bearish':
+                supply_zones = [z for z in historical_sd_zones if z['type'] == 'supply']
+                supply_zones.sort(key=lambda z: z['timestamp_end'], reverse=True)
+                if supply_zones:
+                    zone = supply_zones[0] # Most recent historical supply zone
+
+                    buffered_zone_start = zone['price_start'] * (1 - 0.005)
+                    buffered_zone_end = zone['price_end'] * (1 + 0.005)
+
+                    # --- DEBUG PRINT: Zone Info (Bearish) ---
+                    print(f"{log_prefix_bt_next} S6 DEBUG Bearish: Checking Supply Zone: Original Start={zone['price_start']:.{log_price_precision}f}, Original End={zone['price_end']:.{log_price_precision}f}. Buffered Entry Range: {buffered_zone_start:.{log_price_precision}f} - {buffered_zone_end:.{log_price_precision}f}")
+
+                    if buffered_zone_start <= entry_price_s6 <= buffered_zone_end: # Price in buffered supply zone
+                        sl_s6_raw = zone['price_end'] + ((zone['price_end'] - zone['price_start']) * 0.10) # Example: 10% of zone height as SL distance from top
+                        sl_s6 = round(sl_s6_raw, self.PRICE_PRECISION_BT)
+                        
+                        tp_s6_raw = market_structure.get('last_valid_low_price') or market_structure.get('current_swing_low_price')
+                        if tp_s6_raw is None: 
+                            print(f"{log_prefix_bt_next} S6 BT Bearish: No valid TP target (swing low). Skipping."); return
+                        tp_s6 = round(tp_s6_raw, self.PRICE_PRECISION_BT)
+
+                        # --- DEBUG PRINT: SL/TP Info (Bearish) ---
+                        print(f"{log_prefix_bt_next} S6 DEBUG Bearish: Potential Entry: {entry_price_s6:.{log_price_precision}f}, SL: {sl_s6:.{log_price_precision}f} (RawSL based on original zone: {sl_s6_raw:.{log_price_precision}f}), TP: {tp_s6:.{log_price_precision}f} (RawTP: {tp_s6_raw:.{log_price_precision}f})")
+
+                        if tp_s6 < entry_price_s6 and sl_s6 > entry_price_s6: # Basic SL/TP validity
+                            reward = entry_price_s6 - tp_s6
+                            risk = sl_s6 - entry_price_s6
+                            if risk > 0:
+                                rr_ratio_s6 = reward / risk
+                                # --- DEBUG PRINT: R:R (Bearish) ---
+                                print(f"{log_prefix_bt_next} S6 DEBUG Bearish: Reward={reward:.{log_price_precision}f}, Risk={risk:.{log_price_precision}f}, R:R={rr_ratio_s6:.2f}")
+
+                                if rr_ratio_s6 >= 1.5: # Lowered R:R threshold
+                                    potential_trade_s6 = {'signal': 'sell', 'sl': sl_s6, 'tp': tp_s6}
+                                else: print(f"{log_prefix_bt_next} S6 BT Bearish: R:R too low ({rr_ratio_s6:.2f} < 1.5). Skipping.")
+                            else: print(f"{log_prefix_bt_next} S6 BT Bearish: Risk is not positive ({risk:.{log_price_precision}f}). Skipping.")
+                        else: print(f"{log_prefix_bt_next} S6 BT Bearish: SL/TP ({sl_s6}, {tp_s6}) invalid relative to entry ({entry_price_s6}). Skipping.")
+                    else: print(f"{log_prefix_bt_next} S6 BT Bearish: Price {entry_price_s6:.{log_price_precision}f} not in buffered supply zone [{buffered_zone_start:.{log_price_precision}f} - {buffered_zone_end:.{log_price_precision}f}]. Orig Zone: [{zone['price_start']:.{log_price_precision}f} - {zone['price_end']:.{log_price_precision}f}]")
+                else: print(f"{log_prefix_bt_next} S6 BT Bearish: No relevant historical supply zones found.")
+            # Implicitly, if trend_bias is not 'bullish' or 'bearish' (e.g. 'ranging' or other), no action is taken here.
+            # The earlier check `if market_structure['trend_bias'] == 'ranging': return` handles explicit ranging.
+
+            if potential_trade_s6:
+                sl_price_s6 = potential_trade_s6['sl']
+                tp_price_s6 = potential_trade_s6['tp']
+                entry_price_s6_final = potential_trade_s6['entry'] # Assuming entry was stored in potential_trade_s6
+                
+                sl_percentage_for_sizing_s6 = None
+                if entry_price_s6_final > 0 and sl_price_s6 > 0 :
+                    if potential_trade_s6['signal'] == 'buy' and sl_price_s6 < entry_price_s6_final:
+                        sl_percentage_for_sizing_s6 = (entry_price_s6_final - sl_price_s6) / entry_price_s6_final
+                    elif potential_trade_s6['signal'] == 'sell' and sl_price_s6 > entry_price_s6_final:
+                        sl_percentage_for_sizing_s6 = (sl_price_s6 - entry_price_s6_final) / entry_price_s6_final
+                
+                final_trade_size_s6 = 0.02 # Default
+                if sl_percentage_for_sizing_s6 and sl_percentage_for_sizing_s6 > 0 and self.account_risk_percent_bt > 0:
+                    calculated_size_s6 = self.account_risk_percent_bt / sl_percentage_for_sizing_s6
+                    final_trade_size_s6 = min(calculated_size_s6, 1.0)
+                    print(f"{log_prefix_bt_next} S6 Sizing: AccRisk={self.account_risk_percent_bt*100:.2f}%, SL%={sl_percentage_for_sizing_s6*100:.2f}%, CalcSize={calculated_size_s6:.4f}, FinalSize={final_trade_size_s6:.4f}")
+
+                print(f"{log_prefix_bt_next} S6 Placing Trade: Side={potential_trade_s6['signal']}, Entry={entry_price_s6_final:.{log_price_precision}f}, SL={sl_price_s6:.{log_price_precision}f}, TP={tp_price_s6:.{log_price_precision}f}, Size={final_trade_size_s6}")
+                if potential_trade_s6['signal'] == 'buy':
+                    self.buy(sl=sl_price_s6, tp=tp_price_s6, size=final_trade_size_s6)
+                else: # sell
+                    self.sell(sl=sl_price_s6, tp=tp_price_s6, size=final_trade_size_s6)
+            else:
+                 # This 'else' means no 'potential_trade_s6' was formed.
+                 # Debug prints within the logic above should indicate why (e.g., R:R too low, price not in zone, etc.)
+                 print(f"{log_prefix_bt_next} S6: No valid trade signal this bar based on refined conditions.")
+        
+        elif self.current_strategy_id == 7: # Candlestick Patterns Strategy (Backtesting Logic)
+            print(f"{log_prefix_bt_next} S7 BT: Entering Strategy 7 logic.")
+            if self.position:
+                print(f"{log_prefix_bt_next} S7 BT: Already in position. Skipping.")
+                return
+
+            min_bars_s7 = 205 # Matches live strategy's min_klines_needed for EMA200 and volume lookback
+            print(f"{log_prefix_bt_next} S7 BT: Current bar index: {len(self.data.Close)-1}, Timestamp: {self.data.index[-1]}")
+            print(f"{log_prefix_bt_next} S7 BT: len(self.data.Close)={len(self.data.Close)}, min_bars_s7={min_bars_s7}")
+
+            if len(self.data.Close) < min_bars_s7:
+                print(f"{log_prefix_bt_next} S7 BT: Insufficient data length ({len(self.data.Close)} < {min_bars_s7}). Skipping.")
+                return
+            
+            print(f"{log_prefix_bt_next} S7 BT: Accessing self.ema200_s7. Length: {len(self.ema200_s7) if self.ema200_s7 is not None else 'None'}")
+            if self.ema200_s7 is None or len(self.ema200_s7) < 1 or pd.isna(self.ema200_s7[-1]):
+                print(f"{log_prefix_bt_next} S7 BT: EMA200 not available or NaN (Value: {self.ema200_s7[-1] if self.ema200_s7 is not None and len(self.ema200_s7) > 0 else 'N/A'}). Skipping.")
+                return
+            
+            # Liquidity filter (simplified for backtesting - assuming data is for active hours)
+            # We'll assume data provided for backtesting is within valid trading hours.
+            print(f"{log_prefix_bt_next} S7 BT: Preparing current_df_slice. len(self.data.Close)={len(self.data.Close)}")
+            current_df_slice = self.data.df.iloc[len(self.data.Close)-5 : len(self.data.Close)] if len(self.data.Close) >=5 else self.data.df.iloc[:len(self.data.Close)]
+            print(f"{log_prefix_bt_next} S7 BT: current_df_slice shape: {current_df_slice.shape}. Head:\n{current_df_slice.head()}")
+            
+            m_curr = get_candle_metrics(current_df_slice.iloc[-1]) if len(current_df_slice) >= 1 else None
+            m_prev = get_candle_metrics(current_df_slice.iloc[-2]) if len(current_df_slice) >= 2 else None
+            m_prev2 = get_candle_metrics(current_df_slice.iloc[-3]) if len(current_df_slice) >= 3 else None
+            print(f"{log_prefix_bt_next} S7 BT: m_curr: {m_curr is not None}, m_prev: {m_prev is not None}, m_prev2: {m_prev2 is not None}")
+            if not m_curr: 
+                print(f"{log_prefix_bt_next} S7 BT: m_curr is None. Skipping.")
+                return
+
+            # Volume Spike Check for Backtesting (using class attributes for params)
+            volume_spike_detected_s7_bt = False
+            print(f"{log_prefix_bt_next} S7 BT: Checking volume spike. len(self.data.Volume)={len(self.data.Volume)}, s7_bt_volume_lookback={self.s7_bt_volume_lookback}")
+            if len(self.data.Volume) < self.s7_bt_volume_lookback + 1:
+                volume_spike_detected_s7_bt = False
+                print(f"{log_prefix_bt_next} S7 BT: Not enough volume data for spike check.")
+            else:
+                volume_data_slice_for_spike_check = self.data.df.iloc[len(self.data.Close) - (self.s7_bt_volume_lookback + 1) : len(self.data.Close)]
+                print(f"{log_prefix_bt_next} S7 BT: volume_data_slice_for_spike_check shape: {volume_data_slice_for_spike_check.shape}")
+                volume_spike_detected_s7_bt = check_volume_spike(volume_data_slice_for_spike_check, lookback_period=self.s7_bt_volume_lookback, multiplier=self.s7_bt_volume_multiplier)
+            print(f"{log_prefix_bt_next} S7 BT: volume_spike_detected_s7_bt: {volume_spike_detected_s7_bt}")
+
+            # EMA Filter (using class attribute for period, though ema200_s7 is already calculated with 200)
+            last_ema200_s7_bt = self.ema200_s7[-1]
+            prev_ema200_s7_bt = self.ema200_s7[-2] if len(self.ema200_s7) >=2 else None
+            current_price_s7_bt = price 
+            print(f"{log_prefix_bt_next} S7 BT: EMA Filter: Price={current_price_s7_bt}, EMA200={last_ema200_s7_bt}, PrevEMA200={prev_ema200_s7_bt}")
+            
+            ema200_slope_up_bt = False
+            ema200_slope_down_bt = False
+            if prev_ema200_s7_bt is not None and not pd.isna(last_ema200_s7_bt) and not pd.isna(prev_ema200_s7_bt):
+                if last_ema200_s7_bt > prev_ema200_s7_bt: ema200_slope_up_bt = True
+                elif last_ema200_s7_bt < prev_ema200_s7_bt: ema200_slope_down_bt = True
+            print(f"{log_prefix_bt_next} S7 BT: EMA Slope: Up={ema200_slope_up_bt}, Down={ema200_slope_down_bt}")
+
+            detected_pattern_name_s7_bt = "None"; pattern_side_s7_bt = "none"; sl_ref_price_s7_bt = None
+            print(f"{log_prefix_bt_next} S7 BT: Detecting patterns...")
+            # ... (pattern detection logic remains the same) ...
+            if m_prev2 and m_prev and is_morning_star(m_prev2, m_prev, m_curr): 
+                detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Morning Star", "up", min(m_prev2['l'], m_prev['l'], m_curr['l'])
+                print(f"{log_prefix_bt_next} S7 BT: Detected Pattern: Morning Star")
+            elif m_prev2 and m_prev and is_evening_star(m_prev2, m_prev, m_curr): 
+                detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Evening Star", "down", max(m_prev2['h'], m_prev['h'], m_curr['h'])
+                print(f"{log_prefix_bt_next} S7 BT: Detected Pattern: Evening Star")
+            elif m_prev and is_bullish_engulfing(m_prev, m_curr): 
+                detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Bullish Engulfing", "up", m_curr['l']
+                print(f"{log_prefix_bt_next} S7 BT: Detected Pattern: Bullish Engulfing")
+            elif m_prev and is_bearish_engulfing(m_prev, m_curr): 
+                detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Bearish Engulfing", "down", m_curr['h']
+                print(f"{log_prefix_bt_next} S7 BT: Detected Pattern: Bearish Engulfing")
+            # ... (pattern detection logic remains the same) ...
+            if m_prev2 and m_prev and is_morning_star(m_prev2, m_prev, m_curr): 
+                detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Morning Star", "up", min(m_prev2['l'], m_prev['l'], m_curr['l'])
+                print(f"{log_prefix_bt_next} S7 BT: Detected Pattern: Morning Star")
+            elif m_prev2 and m_prev and is_evening_star(m_prev2, m_prev, m_curr): 
+                detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Evening Star", "down", max(m_prev2['h'], m_prev['h'], m_curr['h'])
+                print(f"{log_prefix_bt_next} S7 BT: Detected Pattern: Evening Star")
+            elif m_prev and is_bullish_engulfing(m_prev, m_curr): 
+                detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Bullish Engulfing", "up", m_curr['l']
+                print(f"{log_prefix_bt_next} S7 BT: Detected Pattern: Bullish Engulfing")
+            elif m_prev and is_bearish_engulfing(m_prev, m_curr): 
+                detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Bearish Engulfing", "down", m_curr['h']
+                print(f"{log_prefix_bt_next} S7 BT: Detected Pattern: Bearish Engulfing")
+            elif is_hammer(m_curr): 
+                detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Hammer", "up", m_curr['l']
+                print(f"{log_prefix_bt_next} S7 BT: Detected Pattern: Hammer")
+            elif is_hanging_man(m_curr): 
+                detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Hanging Man", "down", m_curr['h']
+                print(f"{log_prefix_bt_next} S7 BT: Detected Pattern: Hanging Man")
+            elif is_inverted_hammer(m_curr): 
+                detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Inverted Hammer", "up", m_curr['l']
+                print(f"{log_prefix_bt_next} S7 BT: Detected Pattern: Inverted Hammer")
+            elif is_shooting_star(m_curr): 
+                detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Shooting Star", "down", m_curr['h']
+                print(f"{log_prefix_bt_next} S7 BT: Detected Pattern: Shooting Star")
+            elif m_prev and is_piercing_line(m_prev, m_curr): 
+                detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Piercing Line", "up", m_curr['l']
+                print(f"{log_prefix_bt_next} S7 BT: Detected Pattern: Piercing Line")
+            elif m_prev and is_dark_cloud_cover(m_prev, m_curr): 
+                detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Dark Cloud Cover", "down", m_curr['h']
+                print(f"{log_prefix_bt_next} S7 BT: Detected Pattern: Dark Cloud Cover")
+            elif m_prev2 and m_prev and is_three_white_soldiers(m_prev2, m_prev, m_curr): 
+                detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Three White Soldiers", "up", m_prev2['l']
+                print(f"{log_prefix_bt_next} S7 BT: Detected Pattern: Three White Soldiers")
+            elif m_prev2 and m_prev and is_three_black_crows(m_prev2, m_prev, m_curr): 
+                detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Three Black Crows", "down", m_prev2['h']
+                print(f"{log_prefix_bt_next} S7 BT: Detected Pattern: Three Black Crows")
+            elif len(current_df_slice) >= 5 and is_rising_three_methods(current_df_slice): 
+                detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Rising Three Methods", "up", current_df_slice.iloc[0]['Low']
+                print(f"{log_prefix_bt_next} S7 BT: Detected Pattern: Rising Three Methods")
+            elif len(current_df_slice) >= 5 and is_falling_three_methods(current_df_slice): 
+                detected_pattern_name_s7_bt, pattern_side_s7_bt, sl_ref_price_s7_bt = "Falling Three Methods", "down", current_df_slice.iloc[0]['High']
+                print(f"{log_prefix_bt_next} S7 BT: Detected Pattern: Falling Three Methods")
+            else:
+                print(f"{log_prefix_bt_next} S7 BT: No specific candlestick pattern detected by main checks.")
+
+
+            if pattern_side_s7_bt != "none":
+                print(f"{log_prefix_bt_next} S7 BT: Pattern detected: {detected_pattern_name_s7_bt} ({pattern_side_s7_bt}). Evaluating filters...")
+                ema_filter_passed_s7_bt = False
+                if pattern_side_s7_bt == "up" and current_price_s7_bt > last_ema200_s7_bt and ema200_slope_up_bt:
+                    ema_filter_passed_s7_bt = True
+                elif pattern_side_s7_bt == "down" and current_price_s7_bt < last_ema200_s7_bt and ema200_slope_down_bt:
+                    ema_filter_passed_s7_bt = True
+                print(f"{log_prefix_bt_next} S7 BT: EMA Filter Passed: {ema_filter_passed_s7_bt} (FILTERS NOW REMOVED FOR ENTRY)")
+                
+                # rsi_filter_passed_s7_bt = True # Default to true, set to false if condition met (FILTER REMOVED)
+                print(f"{log_prefix_bt_next} S7 BT: Volume Spike Detected: {volume_spike_detected_s7_bt} (FILTERS NOW REMOVED FOR ENTRY)")
+
+                # if ema_filter_passed_s7_bt and volume_spike_detected_s7_bt: # RSI filter only if others pass (FILTERS REMOVED)
+                    # print(f"{log_prefix_bt_next} S7 BT: Calculating RSI for filter. RSI Period: {self.s7_bt_rsi_period} (FILTER REMOVED)")
+                    # try:
+                        # close_prices_list_filter = list(self.data.Close)
+                        # if not close_prices_list_filter:
+                        #     raise ValueError("Close prices list for filter is empty.")
+                        
+                        # rsi_values_for_s7_filter = rsi_bt(pd.Series(close_prices_list_filter), period=self.s7_bt_rsi_period)
+
+                        # if rsi_values_for_s7_filter is None:
+                        #     raise ValueError("rsi_bt for filter returned None.")
+                        # if rsi_values_for_s7_filter.empty:
+                        #     raise ValueError("rsi_bt for filter returned an empty Series.")
+                        # if rsi_values_for_s7_filter.isnull().all():
+                        #     raise ValueError("rsi_bt for filter returned a Series with all NaNs.")
+                        # if pd.isna(rsi_values_for_s7_filter.iloc[-1]):
+                        #     raise ValueError("Last RSI value for filter is NaN.")
+
+                        # last_rsi_s7_bt = rsi_values_for_s7_filter.iloc[-1]
+                        # print(f"{log_prefix_bt_next} S7 BT: Last RSI for filter: {last_rsi_s7_bt:.2f}. Side: {pattern_side_s7_bt}, OB: {self.s7_bt_rsi_overbought}, OS: {self.s7_bt_rsi_oversold} (FILTER REMOVED)")
+                        # if pattern_side_s7_bt == "up" and last_rsi_s7_bt > self.s7_bt_rsi_overbought:
+                        #     rsi_filter_passed_s7_bt = False
+                        # elif pattern_side_s7_bt == "down" and last_rsi_s7_bt < self.s7_bt_rsi_oversold:
+                        #     rsi_filter_passed_s7_bt = False
+                        # # else: rsi_filter_passed_s7_bt remains True (its default)
+                            
+                    # except ValueError as ve_rsi_filter:
+                    #     print(f"{log_prefix_bt_next} S7 BT: ValueError during RSI filter processing: {ve_rsi_filter} (FILTER REMOVED).")
+                    #     # rsi_filter_passed_s7_bt = False # FILTER REMOVED
+                    # except Exception as e_rsi_filter_general:
+                    #     print(f"{log_prefix_bt_next} S7 BT: Unexpected error during RSI filter processing: {e_rsi_filter_general} (FILTER REMOVED).")
+                        # rsi_filter_passed_s7_bt = False # FILTER REMOVED
+                    
+                    # print(f"{log_prefix_bt_next} S7 BT: RSI Filter Passed: {rsi_filter_passed_s7_bt} (FILTER REMOVED)")
+                # else: # EMA or Volume filter failed, so RSI filter effectively fails too for pattern trade (FILTERS REMOVED)
+                    # rsi_filter_passed_s7_bt = False # Ensure it's false if primary filters fail (FILTERS REMOVED)
+                    # print(f"{log_prefix_bt_next} S7 BT: EMA or Volume filter failed, so RSI filter step skipped/failed for pattern trade (FILTERS REMOVED).")
+
+                
+                # if ema_filter_passed_s7_bt and volume_spike_detected_s7_bt and rsi_filter_passed_s7_bt: # Check all three again (NOW JUST CHECKS IF PATTERN EXISTS)
+                # Simplified: If pattern_side_s7_bt is not "none", it means a pattern was detected. Filters are bypassed.
+                if pattern_side_s7_bt != "none":
+                    print(f"{log_prefix_bt_next} S7 BT: Pattern {detected_pattern_name_s7_bt} detected. Proceeding to SL/TP (filters removed).")
+                    entry_price_s7 = current_price_s7_bt
+                    sl_to_use_s7, tp_to_use_s7 = None, None
+                    sl_percentage_for_sizing_s7 = None
+
+                    if self.sl_tp_mode_bt == "ATR/Dynamic":
+                        print(f"{log_prefix_bt_next} S7 BT: ATR/Dynamic SL/TP mode. ATR Period: {self.s7_bt_atr_period}, SL ATR Multi: {self.s7_bt_sl_atr_multiplier}, TP ATR Multi: {self.s7_bt_tp_atr_multiplier}")
+                        if self.atr_s7 is None or len(self.atr_s7) < 1 or pd.isna(self.atr_s7[-1]) or self.atr_s7[-1] == 0:
+                            print(f"{log_prefix_bt_next} S7 BT: ATR data for SL/TP is None, too short, NaN, or zero ({self.atr_s7[-1] if self.atr_s7 is not None and len(self.atr_s7)>0 else 'N/A'}). Cannot place trade.")
+                            return # Not enough ATR data
+                        current_atr_s7_bt = self.atr_s7[-1] 
+                        print(f"{log_prefix_bt_next} S7 BT: Current ATR for SL/TP: {current_atr_s7_bt:.4f}")
+                        
+                        sl_distance = current_atr_s7_bt * self.s7_bt_sl_atr_multiplier
+                        tp_distance = current_atr_s7_bt * self.s7_bt_tp_atr_multiplier 
+                        print(f"{log_prefix_bt_next} S7 BT: SL Distance: {sl_distance:.4f}, TP Distance: {tp_distance:.4f}")
+
+                        if pattern_side_s7_bt == "up":
+                            sl_to_use_s7 = round(entry_price_s7 - sl_distance, self.PRICE_PRECISION_BT)
+                            tp_to_use_s7 = round(entry_price_s7 + tp_distance, self.PRICE_PRECISION_BT)
+                        else: # down
+                            sl_to_use_s7 = round(entry_price_s7 + sl_distance, self.PRICE_PRECISION_BT)
+                            tp_to_use_s7 = round(entry_price_s7 - tp_distance, self.PRICE_PRECISION_BT)
+                        print(f"{log_prefix_bt_next} S7 BT: Calculated SL: {sl_to_use_s7}, TP: {tp_to_use_s7} for side {pattern_side_s7_bt}")
+
+                        if sl_to_use_s7 is not None and entry_price_s7 > 0: 
+                            sl_diff = abs(entry_price_s7 - sl_to_use_s7)
+                            if sl_diff > 0 : sl_percentage_for_sizing_s7 = sl_diff / entry_price_s7
+                            else: 
+                                print(f"{log_prefix_bt_next} S7 BT: SL is at entry price. Invalidating SL.")
+                                sl_to_use_s7 = None 
+                        print(f"{log_prefix_bt_next} S7 BT: SL Pct for Sizing: {sl_percentage_for_sizing_s7*100 if sl_percentage_for_sizing_s7 is not None else 'N/A'}%")
+
+
+                    elif self.sl_tp_mode_bt == "Percentage":
+                        sl_to_use_s7 = sl_long if pattern_side_s7_bt == "up" else sl_short
+                        tp_to_use_s7 = tp_long if pattern_side_s7_bt == "up" else tp_short
+                        if self.user_sl > 0: sl_percentage_for_sizing_s7 = self.user_sl
+                        print(f"{log_prefix_bt_next} S7 BT: Percentage SL/TP mode. SL: {sl_to_use_s7}, TP: {tp_to_use_s7}")
+                    elif self.sl_tp_mode_bt == "Fixed PnL":
+                        sl_to_use_s7 = sl_long if pattern_side_s7_bt == "up" else sl_short
+                        tp_to_use_s7 = tp_long if pattern_side_s7_bt == "up" else tp_short
+                        sl_percentage_for_sizing_s7 = None 
+                        print(f"{log_prefix_bt_next} S7 BT: Fixed PnL SL/TP mode. SL: {sl_to_use_s7}, TP: {tp_to_use_s7}. Sizing uses default.")
+                    
+                    if sl_to_use_s7 is None or tp_to_use_s7 is None or sl_to_use_s7 <= 0 or tp_to_use_s7 <= 0: 
+                        print(f"{log_prefix_bt_next} S7 BT: SL/TP is None or non-positive. SL={sl_to_use_s7}, TP={tp_to_use_s7}. Skipping trade.")
+                        return
+                    if pattern_side_s7_bt == "up" and (sl_to_use_s7 >= entry_price_s7 or tp_to_use_s7 <= entry_price_s7): 
+                        print(f"{log_prefix_bt_next} S7 BT: Invalid SL/TP for UP signal. SL={sl_to_use_s7}, TP={tp_to_use_s7}, Entry={entry_price_s7}. Skipping trade.")
+                        return
+                    if pattern_side_s7_bt == "down" and (sl_to_use_s7 <= entry_price_s7 or tp_to_use_s7 >= entry_price_s7): 
+                        print(f"{log_prefix_bt_next} S7 BT: Invalid SL/TP for DOWN signal. SL={sl_to_use_s7}, TP={tp_to_use_s7}, Entry={entry_price_s7}. Skipping trade.")
+                        return
+
+                    final_trade_size_s7 = 0.02 
+                    if sl_percentage_for_sizing_s7 and sl_percentage_for_sizing_s7 > 0 and self.account_risk_percent_bt > 0:
+                        calculated_size_s7 = self.account_risk_percent_bt / sl_percentage_for_sizing_s7
+                        final_trade_size_s7 = min(calculated_size_s7, 1.0) # Cap at 100%
+                    print(f"{log_prefix_bt_next} S7 Sizing for Pattern: AccRisk={self.account_risk_percent_bt*100:.2f}%, SL%={sl_percentage_for_sizing_s7*100 if sl_percentage_for_sizing_s7 else 'N/A'}%, CalcSize={calculated_size_s7 if sl_percentage_for_sizing_s7 else 'N/A'}, FinalSize={final_trade_size_s7:.4f}")
+
+                    print(f"{log_prefix_bt_next} S7 BT: Placing Pattern Trade: Side={pattern_side_s7_bt}, Size={final_trade_size_s7}, SL={sl_to_use_s7}, TP={tp_to_use_s7}")
+                    if pattern_side_s7_bt == "up": self.buy(sl=sl_to_use_s7, tp=tp_to_use_s7, size=final_trade_size_s7)
+                    else: self.sell(sl=sl_to_use_s7, tp=tp_to_use_s7, size=final_trade_size_s7)
+                else: # Filters not passed for pattern
+                    print(f"{log_prefix_bt_next} S7 BT: Pattern {detected_pattern_name_s7_bt} detected, but filters (EMA, Volume, or RSI) not passed. No pattern trade.")
+
+            # Fallback RSI logic for S7 (if no candlestick pattern)
+            elif detected_pattern_name_s7_bt == "None": # No candlestick pattern
+                print(f"{log_prefix_bt_next} S7 BT: No candlestick pattern. Checking RSI fallback...")
+                try:
+                    # Attempt to make RSI calculation more robust
+                    close_prices_list = list(self.data.Close) # Convert _Array to list first
+                    if not close_prices_list:
+                        raise ValueError("Close prices list is empty.")
+
+                    rsi_values_for_s7_fallback = rsi_bt(pd.Series(close_prices_list), period=self.s7_bt_rsi_period)
+                    
+                    if rsi_values_for_s7_fallback is None:
+                        raise ValueError("rsi_bt returned None.")
+                    if rsi_values_for_s7_fallback.empty:
+                        raise ValueError("rsi_bt returned an empty Series.")
+                    if rsi_values_for_s7_fallback.isnull().all():
+                        raise ValueError("rsi_bt returned a Series with all NaNs.")
+                    if pd.isna(rsi_values_for_s7_fallback.iloc[-1]): # Check last value specifically
+                        raise ValueError("Last RSI value is NaN.")
+
+                    last_rsi_s7_fallback = rsi_values_for_s7_fallback.iloc[-1]
+                    print(f"{log_prefix_bt_next} S7 BT RSI Fallback: Last RSI={last_rsi_s7_fallback:.2f}, OS={self.s7_bt_rsi_oversold}, OB={self.s7_bt_rsi_overbought}")
+                    rsi_fallback_side = "none"
+                    if last_rsi_s7_fallback < self.s7_bt_rsi_oversold: 
+                        rsi_fallback_side = "buy"
+                    elif last_rsi_s7_fallback > self.s7_bt_rsi_overbought: 
+                        rsi_fallback_side = "sell"
+                    
+                    if rsi_fallback_side != "none":
+                        print(f"{log_prefix_bt_next} S7 BT RSI Fallback: Potential side {rsi_fallback_side}. Checking EMA alignment...")
+                        ema_aligned_for_rsi = False
+                        if rsi_fallback_side == "buy" and current_price_s7_bt > last_ema200_s7_bt and ema200_slope_up_bt:
+                            ema_aligned_for_rsi = True
+                        elif rsi_fallback_side == "sell" and current_price_s7_bt < last_ema200_s7_bt and ema200_slope_down_bt:
+                            ema_aligned_for_rsi = True
+                        print(f"{log_prefix_bt_next} S7 BT RSI Fallback: EMA Aligned: {ema_aligned_for_rsi}")
+                        
+                        if ema_aligned_for_rsi: 
+                            print(f"{log_prefix_bt_next} S7 BT RSI Fallback: EMA aligned. Proceeding to SL/TP for RSI fallback.")
+                            entry_price_s7_rsi = current_price_s7_bt
+                            sl_rsi_fb, tp_rsi_fb = None, None
+                            sl_percentage_for_sizing_s7_rsi = None
+
+                            if self.sl_tp_mode_bt == "ATR/Dynamic":
+                                print(f"{log_prefix_bt_next} S7 BT RSI Fallback: ATR/Dynamic SL/TP. ATR Period: {self.s7_bt_atr_period}, SL Multi: {self.s7_bt_sl_atr_multiplier}, TP Multi: {self.s7_bt_tp_atr_multiplier}")
+                                if self.atr_s7 is None or len(self.atr_s7) < 1 or pd.isna(self.atr_s7[-1]) or self.atr_s7[-1] == 0: 
+                                    print(f"{log_prefix_bt_next} S7 BT RSI Fallback: ATR data for SL/TP is None, too short, NaN or zero. Cannot place trade.")
+                                    return # Return here to avoid further processing with bad ATR
+                                current_atr_s7_bt_fb = self.atr_s7[-1]
+                                print(f"{log_prefix_bt_next} S7 BT RSI Fallback: Current ATR for SL/TP: {current_atr_s7_bt_fb:.4f}")
+                                sl_dist_rsi = current_atr_s7_bt_fb * self.s7_bt_sl_atr_multiplier 
+                                tp_dist_rsi = current_atr_s7_bt_fb * self.s7_bt_tp_atr_multiplier
+                                print(f"{log_prefix_bt_next} S7 BT RSI Fallback: SL Distance: {sl_dist_rsi:.4f}, TP Distance: {tp_dist_rsi:.4f}")
+
+                                if rsi_fallback_side == "buy":
+                                    sl_rsi_fb = round(entry_price_s7_rsi - sl_dist_rsi, self.PRICE_PRECISION_BT)
+                                    tp_rsi_fb = round(entry_price_s7_rsi + tp_dist_rsi, self.PRICE_PRECISION_BT)
+                                else: # sell
+                                    sl_rsi_fb = round(entry_price_s7_rsi + sl_dist_rsi, self.PRICE_PRECISION_BT)
+                                    tp_rsi_fb = round(entry_price_s7_rsi - tp_dist_rsi, self.PRICE_PRECISION_BT)
+                                print(f"{log_prefix_bt_next} S7 BT RSI Fallback: Calculated SL: {sl_rsi_fb}, TP: {tp_rsi_fb}")
+                                
+                                if sl_rsi_fb is not None and entry_price_s7_rsi > 0:
+                                    sl_diff_rsi = abs(entry_price_s7_rsi - sl_rsi_fb)
+                                    if sl_diff_rsi > 0: sl_percentage_for_sizing_s7_rsi = sl_diff_rsi / entry_price_s7_rsi
+                                    else: 
+                                        print(f"{log_prefix_bt_next} S7 BT RSI Fallback: SL is at entry. Invalidating SL.")
+                                        sl_rsi_fb = None # Invalidate SL to prevent trade
+                                print(f"{log_prefix_bt_next} S7 BT RSI Fallback: SL Pct for Sizing: {sl_percentage_for_sizing_s7_rsi*100 if sl_percentage_for_sizing_s7_rsi is not None else 'N/A'}%")
+
+                            elif self.sl_tp_mode_bt == "Percentage":
+                                sl_rsi_fb = sl_long if rsi_fallback_side == "buy" else sl_short
+                                tp_rsi_fb = tp_long if rsi_fallback_side == "buy" else tp_short
+                                if self.user_sl > 0 : sl_percentage_for_sizing_s7_rsi = self.user_sl
+                                print(f"{log_prefix_bt_next} S7 BT RSI Fallback: Percentage SL/TP. SL: {sl_rsi_fb}, TP: {tp_rsi_fb}")
+                            
+                            if sl_rsi_fb and tp_rsi_fb and sl_rsi_fb > 0 and tp_rsi_fb > 0:
+                                if (rsi_fallback_side == "buy" and sl_rsi_fb < entry_price_s7_rsi and tp_rsi_fb > entry_price_s7_rsi) or \
+                                   (rsi_fallback_side == "sell" and sl_rsi_fb > entry_price_s7_rsi and tp_rsi_fb < entry_price_s7_rsi):
+                                    
+                                    final_trade_size_s7_rsi = 0.02 # Default size
+                                    if sl_percentage_for_sizing_s7_rsi and sl_percentage_for_sizing_s7_rsi > 0 and self.account_risk_percent_bt > 0:
+                                        calc_size_rsi = self.account_risk_percent_bt / sl_percentage_for_sizing_s7_rsi
+                                        final_trade_size_s7_rsi = min(calc_size_rsi, 1.0) # Cap size
+                                    print(f"{log_prefix_bt_next} S7 Sizing for RSI Fallback: AccRisk={self.account_risk_percent_bt*100:.2f}%, SL%={sl_percentage_for_sizing_s7_rsi*100 if sl_percentage_for_sizing_s7_rsi else 'N/A'}%, CalcSize={calc_size_rsi if sl_percentage_for_sizing_s7_rsi else 'N/A'}, FinalSize={final_trade_size_s7_rsi:.4f}")
+                                    
+                                    print(f"{log_prefix_bt_next} S7 BT: Placing RSI Fallback Trade: Side={rsi_fallback_side}, Size={final_trade_size_s7_rsi}, SL={sl_rsi_fb}, TP={tp_rsi_fb}")
+                                    if rsi_fallback_side == "buy": self.buy(sl=sl_rsi_fb, tp=tp_rsi_fb, size=final_trade_size_s7_rsi)
+                                    else: self.sell(sl=sl_rsi_fb, tp=tp_rsi_fb, size=final_trade_size_s7_rsi)
+                                else:
+                                    print(f"{log_prefix_bt_next} S7 BT RSI Fallback: Invalid SL/TP relation for {rsi_fallback_side}. SL={sl_rsi_fb}, TP={tp_rsi_fb}, Entry={entry_price_s7_rsi}. No trade.")
+                            else:
+                                print(f"{log_prefix_bt_next} S7 BT RSI Fallback: SL/TP is None or non-positive after calculation. SL={sl_rsi_fb}, TP={tp_rsi_fb}. No trade.")
+                        else:
+                             print(f"{log_prefix_bt_next} S7 BT RSI Fallback: EMA not aligned for RSI signal. No trade.")
+                    else:
+                        print(f"{log_prefix_bt_next} S7 BT RSI Fallback: No RSI OS/OB condition met. No trade.")
+                
+                except ValueError as ve_rsi: # Catch specific ValueErrors from our checks or rsi_bt
+                    print(f"{log_prefix_bt_next} S7 BT RSI Fallback: ValueError during RSI processing: {ve_rsi}. No trade.")
+                except Exception as e_rsi_fallback_general: # Catch any other unexpected error
+                    print(f"{log_prefix_bt_next} S7 BT RSI Fallback: Unexpected error: {e_rsi_fallback_general}. No trade.")
+                    # import traceback # Uncomment for detailed traceback during debugging
+                    # print(traceback.format_exc()) # Uncomment for detailed traceback
+            
+            else: # Pattern detected but filters failed
+                print(f"{log_prefix_bt_next} S7 BT: Pattern {detected_pattern_name_s7_bt} was detected, but one or more filters (EMA, Volume, RSI) failed. No trade.")
+
+
+        # else: # Other strategies not yet updated for this new SL/TP structure
+            # print(f"{log_prefix_bt_next} Strategy ID {self.current_strategy_id} not fully updated for new SL/TP modes in next().")
+            # Basic RSI logic as a placeholder if other strategies are selected without full logic
+            # This part should be removed or adapted as each strategy is fully integrated
+            # if not self.position and hasattr(self, 'rsi') and len(self.rsi) > 0:
+            #     if self.rsi[-1] < 30 and self.sl_tp_mode_bt != "ATR/Dynamic": # Example buy with non-ATR SL/TP
+            #         if sl_long is not None and tp_long is not None and sl_long < price and tp_long > price:
+            #              self.buy(size=trade_size_to_use_in_order, sl=sl_long, tp=tp_long)
+            #     elif self.rsi[-1] > 70 and self.sl_tp_mode_bt != "ATR/Dynamic": # Example sell
+            #         if sl_short is not None and tp_short is not None and sl_short > price and tp_short < price:
+            #              self.sell(size=trade_size_to_use_in_order, sl=sl_short, tp=tp_short)
+
+
+# Function to execute backtest
+def execute_backtest(strategy_id_for_backtest, symbol, timeframe, interval_days, 
                      ui_tp_percentage, ui_sl_percentage, # Percentage based
                      sl_tp_mode, sl_pnl_amount_val, tp_pnl_amount_val, # PnL and Mode based
                      starting_capital, # New parameter for starting capital
@@ -2579,42 +3138,14 @@ def get_formatted_strategy_parameters_and_conditions(strategy_id, symbol, condit
     if error_message:
         content_lines.append(f"Error: {error_message}")
     elif conditions_data:
-        for cond_id, status_info in conditions_data.items():
-            # Try to find the human-readable name from the strategy definition
-            cond_name_display = cond_id.replace('_', ' ').title() # Default display name
-            strategy_def = next((s for s in strategies if s["name"] == strategy_name), None)
-            if strategy_def and "conditions" in strategy_def:
-                cond_detail = next((c for c in strategy_def["conditions"] if c["id"] == cond_id), None)
-                if cond_detail:
-                    cond_name_display = cond_detail["name"]
-
-            if isinstance(status_info, dict):
-                is_enabled = status_info.get('is_enabled', True) # Default to true if missing, though it should be there
-                evaluated_to = status_info.get('evaluated_to', 'N/A')
-                details = status_info.get('details', '')
-
-                enabled_str = "(Enabled)" if is_enabled else "(Disabled)"
-                
-                eval_str = "N/A"
-                if isinstance(evaluated_to, bool):
-                    eval_str = "✅ True" if evaluated_to else "❌ False"
-                elif evaluated_to != 'N/A': # Could be numbers (like EMA trend signal) or specific strings
-                    eval_str = str(evaluated_to)
-                
-                details_str = f" [{details}]" if details and details != 'N/A' else ""
-                
-                if not is_enabled: # If disabled, perhaps don't show evaluated_to unless it's explicitly set
-                    content_lines.append(f"{cond_name_display} {enabled_str}")
-                else:
-                    content_lines.append(f"{cond_name_display} {enabled_str}: {eval_str}{details_str}")
+        for cond, status in conditions_data.items():
+            formatted_cond_name = cond.replace('_', ' ').title()
+            # Try to format boolean status nicely
+            if isinstance(status, bool):
+                status_str = "✅ True" if status else "❌ False"
             else:
-                # Fallback for old format or non-dictionary status (e.g. num_buy_conditions_met)
-                formatted_cond_name = cond_id.replace('_', ' ').title()
-                if isinstance(status_info, bool):
-                    status_str = "✅ True" if status_info else "❌ False"
-                else:
-                    status_str = str(status_info)
-                content_lines.append(f"{formatted_cond_name}: {status_str}")
+                status_str = str(status) # Handle non-boolean values (e.g. counts, numbers)
+            content_lines.append(f"{formatted_cond_name}: {status_str}")
     else:
         content_lines.append("No conditions data available or strategy not evaluated yet.")
     
@@ -3218,40 +3749,24 @@ def klines(symbol):
     print(f"DEBUG klines({symbol}): Returning None due to unhandled case or prior error.")
     return None
 
-def scalping_strategy_signal(symbol, condition_configs=None): # Added condition_configs
+def scalping_strategy_signal(symbol):
     global LOCAL_HIGH_LOW_LOOKBACK_PERIOD, SCALPING_REQUIRED_BUY_CONDITIONS, SCALPING_REQUIRED_SELL_CONDITIONS
     
-    # Initialize condition_configs if not provided (for direct calls not from main loop/backtest yet)
-    if condition_configs is None:
-        condition_configs = {
-            "s0_ema_cross": True, "s0_rsi_filter": True, "s0_st_filter": True,
-            "s0_vol_spike": True, "s0_price_breakout": True
-        }
-        print(f"Warning: scalping_strategy_signal for {symbol} called without condition_configs. Using defaults.")
-
     return_data = {
         'signal': 'none',
         'conditions_met_count': 0,
-        'conditions_to_start_wait_threshold': 2, 
-        'conditions_for_full_signal_threshold': SCALPING_REQUIRED_BUY_CONDITIONS,
+        'conditions_to_start_wait_threshold': 2, # Standard for S0
+        'conditions_for_full_signal_threshold': SCALPING_REQUIRED_BUY_CONDITIONS, # Default, adjusted later
         'all_conditions_status': {
-            # Store evaluated status and enabled status for each condition
-            's0_ema_cross': {'evaluated_to': False, 'is_enabled': condition_configs.get("s0_ema_cross", True)},
-            's0_rsi_filter': {'evaluated_to': False, 'is_enabled': condition_configs.get("s0_rsi_filter", True)},
-            's0_st_filter': {'evaluated_to': False, 'is_enabled': condition_configs.get("s0_st_filter", True)},
-            's0_vol_spike': {'evaluated_to': False, 'is_enabled': condition_configs.get("s0_vol_spike", True)},
-            's0_price_breakout': {'evaluated_to': False, 'is_enabled': condition_configs.get("s0_price_breakout", True)},
-            # These will be updated based on side:
-            # 'ema_cross_up_eval': False, 'rsi_long_ok_eval': False, 'supertrend_green_eval': False,
-            # 'volume_spike_eval': False, # volume_spike is direction neutral in current logic
-            # 'price_breakout_high_eval': False,
-            # 'ema_cross_down_eval': False, 'rsi_short_ok_eval': False, 'supertrend_red_eval': False,
-            # 'price_breakout_low_eval': False,
-            'num_buy_conditions_met': 0, # Actual met and enabled
-            'num_sell_conditions_met': 0 # Actual met and enabled
+            'ema_cross_up': False, 'rsi_long_ok': False, 'supertrend_green': False,
+            'volume_spike': False, 'price_breakout_high': False,
+            'ema_cross_down': False, 'rsi_short_ok': False, 'supertrend_red': False,
+            'price_breakout_low': False,
+            'num_buy_conditions_met': 0,
+            'num_sell_conditions_met': 0
         },
-        'sl_price': None,
-        'tp_price': None,
+        'sl_price': None, # Not applicable for S0 at this stage
+        'tp_price': None, # Not applicable for S0 at this stage
         'error': None,
         'signal_candle_timestamp': None
     }
@@ -3297,68 +3812,52 @@ def scalping_strategy_signal(symbol, condition_configs=None): # Added condition_
         recent_high = kl['High'].iloc[-(actual_lookback + 1):-1].max() if actual_lookback > 0 else kl['High'].iloc[-2] if len(kl['High']) > 1 else current_price
         recent_low = kl['Low'].iloc[-(actual_lookback + 1):-1].min() if actual_lookback > 0 else kl['Low'].iloc[-2] if len(kl['Low']) > 1 else current_price
 
-        # --- Evaluate all potential conditions first ---
-        evaluated_ema_crossed_up = prev_ema9 < prev_ema21 and last_ema9 > last_ema21
-        evaluated_rsi_valid_long = 50 <= last_rsi <= 70 # These are simplified, params will be needed
-        evaluated_supertrend_is_green = last_supertrend == 'green'
-        evaluated_volume_is_strong = last_volume > last_volume_ma10 # Assumes volume_ma10 is not NaN
-        evaluated_price_broke_high = current_price > recent_high
+        # Individual conditions
+        ema_crossed_up = prev_ema9 < prev_ema21 and last_ema9 > last_ema21
+        rsi_valid_long = 50 <= last_rsi <= 70
+        supertrend_is_green = last_supertrend == 'green'
+        volume_is_strong = last_volume > last_volume_ma10
+        price_broke_high = current_price > recent_high
 
-        evaluated_ema_crossed_down = prev_ema9 > prev_ema21 and last_ema9 < last_ema21
-        evaluated_rsi_valid_short = 30 <= last_rsi <= 50 # These are simplified
-        evaluated_supertrend_is_red = last_supertrend == 'red'
-        evaluated_price_broke_low = current_price < recent_low
+        ema_crossed_down = prev_ema9 > prev_ema21 and last_ema9 < last_ema21
+        rsi_valid_short = 30 <= last_rsi <= 50
+        supertrend_is_red = last_supertrend == 'red'
+        price_broke_low = current_price < recent_low
 
-        # Update all_conditions_status with evaluated values
-        return_data['all_conditions_status']['s0_ema_cross']['evaluated_to'] = evaluated_ema_crossed_up or evaluated_ema_crossed_down # Generic eval
-        return_data['all_conditions_status']['s0_rsi_filter']['evaluated_to'] = evaluated_rsi_valid_long or evaluated_rsi_valid_short # Generic eval
-        return_data['all_conditions_status']['s0_st_filter']['evaluated_to'] = evaluated_supertrend_is_green or evaluated_supertrend_is_red # Generic eval
-        return_data['all_conditions_status']['s0_vol_spike']['evaluated_to'] = evaluated_volume_is_strong
-        return_data['all_conditions_status']['s0_price_breakout']['evaluated_to'] = evaluated_price_broke_high or evaluated_price_broke_low # Generic eval
-
-        # --- Determine active conditions based on config and evaluation for BUY ---
-        active_buy_conditions_results = []
-        if condition_configs.get("s0_ema_cross", True): active_buy_conditions_results.append(evaluated_ema_crossed_up)
-        if condition_configs.get("s0_rsi_filter", True): active_buy_conditions_results.append(evaluated_rsi_valid_long)
-        if condition_configs.get("s0_st_filter", True): active_buy_conditions_results.append(evaluated_supertrend_is_green)
-        if condition_configs.get("s0_vol_spike", True): active_buy_conditions_results.append(evaluated_volume_is_strong)
-        if condition_configs.get("s0_price_breakout", True): active_buy_conditions_results.append(evaluated_price_broke_high)
+        buy_conditions_met = [ema_crossed_up, rsi_valid_long, supertrend_is_green, volume_is_strong, price_broke_high]
+        sell_conditions_met = [ema_crossed_down, rsi_valid_short, supertrend_is_red, volume_is_strong, price_broke_low]
         
-        num_buy_conditions_true = sum(active_buy_conditions_results)
-        return_data['all_conditions_status']['num_buy_conditions_met'] = num_buy_conditions_true
+        num_buy_conditions_true = sum(buy_conditions_met)
+        num_sell_conditions_true = sum(sell_conditions_met)
 
-        # --- Determine active conditions based on config and evaluation for SELL ---
-        active_sell_conditions_results = []
-        if condition_configs.get("s0_ema_cross", True): active_sell_conditions_results.append(evaluated_ema_crossed_down)
-        if condition_configs.get("s0_rsi_filter", True): active_sell_conditions_results.append(evaluated_rsi_valid_short)
-        if condition_configs.get("s0_st_filter", True): active_sell_conditions_results.append(evaluated_supertrend_is_red)
-        if condition_configs.get("s0_vol_spike", True): active_sell_conditions_results.append(evaluated_volume_is_strong) # Same for sell
-        if condition_configs.get("s0_price_breakout", True): active_sell_conditions_results.append(evaluated_price_broke_low)
+        return_data['all_conditions_status'].update({
+            'ema_cross_up': ema_crossed_up, 'rsi_long_ok': rsi_valid_long, 
+            'supertrend_green': supertrend_is_green, 'volume_spike': volume_is_strong, 
+            'price_breakout_high': price_broke_high,
+            'ema_cross_down': ema_crossed_down, 'rsi_short_ok': rsi_valid_short, 
+            'supertrend_red': supertrend_is_red, 'price_breakout_low': price_broke_low,
+            'num_buy_conditions_met': num_buy_conditions_true,
+            'num_sell_conditions_met': num_sell_conditions_true
+        })
 
-        num_sell_conditions_true = sum(active_sell_conditions_results)
-        return_data['all_conditions_status']['num_sell_conditions_met'] = num_sell_conditions_true
-
-        # --- Signal Generation ---
-        # The thresholds SCALPING_REQUIRED_BUY_CONDITIONS and SCALPING_REQUIRED_SELL_CONDITIONS
-        # now apply to the number of *enabled and true* conditions.
         if num_buy_conditions_true >= SCALPING_REQUIRED_BUY_CONDITIONS:
             return_data['signal'] = 'up'
             return_data['conditions_met_count'] = num_buy_conditions_true
-            # conditions_for_full_signal_threshold remains fixed by global SCALPING_REQUIRED_BUY_CONDITIONS
+            return_data['conditions_for_full_signal_threshold'] = SCALPING_REQUIRED_BUY_CONDITIONS
         elif num_sell_conditions_true >= SCALPING_REQUIRED_SELL_CONDITIONS:
             return_data['signal'] = 'down'
             return_data['conditions_met_count'] = num_sell_conditions_true
-        else: # No full signal
-            # For partial/wait check, use the higher count of met & enabled conditions
-            if num_buy_conditions_true >= num_sell_conditions_true:
+            return_data['conditions_for_full_signal_threshold'] = SCALPING_REQUIRED_SELL_CONDITIONS
+        else: # No full signal, set met_count to the higher of the two for partial/wait check
+            if num_buy_conditions_true >= num_sell_conditions_true: # Prioritize buy if equal
                 return_data['conditions_met_count'] = num_buy_conditions_true
+                return_data['conditions_for_full_signal_threshold'] = SCALPING_REQUIRED_BUY_CONDITIONS
             else:
                 return_data['conditions_met_count'] = num_sell_conditions_true
-            # conditions_for_full_signal_threshold is fixed by globals
-
-        # SL/TP Calculation (only if signal is generated and mode is ATR/Dynamic)
+                return_data['conditions_for_full_signal_threshold'] = SCALPING_REQUIRED_SELL_CONDITIONS
+        
         if return_data['signal'] != 'none':
-            if SL_TP_MODE == "ATR/Dynamic":
+            if SL_TP_MODE == "ATR/Dynamic": # Only calculate SL/TP here if mode is ATR/Dynamic
                 try:
                     entry_price = kl['Close'].iloc[-1]
                     # Pass the global DEFAULT_ATR_MULTIPLIER and strategy's RR if applicable, or use defaults
@@ -3420,31 +3919,20 @@ def scalping_strategy_signal(symbol, condition_configs=None): # Added condition_
         return_data['error'] = str(e)
         return return_data
 
-def strategy_ema_supertrend(symbol, condition_configs=None): # Added condition_configs
-    # Default configs if none passed (e.g., direct calls or tests)
-    if condition_configs is None:
-        condition_configs = {
-            "s1_ema_cross": True, "s1_st_confirm": True, "s1_rsi_filter": True
-        }
-        print(f"Warning: strategy_ema_supertrend for {symbol} called without condition_configs. Using defaults.")
-
+def strategy_ema_supertrend(symbol):
     base_return = {
         'signal': 'none',
         'conditions_met_count': 0,
-        'conditions_to_start_wait_threshold': 2, # How many conditions needed to start monitoring
-        'conditions_for_full_signal_threshold': 2, # How many conditions needed for a full signal (REQUIRE_S1 in old code)
+        'conditions_to_start_wait_threshold': 2,
+        'conditions_for_full_signal_threshold': 3, # Changed from 3 to 2
         'all_conditions_status': {
-            's1_ema_cross': {'evaluated_to': False, 'is_enabled': condition_configs.get("s1_ema_cross", True)},
-            's1_st_confirm': {'evaluated_to': False, 'is_enabled': condition_configs.get("s1_st_confirm", True)},
-            's1_rsi_filter': {'evaluated_to': False, 'is_enabled': condition_configs.get("s1_rsi_filter", True)},
-            # Specific evaluations will be stored here too, e.g. 'ema_cross_up_eval', 'rsi_long_ok_eval'
-            'num_buy_conditions_met': 0, # Actual met and enabled
-            'num_sell_conditions_met': 0 # Actual met and enabled
+            'ema_cross_up': False, 'st_green': False, 'rsi_long_ok': False,
+            'ema_cross_down': False, 'st_red': False, 'rsi_short_ok': False,
         },
         'sl_price': None,
         'tp_price': None,
         'error': None,
-        'account_risk_percent': 0.01,
+        'account_risk_percent': 0.01, # Strategy 1 specific risk
         'signal_candle_timestamp': None
     }
 
@@ -3490,68 +3978,46 @@ def strategy_ema_supertrend(symbol, condition_configs=None): # Added condition_c
         if any(pd.isna(v) for v in [last_ema9, prev_ema9, last_ema21, prev_ema21, last_supertrend_signal, last_rsi, current_price]):
             base_return['error'] = "NaN value in critical indicator or price data"
             return base_return
-        # --- Evaluate all potential conditions first (raw evaluation) ---
-        evaluated_ema_crossed_up = prev_ema9 < prev_ema21 and last_ema9 > last_ema21
-        evaluated_st_green = last_supertrend_signal == 'green'
-        evaluated_rsi_long_ok = 40 <= last_rsi <= 70 # Simplified, params will be needed for these ranges
+            
+        # --- Define Conditions ---
+        # Update all_conditions_status in base_return directly
+        base_return['all_conditions_status']['ema_cross_up'] = prev_ema9 < prev_ema21 and last_ema9 > last_ema21
+        base_return['all_conditions_status']['st_green'] = last_supertrend_signal == 'green'
+        base_return['all_conditions_status']['rsi_long_ok'] = 40 <= last_rsi <= 70
 
-        evaluated_ema_crossed_down = prev_ema9 > prev_ema21 and last_ema9 < last_ema21
-        evaluated_st_red = last_supertrend_signal == 'red'
-        evaluated_rsi_short_ok = 30 <= last_rsi <= 60 # Simplified
+        base_return['all_conditions_status']['ema_cross_down'] = prev_ema9 > prev_ema21 and last_ema9 < last_ema21
+        base_return['all_conditions_status']['st_red'] = last_supertrend_signal == 'red'
+        base_return['all_conditions_status']['rsi_short_ok'] = 30 <= last_rsi <= 60
 
-        # Update all_conditions_status with evaluated values
-        base_return['all_conditions_status']['s1_ema_cross']['evaluated_to'] = evaluated_ema_crossed_up or evaluated_ema_crossed_down
-        base_return['all_conditions_status']['s1_st_confirm']['evaluated_to'] = evaluated_st_green or evaluated_st_red
-        base_return['all_conditions_status']['s1_rsi_filter']['evaluated_to'] = evaluated_rsi_long_ok or evaluated_rsi_short_ok
-        
-        # Store specific directional evaluations for clarity if needed by UI or other logic
-        base_return['all_conditions_status']['ema_cross_up_eval'] = evaluated_ema_crossed_up
-        base_return['all_conditions_status']['st_green_eval'] = evaluated_st_green
-        base_return['all_conditions_status']['rsi_long_ok_eval'] = evaluated_rsi_long_ok
-        base_return['all_conditions_status']['ema_cross_down_eval'] = evaluated_ema_crossed_down
-        base_return['all_conditions_status']['st_red_eval'] = evaluated_st_red
-        base_return['all_conditions_status']['rsi_short_ok_eval'] = evaluated_rsi_short_ok
+        # Calculate met conditions count
+        met_buy_conditions = sum([base_return['all_conditions_status']['ema_cross_up'], 
+                                  base_return['all_conditions_status']['st_green'], 
+                                  base_return['all_conditions_status']['rsi_long_ok']])
+        met_sell_conditions = sum([base_return['all_conditions_status']['ema_cross_down'], 
+                                   base_return['all_conditions_status']['st_red'], 
+                                   base_return['all_conditions_status']['rsi_short_ok']])
 
-        # --- Determine active conditions based on config and evaluation for BUY ---
-        active_buy_conditions_results = []
-        if condition_configs.get("s1_ema_cross", True): active_buy_conditions_results.append(evaluated_ema_crossed_up)
-        if condition_configs.get("s1_st_confirm", True): active_buy_conditions_results.append(evaluated_st_green)
-        if condition_configs.get("s1_rsi_filter", True): active_buy_conditions_results.append(evaluated_rsi_long_ok)
-        
-        num_buy_conditions_true = sum(active_buy_conditions_results)
-        base_return['all_conditions_status']['num_buy_conditions_met'] = num_buy_conditions_true
+        final_signal_str = 'none' 
+        calculated_sl, calculated_tp = None, None # For SL/TP values from dynamic function
 
-        # --- Determine active conditions based on config and evaluation for SELL ---
-        active_sell_conditions_results = []
-        if condition_configs.get("s1_ema_cross", True): active_sell_conditions_results.append(evaluated_ema_crossed_down)
-        if condition_configs.get("s1_st_confirm", True): active_sell_conditions_results.append(evaluated_st_red)
-        if condition_configs.get("s1_rsi_filter", True): active_sell_conditions_results.append(evaluated_rsi_short_ok)
-
-        num_sell_conditions_true = sum(active_sell_conditions_results)
-        base_return['all_conditions_status']['num_sell_conditions_met'] = num_sell_conditions_true
-        
-        # --- Signal Generation ---
-        final_signal_str = 'none'
-        calculated_sl, calculated_tp = None, None
-        REQUIRED_S1_CONDITIONS = base_return['conditions_for_full_signal_threshold'] # e.g., 2
-
-        if num_buy_conditions_true >= REQUIRED_S1_CONDITIONS:
+        # Determine potential signal based on conditions first
+        if met_buy_conditions >= 2: # Changed from == base_return['conditions_for_full_signal_threshold']
             final_signal_str = 'up'
-            base_return['conditions_met_count'] = num_buy_conditions_true
-        elif num_sell_conditions_true >= REQUIRED_S1_CONDITIONS:
+            base_return['conditions_met_count'] = met_buy_conditions
+        elif met_sell_conditions >= 2: # Changed from == base_return['conditions_for_full_signal_threshold']
             final_signal_str = 'down'
-            base_return['conditions_met_count'] = num_sell_conditions_true
-        else: # Not a full signal
-            # For partial/wait check, use the higher count of met & enabled conditions
-            if num_buy_conditions_true >= num_sell_conditions_true:
-                 base_return['conditions_met_count'] = num_buy_conditions_true
+            base_return['conditions_met_count'] = met_sell_conditions
+        else: # Not a full signal, determine conditions_met_count for partial/wait check
+            if met_buy_conditions >= met_sell_conditions:
+                 base_return['conditions_met_count'] = met_buy_conditions
             else:
-                 base_return['conditions_met_count'] = num_sell_conditions_true
+                 base_return['conditions_met_count'] = met_sell_conditions
+            # No signal, so SL/TP remains None, error remains None unless set by pre-checks
             base_return['signal'] = 'none'
-            return base_return # Exit early
+            return base_return # Exit early if no initial signal based on met conditions
 
-        # SL/TP Calculation (only if signal is generated and mode is ATR/Dynamic)
-        if final_signal_str != 'none': # This check is somewhat redundant due to early return above, but safe
+        # If a signal ('up' or 'down') is determined, proceed to calculate SL/TP based on mode
+        if final_signal_str != 'none':
             if SL_TP_MODE == "ATR/Dynamic":
                 entry_price = current_price
                 # S1 has RR defined in its BacktestStrategyWrapper, but not directly in its signal function.
@@ -3605,27 +4071,31 @@ def strategy_ema_supertrend(symbol, condition_configs=None): # Added condition_c
         })
         return base_return
 
-def strategy_bollinger_band_mean_reversion(symbol, condition_configs=None): # Added condition_configs
-    if condition_configs is None:
-        condition_configs = {"s2_ema_trend": True, "s2_price_bb": True}
-        print(f"Warning: strategy_bollinger_band_mean_reversion for {symbol} called without condition_configs. Using defaults.")
+def strategy_bollinger_band_mean_reversion(symbol):
+    # Symbol is not used in this strategy as data is read from a CSV
+    # but kept for consistency with other strategy functions.
+    # The new strategy reads "EURUSD_Candlestick_5_M_ASK_30.09.2019-30.09.2022.csv"
+    # This will need to be adapted if the bot is to run this strategy live on different symbols.
+    # For now, it will always use the hardcoded CSV.
 
     base_return = {
-        'signal': 'none', 
-        'conditions_met_count': 0, 
-        'conditions_to_start_wait_threshold': 1, # If s2_ema_trend is enabled, it's 1 condition. If only s2_price_bb, also 1. If both, then 2.
-        'conditions_for_full_signal_threshold': 1, # This will be adjusted based on enabled conditions.
-        'all_conditions_status': { 
-            's2_ema_trend': {'evaluated_to': 0, 'is_enabled': condition_configs.get("s2_ema_trend", True)}, # 0: No trend, 1: Bearish, 2: Bullish
-            's2_price_bb': {'evaluated_to': False, 'is_enabled': condition_configs.get("s2_price_bb", True)}, # True if price crossed a band relevant to trend
-            # Store raw values for detailed view
-            'last_close_price': None, 'last_bbl': None, 'last_bbu': None,
-            'last_ema_fast': None, 'last_ema_slow': None,
+        'signal': 'none', # 'up' (buy), 'down' (sell), or 'none'
+        'conditions_met_count': 0, # Simplified for this strategy
+        'conditions_to_start_wait_threshold': 1, # Simplified
+        'conditions_for_full_signal_threshold': 1, # Simplified
+        'all_conditions_status': { # Provide some insight into the last calculated signals
+            'last_ema_signal': 0, # 0: No trend, 1: Bearish (buy opp), 2: Bullish (sell opp)
+            'last_total_signal': 0, # 0: No signal, 1: Buy, 2: Sell
+            'last_close_price': None,
+            'last_bbl': None,
+            'last_bbu': None,
+            'last_ema_fast': None,
+            'last_ema_slow': None,
         },
-        'sl_price': None, 
+        'sl_price': None, # SL/TP will be handled by the global settings or ATR/Dynamic
         'tp_price': None,
         'error': None,
-        'account_risk_percent': 0.008, 
+        'account_risk_percent': 0.008, # Default for S2, can be adjusted
         'signal_candle_timestamp': None
     }
 
@@ -3712,109 +4182,97 @@ def strategy_bollinger_band_mean_reversion(symbol, condition_configs=None): # Ad
         # The sample code's df.apply() iterates through the whole historical dataset.
         # Here, we need the signal for the *current* moment based on the *latest* data.
         
-        backcandles_ema_trend = 7
+        # Get data for the latest completed candle
+        # The number of backcandles for EMA signal trend check:
+        backcandles_ema_trend = 7 
         if len(df) < backcandles_ema_trend:
             base_return['error'] = f"Not enough data ({len(df)}) for EMA trend backlook ({backcandles_ema_trend})."
             return base_return
 
+        # EMA trend for the latest segment
+        # The df is indexed by "Gmt time". We need the latest `backcandles_ema_trend` rows.
         latest_segment_for_ema = df.iloc[-backcandles_ema_trend:]
-        evaluated_ema_trend_signal = ema_signal_local(latest_segment_for_ema) # Raw evaluation
-        base_return['all_conditions_status']['s2_ema_trend']['evaluated_to'] = evaluated_ema_trend_signal
+        current_ema_trend = ema_signal_local(latest_segment_for_ema)
 
+        # Current candle data for total_signal logic
         latest_candle = df.iloc[-1]
         current_close_price = latest_candle.Close
         current_bbl_value = latest_candle['BBL_15_1.5']
-        current_bbu_value = latest_candle['BBU_1.5'] # Corrected from BBU_1.5 to BBU_15_1.5 if that was a typo in original. Assuming BBU_15_1.5 from join.
-                                                     # If BBU_1.5 was intentional and a different column, this needs to be adjusted. For now, assuming BBU_15_1.5.
-                                                     # Re-checking, the join gets 'BBU_15_1.5'. So this is correct.
+        current_bbu_value = latest_candle['BBU_15_1.5']
         
-        base_return['all_conditions_status']['last_close_price'] = current_close_price
-        base_return['all_conditions_status']['last_bbl'] = current_bbl_value
-        base_return['all_conditions_status']['last_bbu'] = current_bbu_value
-        base_return['all_conditions_status']['last_ema_fast'] = latest_candle.EMA_fast if 'EMA_fast' in latest_candle else None
-        base_return['all_conditions_status']['last_ema_slow'] = latest_candle.EMA_slow if 'EMA_slow' in latest_candle else None
+        # Get the total signal for the current latest candle
+        current_total_signal = total_signal_local(current_close_price, current_bbl_value, current_bbu_value, current_ema_trend)
 
-        # Determine effective EMA trend based on whether the condition is enabled
-        effective_ema_trend_for_logic = 0 # Default to no trend if disabled or no clear trend
-        if condition_configs.get("s2_ema_trend", True):
-            effective_ema_trend_for_logic = evaluated_ema_trend_signal
+        # Update all_conditions_status for UI/logging
+        base_return['all_conditions_status'].update({
+            'last_ema_signal': current_ema_trend,
+            'last_total_signal': current_total_signal,
+            'last_close_price': current_close_price,
+            'last_bbl': current_bbl_value,
+            'last_bbu': current_bbu_value,
+            'last_ema_fast': latest_candle.EMA_fast if 'EMA_fast' in latest_candle else None,
+            'last_ema_slow': latest_candle.EMA_slow if 'EMA_slow' in latest_candle else None,
+        })
         
-        # Evaluate price vs BB condition
-        # Long entry: price crosses above Upper BB (original logic: ema_trend_signal=1 (bearish) and close >= BBU)
-        # Short entry: price crosses below Lower BB (original logic: ema_trend_signal=2 (bullish) and close <= BBL)
-        evaluated_price_vs_bb_long = current_close_price >= current_bbu_value
-        evaluated_price_vs_bb_short = current_close_price <= current_bbl_value
-        
-        # Store the generic evaluation for s2_price_bb
-        # This is tricky as its relevance depends on the EMA trend.
-        # Let's say it's "true" if either condition (for long or short) is met.
-        base_return['all_conditions_status']['s2_price_bb']['evaluated_to'] = evaluated_price_vs_bb_long or evaluated_price_vs_bb_short
+        # Map to base_return signal ('up'/'down')
+        if current_total_signal == 1: # Buy signal from sample
+            base_return['signal'] = 'up'
+            base_return['conditions_met_count'] = 1 # Simplified
+        elif current_total_signal == 2: # Sell signal from sample
+            base_return['signal'] = 'down'
+            base_return['conditions_met_count'] = 1 # Simplified
+        else:
+            base_return['signal'] = 'none'
+            base_return['conditions_met_count'] = 0
 
-        # --- Signal Generation based on enabled conditions ---
-        current_signal = 'none'
-        conditions_met_for_signal = 0
+        # SL/TP determination:
+        # This strategy, as provided, doesn't define its own SL/TP.
+        # It will rely on the global SL_TP_MODE settings:
+        # - "Percentage": Uses global SL_PERCENT, TP_PERCENT. open_order calculates.
+        # - "ATR/Dynamic": calculate_dynamic_sl_tp will be called by open_order or strategy caller.
+        #                    This strategy function needs to return sl_price=None, tp_price=None
+        #                    to let the caller handle it.
+        # - "Fixed PnL": Uses global SL_PNL_AMOUNT, TP_PNL_AMOUNT. open_order calculates.
         
-        # Check for BUY (UP) signal
-        # Original: ema_trend_signal == 1 (bearish trend) AND current_close >= current_bbu
-        buy_ema_ok = not condition_configs.get("s2_ema_trend", True) or effective_ema_trend_for_logic == 1
-        buy_bb_ok = not condition_configs.get("s2_price_bb", True) or evaluated_price_vs_bb_long
-        
-        if buy_ema_ok and buy_bb_ok:
-            # Check if at least one of the driving conditions was enabled (to avoid signal if both disabled)
-            if condition_configs.get("s2_ema_trend", True) or condition_configs.get("s2_price_bb", True):
-                current_signal = 'up'
-                if condition_configs.get("s2_ema_trend", True) and effective_ema_trend_for_logic == 1: conditions_met_for_signal +=1
-                if condition_configs.get("s2_price_bb", True) and evaluated_price_vs_bb_long: conditions_met_for_signal +=1
+        # If mode is ATR/Dynamic, the calling logic (e.g. in run_bot_logic or open_order)
+        # will use calculate_dynamic_sl_tp. This function should pass SL/TP as None.
+        if base_return['signal'] != 'none' and SL_TP_MODE == "ATR/Dynamic":
+            # For ATR/Dynamic, we need to calculate SL/TP here to pass to open_order
+            # Or, let open_order do it if it can take 'signal' and calculate.
+            # Current open_order expects strategy_sl, strategy_tp if mode is ATR/Dynamic.
+            # So, this strategy *must* calculate them if it wants ATR/Dynamic to work.
+            
+            # The sample code does not include dynamic SL/TP calculation based on ATR *for this strategy*.
+            # We will use the generic calculate_dynamic_sl_tp function.
+            # Parameters for calculate_dynamic_sl_tp for this strategy:
+            atr_period_for_sltp = 7 # From df['ATR'] = ta.atr(..., length=7)
+            # RR and ATR multiplier for SL are not defined in the sample for this strategy.
+            # We'll use defaults from calculate_dynamic_sl_tp (rr=1.5, atr_multiplier=DEFAULT_ATR_MULTIPLIER).
+            
+            dynamic_sl_tp_result = calculate_dynamic_sl_tp(
+                symbol=symbol, # Pass the bot's current symbol
+                entry_price=current_close_price,
+                side=base_return['signal'], # 'up' or 'down'
+                atr_period=atr_period_for_sltp, # Use the ATR period from the strategy
+                # rr and atr_multiplier will use defaults from calculate_dynamic_sl_tp
+            )
 
-        # Check for SELL (DOWN) signal if no BUY signal
-        if current_signal == 'none':
-            sell_ema_ok = not condition_configs.get("s2_ema_trend", True) or effective_ema_trend_for_logic == 2
-            sell_bb_ok = not condition_configs.get("s2_price_bb", True) or evaluated_price_vs_bb_short
-
-            if sell_ema_ok and sell_bb_ok:
-                if condition_configs.get("s2_ema_trend", True) or condition_configs.get("s2_price_bb", True):
-                    current_signal = 'down'
-                    if condition_configs.get("s2_ema_trend", True) and effective_ema_trend_for_logic == 2: conditions_met_for_signal +=1
-                    if condition_configs.get("s2_price_bb", True) and evaluated_price_vs_bb_short: conditions_met_for_signal +=1
-        
-        base_return['signal'] = current_signal
-        base_return['conditions_met_count'] = conditions_met_for_signal
-        
-        # Adjust conditions_for_full_signal_threshold based on how many conditions are enabled
-        num_enabled_conditions_s2 = sum([
-            1 if condition_configs.get("s2_ema_trend", True) else 0,
-            1 if condition_configs.get("s2_price_bb", True) else 0
-        ])
-        base_return['conditions_for_full_signal_threshold'] = num_enabled_conditions_s2 if num_enabled_conditions_s2 > 0 else 1
-        # Wait threshold can also be this or min(1, num_enabled_conditions_s2)
-        base_return['conditions_to_start_wait_threshold'] = min(1, num_enabled_conditions_s2) if num_enabled_conditions_s2 > 0 else 1
-
-
-        # SL/TP Calculation (only if signal is generated and mode is ATR/Dynamic)
-        if base_return['signal'] != 'none':
-            if SL_TP_MODE == "ATR/Dynamic":
-                atr_period_for_sltp = 7 
-                dynamic_sl_tp_result = calculate_dynamic_sl_tp(
-                    symbol=symbol, 
-                    entry_price=current_close_price,
-                    side=base_return['signal'],
-                    atr_period=atr_period_for_sltp,
-                )
-                if dynamic_sl_tp_result['error']:
-                    base_return['error'] = f"S2 ATR SL/TP calc error: {dynamic_sl_tp_result['error']}"
+            if dynamic_sl_tp_result['error']:
+                base_return['error'] = f"S2 ATR SL/TP calc error: {dynamic_sl_tp_result['error']}"
+                base_return['signal'] = 'none' # Invalidate signal if SL/TP fails
+            else:
+                base_return['sl_price'] = dynamic_sl_tp_result['sl_price']
+                base_return['tp_price'] = dynamic_sl_tp_result['tp_price']
+                if base_return['sl_price'] is None or base_return['tp_price'] is None:
+                    base_return['error'] = "S2 ATR SL/TP calc returned None values, invalidating signal."
                     base_return['signal'] = 'none'
-                else:
-                    base_return['sl_price'] = dynamic_sl_tp_result['sl_price']
-                    base_return['tp_price'] = dynamic_sl_tp_result['tp_price']
-                    if base_return['sl_price'] is None or base_return['tp_price'] is None:
-                        base_return['error'] = "S2 ATR SL/TP calc returned None values, invalidating signal."
-                        base_return['signal'] = 'none'
-            # For "Percentage" or "Fixed PnL", sl_price and tp_price remain None here.
-        
+        # For "Percentage" or "Fixed PnL", sl_price and tp_price remain None here;
+        # open_order will calculate them based on global settings.
+
         return base_return
 
     except KeyError as ke:
-        base_return['error'] = f"KeyError in S2 Bollinger Strategy: {str(ke)}. Check CSV columns or indicator names (e.g., BBU_15_1.5)."
+        base_return['error'] = f"KeyError in S2 Bollinger Strategy: {str(ke)}. Check CSV columns or indicator names."
         print(base_return['error'])
         return base_return
     except Exception as e:
@@ -3840,33 +4298,20 @@ def calculate_daily_vwap(kl_df_current_day):
     vwap = tpv.cumsum() / kl_df_current_day['Volume'].cumsum()
     return vwap
 
-def strategy_vwap_breakout_momentum(symbol, condition_configs=None): # Added condition_configs
-    if condition_configs is None:
-        condition_configs = {
-            "s3_price_vwap": True, "s3_macd_confirm": True, "s3_atr_volatility": True
-        }
-        print(f"Warning: strategy_vwap_breakout_momentum for {symbol} called without condition_configs. Using defaults.")
-
+def strategy_vwap_breakout_momentum(symbol):
     base_return = {
         'signal': 'none',
         'conditions_met_count': 0,
-        'conditions_to_start_wait_threshold': 2, 
-        'conditions_for_full_signal_threshold': 2, 
+        'conditions_to_start_wait_threshold': 2,
+        'conditions_for_full_signal_threshold': 2, # Changed from 3 to 2
         'all_conditions_status': {
-            's3_price_vwap': {'evaluated_to': False, 'is_enabled': condition_configs.get("s3_price_vwap", True)},
-            's3_macd_confirm': {'evaluated_to': False, 'is_enabled': condition_configs.get("s3_macd_confirm", True)},
-            's3_atr_volatility': {'evaluated_to': False, 'is_enabled': condition_configs.get("s3_atr_volatility", True)},
-            # Specific evaluations will be stored here too
-            'price_above_vwap_2bar_long_eval': False, 'macd_positive_rising_eval': False, 
-            'atr_volatility_confirms_long_eval': False, # Note: ATR confirm is same for long/short in current logic
-            'price_below_vwap_2bar_short_eval': False, 'macd_negative_falling_eval': False,
-            'num_buy_conditions_met': 0,
-            'num_sell_conditions_met': 0
+            'price_above_vwap_2bar_long': False, 'macd_positive_rising': False, 'atr_volatility_confirms_long': False,
+            'price_below_vwap_2bar_short': False, 'macd_negative_falling': False, 'atr_volatility_confirms_short': False,
         },
         'sl_price': None,
         'tp_price': None,
         'error': None,
-        'account_risk_percent': 0.01, 
+        'account_risk_percent': 0.01, # Strategy 3 specific risk
         'signal_candle_timestamp': None
     }
 
@@ -3944,66 +4389,43 @@ def strategy_vwap_breakout_momentum(symbol, condition_configs=None): # Added con
         if any(pd.isna(v) for v in [current_price, last_vwap, prev_vwap, last_macd_hist, prev_macd_hist, last_atr, avg_atr_20]):
             base_return['error'] = "NaN value in critical S3 indicator or price data"
             return base_return
-        # --- Evaluate all potential conditions first (raw evaluation) ---
-        evaluated_price_above_vwap_long = kl_day_df['Close'].iloc[-1] > last_vwap and kl_day_df['Close'].iloc[-2] > prev_vwap
-        evaluated_macd_positive_rising = last_macd_hist > 0 and last_macd_hist > prev_macd_hist
-        evaluated_atr_confirms = last_atr > avg_atr_20 # Same for long and short
-
-        evaluated_price_below_vwap_short = kl_day_df['Close'].iloc[-1] < last_vwap and kl_day_df['Close'].iloc[-2] < prev_vwap
-        evaluated_macd_negative_falling = last_macd_hist < 0 and last_macd_hist < prev_macd_hist
-
-        # Update all_conditions_status with evaluated values
-        base_return['all_conditions_status']['s3_price_vwap']['evaluated_to'] = evaluated_price_above_vwap_long or evaluated_price_below_vwap_short
-        base_return['all_conditions_status']['s3_macd_confirm']['evaluated_to'] = evaluated_macd_positive_rising or evaluated_macd_negative_falling
-        base_return['all_conditions_status']['s3_atr_volatility']['evaluated_to'] = evaluated_atr_confirms
+            
+        # --- Define Conditions ---
+        base_return['all_conditions_status']['price_above_vwap_2bar_long'] = kl_day_df['Close'].iloc[-1] > last_vwap and kl_day_df['Close'].iloc[-2] > prev_vwap
+        base_return['all_conditions_status']['macd_positive_rising'] = last_macd_hist > 0 and last_macd_hist > prev_macd_hist
+        base_return['all_conditions_status']['atr_volatility_confirms_long'] = last_atr > avg_atr_20
         
-        # Store specific directional evaluations
-        base_return['all_conditions_status']['price_above_vwap_2bar_long_eval'] = evaluated_price_above_vwap_long
-        base_return['all_conditions_status']['macd_positive_rising_eval'] = evaluated_macd_positive_rising
-        base_return['all_conditions_status']['atr_volatility_confirms_long_eval'] = evaluated_atr_confirms
-        base_return['all_conditions_status']['price_below_vwap_2bar_short_eval'] = evaluated_price_below_vwap_short
-        base_return['all_conditions_status']['macd_negative_falling_eval'] = evaluated_macd_negative_falling
-        # atr_volatility_confirms_short_eval is same as long
+        base_return['all_conditions_status']['price_below_vwap_2bar_short'] = kl_day_df['Close'].iloc[-1] < last_vwap and kl_day_df['Close'].iloc[-2] < prev_vwap
+        base_return['all_conditions_status']['macd_negative_falling'] = last_macd_hist < 0 and last_macd_hist < prev_macd_hist
+        # For Strategy 3, atr_volatility_confirms_short is the same as atr_volatility_confirms_long
+        base_return['all_conditions_status']['atr_volatility_confirms_short'] = last_atr > avg_atr_20 
 
-        # --- Determine active conditions based on config and evaluation for BUY ---
-        active_buy_conditions_results = []
-        if condition_configs.get("s3_price_vwap", True): active_buy_conditions_results.append(evaluated_price_above_vwap_long)
-        if condition_configs.get("s3_macd_confirm", True): active_buy_conditions_results.append(evaluated_macd_positive_rising)
-        if condition_configs.get("s3_atr_volatility", True): active_buy_conditions_results.append(evaluated_atr_confirms)
+        met_buy_conditions = sum([base_return['all_conditions_status']['price_above_vwap_2bar_long'],
+                                  base_return['all_conditions_status']['macd_positive_rising'],
+                                  base_return['all_conditions_status']['atr_volatility_confirms_long']])
+        met_sell_conditions = sum([base_return['all_conditions_status']['price_below_vwap_2bar_short'],
+                                   base_return['all_conditions_status']['macd_negative_falling'],
+                                   base_return['all_conditions_status']['atr_volatility_confirms_short']])
         
-        num_buy_conditions_true = sum(active_buy_conditions_results)
-        base_return['all_conditions_status']['num_buy_conditions_met'] = num_buy_conditions_true
-
-        # --- Determine active conditions based on config and evaluation for SELL ---
-        active_sell_conditions_results = []
-        if condition_configs.get("s3_price_vwap", True): active_sell_conditions_results.append(evaluated_price_below_vwap_short)
-        if condition_configs.get("s3_macd_confirm", True): active_sell_conditions_results.append(evaluated_macd_negative_falling)
-        if condition_configs.get("s3_atr_volatility", True): active_sell_conditions_results.append(evaluated_atr_confirms) # Same ATR condition
-
-        num_sell_conditions_true = sum(active_sell_conditions_results)
-        base_return['all_conditions_status']['num_sell_conditions_met'] = num_sell_conditions_true
-
-        # --- Signal Generation ---
         final_signal_str = 'none'
         calculated_sl, calculated_tp = None, None
-        REQUIRED_S3_CONDITIONS = base_return['conditions_for_full_signal_threshold'] # e.g., 2
 
-        if num_buy_conditions_true >= REQUIRED_S3_CONDITIONS:
+        if met_buy_conditions >= 2: # Changed from == base_return['conditions_for_full_signal_threshold']
             final_signal_str = 'up'
-            base_return['conditions_met_count'] = num_buy_conditions_true
-        elif num_sell_conditions_true >= REQUIRED_S3_CONDITIONS:
+            base_return['conditions_met_count'] = met_buy_conditions
+        elif met_sell_conditions >= 2: # Changed from == base_return['conditions_for_full_signal_threshold']
             final_signal_str = 'down'
-            base_return['conditions_met_count'] = num_sell_conditions_true
+            base_return['conditions_met_count'] = met_sell_conditions
         else: # Not a full signal
-            if num_buy_conditions_true >= num_sell_conditions_true:
-                 base_return['conditions_met_count'] = num_buy_conditions_true
+            if met_buy_conditions >= met_sell_conditions:
+                 base_return['conditions_met_count'] = met_buy_conditions
             else:
-                 base_return['conditions_met_count'] = num_sell_conditions_true
-            base_return['signal'] = 'none'
-            return base_return # Exit early
+                 base_return['conditions_met_count'] = met_sell_conditions
+            base_return['signal'] = 'none' # Ensure signal is none
+            return base_return # Exit early if no initial signal
 
-        # SL/TP Calculation (only if signal is generated and mode is ATR/Dynamic)
-        if final_signal_str != 'none': # Redundant due to early return, but safe
+        # If a signal ('up' or 'down') is determined, proceed to calculate SL/TP based on mode
+        if final_signal_str != 'none':
             if SL_TP_MODE == "ATR/Dynamic":
                 entry_price = current_price
                 # S3 specifics for calculate_dynamic_sl_tp (if any)
@@ -4066,30 +4488,17 @@ def calculate_daily_pivot_points(prev_day_high, prev_day_low, prev_day_close):
         print(f"Error calculating pivot points: {e}")
         return None
 
-def strategy_macd_divergence_pivot(symbol, condition_configs=None): # Added condition_configs
+def strategy_macd_divergence_pivot(symbol):
     global client, strategy4_active_trade_info
-
-    if condition_configs is None:
-        condition_configs = {
-            "s4_macd_divergence": True, "s4_pivot_price": True, "s4_stoch_confirm": True
-        }
-        print(f"Warning: strategy_macd_divergence_pivot for {symbol} called without condition_configs. Using defaults.")
 
     base_return = {
         'signal': 'none',
-        'conditions_met_count': 0, # Will count enabled and met conditions
-        'conditions_to_start_wait_threshold': 1, # Not really used by S4's current direct logic
-        'conditions_for_full_signal_threshold': 3, # Default to all 3, adjusted if some are disabled
-        'all_conditions_status': {
-            's4_macd_divergence': {'evaluated_to': False, 'is_enabled': condition_configs.get("s4_macd_divergence", True), 'details': 'N/A'}, # details: bullish/bearish/none
-            's4_pivot_price': {'evaluated_to': False, 'is_enabled': condition_configs.get("s4_pivot_price", True), 'details': 'N/A'}, # details: at_support/at_resistance/none
-            's4_stoch_confirm': {'evaluated_to': False, 'is_enabled': condition_configs.get("s4_stoch_confirm", True), 'details': 'N/A'} # details: os_up/ob_down/none
-        },
+        'conditions': {},
         'sl_price': None,
         'tp_price': None,
         'error': None,
-        'divergence_price_point': None, 
-        'account_risk_percent': 0.012, 
+        'divergence_price_point': None, # Specific to S4
+        'account_risk_percent': 0.012, # Strategy 4 specific risk
         'signal_candle_timestamp': None
     }
 
@@ -4200,73 +4609,47 @@ def strategy_macd_divergence_pivot(symbol, condition_configs=None): # Added cond
             base_return['error'] = "NaN value in critical S4 indicator/price for entry decision"
             return base_return
 
-        # --- Evaluate all potential conditions first (raw evaluation) ---
-        # MACD Divergence
-        base_return['all_conditions_status']['s4_macd_divergence']['evaluated_to'] = bullish_divergence_found or bearish_divergence_found
-        if bullish_divergence_found: base_return['all_conditions_status']['s4_macd_divergence']['details'] = 'bullish'
-        elif bearish_divergence_found: base_return['all_conditions_status']['s4_macd_divergence']['details'] = 'bearish'
-        else: base_return['all_conditions_status']['s4_macd_divergence']['details'] = 'none'
-
-        # Pivot Price Interaction
-        evaluated_price_at_support = (pivots['S2'] <= kl['Low'].iloc[-1] <= pivots['S1'] * 1.005) or \
-                                     (pivots['S1'] <= kl['Low'].iloc[-1] <= pivots['P'] * 1.005 and kl['Low'].iloc[-1] < pivots['P'])
-        evaluated_price_at_resistance = (pivots['R1'] * 0.995 <= kl['High'].iloc[-1] <= pivots['R2']) or \
-                                        (pivots['P'] * 0.995 <= kl['High'].iloc[-1] <= pivots['R1'] and kl['High'].iloc[-1] > pivots['P'])
-        base_return['all_conditions_status']['s4_pivot_price']['evaluated_to'] = evaluated_price_at_support or evaluated_price_at_resistance
-        if evaluated_price_at_support: base_return['all_conditions_status']['s4_pivot_price']['details'] = 'at_support'
-        elif evaluated_price_at_resistance: base_return['all_conditions_status']['s4_pivot_price']['details'] = 'at_resistance'
-        else: base_return['all_conditions_status']['s4_pivot_price']['details'] = 'none'
-        
-        # Stochastic Confirmation
-        evaluated_stoch_oversold_turning_up = last_stoch_k < 20 and last_stoch_k > prev_stoch_k
-        evaluated_stoch_overbought_turning_down = last_stoch_k > 80 and last_stoch_k < prev_stoch_k
-        base_return['all_conditions_status']['s4_stoch_confirm']['evaluated_to'] = evaluated_stoch_oversold_turning_up or evaluated_stoch_overbought_turning_down
-        if evaluated_stoch_oversold_turning_up: base_return['all_conditions_status']['s4_stoch_confirm']['details'] = 'os_turning_up'
-        elif evaluated_stoch_overbought_turning_down: base_return['all_conditions_status']['s4_stoch_confirm']['details'] = 'ob_turning_down'
-        else: base_return['all_conditions_status']['s4_stoch_confirm']['details'] = 'none'
-
-        # --- Signal Generation based on enabled conditions ---
+        # Entry Conditions
+        conditions = base_return['conditions']
         final_signal = 'none'
-        conditions_met_this_side = 0
         
-        # Determine how many conditions are enabled for this strategy
-        num_enabled_s4_conditions = sum(1 for cond_id in ["s4_macd_divergence", "s4_pivot_price", "s4_stoch_confirm"] if condition_configs.get(cond_id, True))
-        base_return['conditions_for_full_signal_threshold'] = num_enabled_s4_conditions if num_enabled_s4_conditions > 0 else 1 # Must meet all enabled
+        conditions['bullish_divergence'] = bullish_divergence_found
+        conditions['bearish_divergence'] = bearish_divergence_found
+        conditions['stoch_k'] = last_stoch_k
+        conditions['prev_stoch_k'] = prev_stoch_k
+        conditions['pivot_P'] = pivots['P']
+        conditions['pivot_S1'] = pivots['S1']
+        conditions['pivot_R1'] = pivots['R1']
 
-        if bullish_divergence_found or not condition_configs.get("s4_macd_divergence", True): # MACD div met or disabled
-            if evaluated_price_at_support or not condition_configs.get("s4_pivot_price", True): # Pivot met or disabled
-                if evaluated_stoch_oversold_turning_up or not condition_configs.get("s4_stoch_confirm", True): # Stoch met or disabled
-                    # To generate a signal, at least one driving condition must be enabled.
-                    # And the primary divergence must be bullish (if enabled).
-                    if condition_configs.get("s4_macd_divergence", True) and not bullish_divergence_found:
-                        pass # MACD div was enabled but not bullish
-                    elif num_enabled_s4_conditions > 0: # Ensure at least one condition was active
-                        final_signal = 'up'
-                        if condition_configs.get("s4_macd_divergence", True) and bullish_divergence_found: conditions_met_this_side += 1
-                        if condition_configs.get("s4_pivot_price", True) and evaluated_price_at_support: conditions_met_this_side += 1
-                        if condition_configs.get("s4_stoch_confirm", True) and evaluated_stoch_oversold_turning_up: conditions_met_this_side += 1
-        
-        if final_signal == 'none' and (bearish_divergence_found or not condition_configs.get("s4_macd_divergence", True)):
-            if evaluated_price_at_resistance or not condition_configs.get("s4_pivot_price", True):
-                if evaluated_stoch_overbought_turning_down or not condition_configs.get("s4_stoch_confirm", True):
-                    if condition_configs.get("s4_macd_divergence", True) and not bearish_divergence_found:
-                        pass
-                    elif num_enabled_s4_conditions > 0:
-                        final_signal = 'down'
-                        if condition_configs.get("s4_macd_divergence", True) and bearish_divergence_found: conditions_met_this_side += 1
-                        if condition_configs.get("s4_pivot_price", True) and evaluated_price_at_resistance: conditions_met_this_side += 1
-                        if condition_configs.get("s4_stoch_confirm", True) and evaluated_stoch_overbought_turning_down: conditions_met_this_side += 1
 
-        base_return['conditions_met_count'] = conditions_met_this_side
-        
-        # SL/TP Calculation
-        if final_signal != 'none':
-            # Ensure the signal is only valid if the number of met conditions equals the number of enabled conditions
-            if conditions_met_this_side < num_enabled_s4_conditions and num_enabled_s4_conditions > 0 : # only invalidate if there were enabled conditions
-                final_signal = 'none' # Not all enabled conditions were met
-                base_return['error'] = "Not all enabled S4 conditions were met."
+        if bullish_divergence_found:
+            # Price at/above Support (S1 or S2)
+            # Check if the low of the signal candle touched or was near S1/S2
+            price_at_support = (pivots['S2'] <= kl['Low'].iloc[-1] <= pivots['S1'] * 1.005) or \
+                               (pivots['S1'] <= kl['Low'].iloc[-1] <= pivots['P'] * 1.005 and kl['Low'].iloc[-1] < pivots['P']) # Allow if between S1 and P but closer to S1
+            stoch_oversold_turning_up = last_stoch_k < 20 and last_stoch_k > prev_stoch_k
             
-            if final_signal != 'none' and SL_TP_MODE == "ATR/Dynamic":
+            conditions['price_at_support_long'] = price_at_support
+            conditions['stoch_oversold_turning_up'] = stoch_oversold_turning_up
+
+            if price_at_support: # Removed stoch_oversold_turning_up
+                final_signal = 'up'
+
+        elif bearish_divergence_found:
+            # Price at/below Resistance (R1 or R2)
+            price_at_resistance = (pivots['R1'] * 0.995 <= kl['High'].iloc[-1] <= pivots['R2']) or \
+                                  (pivots['P'] * 0.995 <= kl['High'].iloc[-1] <= pivots['R1'] and kl['High'].iloc[-1] > pivots['P'])
+            stoch_overbought_turning_down = last_stoch_k > 80 and last_stoch_k < prev_stoch_k
+
+            conditions['price_at_resistance_short'] = price_at_resistance
+            conditions['stoch_overbought_turning_down'] = stoch_overbought_turning_down
+
+            if price_at_resistance: # Removed stoch_overbought_turning_down
+                final_signal = 'down'
+        
+        # SL/TP Calculation based on SL_TP_MODE
+        if final_signal != 'none':
+            if SL_TP_MODE == "ATR/Dynamic":
                 entry_price = current_price
                 # S4 specifics for calculate_dynamic_sl_tp (if any)
                 # Using defaults from calculate_dynamic_sl_tp for now.
@@ -4310,33 +4693,23 @@ def strategy_macd_divergence_pivot(symbol, condition_configs=None): # Added cond
         base_return['error'] = f"Exception in S4 {symbol}: {str(e)}"
         return base_return
 
-def strategy_rsi_enhanced(symbol, condition_configs=None): # Added condition_configs
-    global SL_PERCENT, TP_PERCENT, STRATEGIES # Retain these if used for SL/TP defaults in non-ATR modes
-
-    if condition_configs is None:
-        condition_configs = {
-            "s5_rsi_cross": True, "s5_duration_osob": True, "s5_rsi_slope": True,
-            "s5_price_sma": True, "s5_rsi_divergence": False # Default for divergence is often False
-        }
-        print(f"Warning: strategy_rsi_enhanced for {symbol} called without condition_configs. Using defaults.")
+def strategy_rsi_enhanced(symbol):
+    # print(f"DEBUG: strategy_rsi_enhanced (NEW LOGIC) entered for symbol: {symbol}") # Keep for debugging if necessary
+    global SL_PERCENT, TP_PERCENT, STRATEGIES
 
     base_return = {
         'signal': 'none',
         'conditions_met_count': 0,
-        'conditions_to_start_wait_threshold': 2, # How many core conditions to start monitoring
-        'conditions_for_full_signal_threshold': 2, # How many core conditions for a signal (excluding divergence initially)
+        'conditions_to_start_wait_threshold': 2, 
+        'conditions_for_full_signal_threshold': 2, 
         'all_conditions_status': {
-            's5_rsi_cross': {'evaluated_to': False, 'is_enabled': condition_configs.get("s5_rsi_cross", True), 'details': 'N/A'},
-            's5_duration_osob': {'evaluated_to': False, 'is_enabled': condition_configs.get("s5_duration_osob", True), 'details': 'N/A'},
-            's5_rsi_slope': {'evaluated_to': False, 'is_enabled': condition_configs.get("s5_rsi_slope", True), 'details': 'N/A'},
-            's5_price_sma': {'evaluated_to': False, 'is_enabled': condition_configs.get("s5_price_sma", True), 'details': 'N/A'},
-            's5_rsi_divergence': {'evaluated_to': False, 'is_enabled': condition_configs.get("s5_rsi_divergence", False), 'details': 'N/A'},
-            # Specific evaluations
-            'num_core_buy_conditions_met': 0,
-            'num_core_sell_conditions_met': 0,
+            'rsi_crossed_above_30': False, 'duration_oversold_met': False, 
+            'rsi_slope_up_met': False, 'price_above_sma50_met': False, 'bullish_divergence_found': False,
+            'rsi_crossed_below_70': False, 'duration_overbought_met': False, 
+            'rsi_slope_down_met': False, 'price_below_sma50_met': False, 'bearish_divergence_found': False,
         },
         'sl_price': None, 'tp_price': None, 'error': None,
-        'account_risk_percent': 0.01,
+        'account_risk_percent': 0.01, 
         'signal_candle_timestamp': None
     }
 
@@ -4373,102 +4746,86 @@ def strategy_rsi_enhanced(symbol, condition_configs=None): # Added condition_con
 
         current_price = kl['Close'].iloc[-1]
         
-        # --- Evaluate all potential conditions ---
-        # RSI Cross
-        evaluated_rsi_crossed_above_30 = rsi_series.iloc[-1] >= 30 and rsi_series.iloc[-2] < 30
-        evaluated_rsi_crossed_below_70 = rsi_series.iloc[-1] <= 70 and rsi_series.iloc[-2] > 70
-        base_return['all_conditions_status']['s5_rsi_cross']['evaluated_to'] = evaluated_rsi_crossed_above_30 or evaluated_rsi_crossed_below_70
-        base_return['all_conditions_status']['s5_rsi_cross']['details'] = f"RSI: {rsi_series.iloc[-1]:.2f}, PrevRSI: {rsi_series.iloc[-2]:.2f}"
+        # --- Buy Signal Conditions ---
+        cond_rsi_crossed_above_30 = rsi_series.iloc[-1] >= 30 and rsi_series.iloc[-2] < 30
+        base_return['all_conditions_status']['rsi_crossed_above_30'] = cond_rsi_crossed_above_30
 
-        # Duration OS/OB
-        evaluated_duration_oversold_met = True
+        cond_duration_oversold_met = True
         if len(rsi_series) >= (duration_lookback + 2): 
             for i in range(2, duration_lookback + 2): 
-                if rsi_series.iloc[-i] >= 30: evaluated_duration_oversold_met = False; break
-        else: evaluated_duration_oversold_met = False
+                if rsi_series.iloc[-i] >= 30:
+                    cond_duration_oversold_met = False
+                    break
+        else: 
+            cond_duration_oversold_met = False
+        base_return['all_conditions_status']['duration_oversold_met'] = cond_duration_oversold_met
         
-        evaluated_duration_overbought_met = True
-        if len(rsi_series) >= (duration_lookback + 2):
-            for i in range(2, duration_lookback + 2): 
-                if rsi_series.iloc[-i] <= 70: evaluated_duration_overbought_met = False; break
-        else: evaluated_duration_overbought_met = False
-        base_return['all_conditions_status']['s5_duration_osob']['evaluated_to'] = evaluated_duration_oversold_met or evaluated_duration_overbought_met
-        base_return['all_conditions_status']['s5_duration_osob']['details'] = f"OS Met: {evaluated_duration_oversold_met}, OB Met: {evaluated_duration_overbought_met}"
+        cond_rsi_slope_up_met = (rsi_series.iloc[-1] - rsi_series.iloc[-3]) >= 10 if len(rsi_series) >= 3 else False
+        base_return['all_conditions_status']['rsi_slope_up_met'] = cond_rsi_slope_up_met
 
-        # RSI Slope
-        evaluated_rsi_slope_up_met = (rsi_series.iloc[-1] - rsi_series.iloc[-3]) >= 10 if len(rsi_series) >= 3 else False
-        evaluated_rsi_slope_down_met = (rsi_series.iloc[-3] - rsi_series.iloc[-1]) >= 10 if len(rsi_series) >= 3 else False
-        base_return['all_conditions_status']['s5_rsi_slope']['evaluated_to'] = evaluated_rsi_slope_up_met or evaluated_rsi_slope_down_met
-        base_return['all_conditions_status']['s5_rsi_slope']['details'] = f"SlopeUp: {evaluated_rsi_slope_up_met}, SlopeDown: {evaluated_rsi_slope_down_met}"
-        
-        # Price vs SMA
-        evaluated_price_above_sma50_met = current_price > sma50_series.iloc[-1]
-        evaluated_price_below_sma50_met = current_price < sma50_series.iloc[-1]
-        base_return['all_conditions_status']['s5_price_sma']['evaluated_to'] = evaluated_price_above_sma50_met or evaluated_price_below_sma50_met
-        base_return['all_conditions_status']['s5_price_sma']['details'] = f"Price: {current_price:.2f}, SMA50: {sma50_series.iloc[-1]:.2f}"
+        cond_price_above_sma50_met = current_price > sma50_series.iloc[-1]
+        base_return['all_conditions_status']['price_above_sma50_met'] = cond_price_above_sma50_met
 
-        # RSI Divergence
-        evaluated_bullish_divergence_found = False
+        cond_bullish_divergence_found = False
         if len(kl['Low']) >= divergence_candles + 1 and len(rsi_series) >= divergence_candles + 1:
             for i in range(1, divergence_candles + 1): 
                 past_low_idx = -1 - i
                 if kl['Low'].iloc[-1] < kl['Low'].iloc[past_low_idx] and rsi_series.iloc[-1] > rsi_series.iloc[past_low_idx]:
-                    evaluated_bullish_divergence_found = True; break
+                    cond_bullish_divergence_found = True
+                    break
+        base_return['all_conditions_status']['bullish_divergence_found'] = cond_bullish_divergence_found
         
-        evaluated_bearish_divergence_found = False
+        num_core_buy_conditions_met = sum([cond_rsi_crossed_above_30, cond_duration_oversold_met, cond_rsi_slope_up_met, cond_price_above_sma50_met])
+
+        # --- Sell Signal Conditions ---
+        cond_rsi_crossed_below_70 = rsi_series.iloc[-1] <= 70 and rsi_series.iloc[-2] > 70
+        base_return['all_conditions_status']['rsi_crossed_below_70'] = cond_rsi_crossed_below_70
+
+        cond_duration_overbought_met = True
+        if len(rsi_series) >= (duration_lookback + 2):
+            for i in range(2, duration_lookback + 2): 
+                if rsi_series.iloc[-i] <= 70:
+                    cond_duration_overbought_met = False
+                    break
+        else: 
+            cond_duration_overbought_met = False
+        base_return['all_conditions_status']['duration_overbought_met'] = cond_duration_overbought_met
+
+        cond_rsi_slope_down_met = (rsi_series.iloc[-3] - rsi_series.iloc[-1]) >= 10 if len(rsi_series) >= 3 else False
+        base_return['all_conditions_status']['rsi_slope_down_met'] = cond_rsi_slope_down_met
+        
+        cond_price_below_sma50_met = current_price < sma50_series.iloc[-1]
+        base_return['all_conditions_status']['price_below_sma50_met'] = cond_price_below_sma50_met
+
+        cond_bearish_divergence_found = False
         if len(kl['High']) >= divergence_candles + 1 and len(rsi_series) >= divergence_candles + 1:
             for i in range(1, divergence_candles + 1):
                 past_high_idx = -1 - i
                 if kl['High'].iloc[-1] > kl['High'].iloc[past_high_idx] and rsi_series.iloc[-1] < rsi_series.iloc[past_high_idx]:
-                    evaluated_bearish_divergence_found = True; break
-        base_return['all_conditions_status']['s5_rsi_divergence']['evaluated_to'] = evaluated_bullish_divergence_found or evaluated_bearish_divergence_found
-        base_return['all_conditions_status']['s5_rsi_divergence']['details'] = f"BullDiv: {evaluated_bullish_divergence_found}, BearDiv: {evaluated_bearish_divergence_found}"
+                    cond_bearish_divergence_found = True
+                    break
+        base_return['all_conditions_status']['bearish_divergence_found'] = cond_bearish_divergence_found
 
-        # --- Determine active core conditions for BUY ---
-        active_core_buy_conditions_results = []
-        if condition_configs.get("s5_rsi_cross", True): active_core_buy_conditions_results.append(evaluated_rsi_crossed_above_30)
-        if condition_configs.get("s5_duration_osob", True): active_core_buy_conditions_results.append(evaluated_duration_oversold_met)
-        if condition_configs.get("s5_rsi_slope", True): active_core_buy_conditions_results.append(evaluated_rsi_slope_up_met)
-        if condition_configs.get("s5_price_sma", True): active_core_buy_conditions_results.append(evaluated_price_above_sma50_met)
+        num_core_sell_conditions_met = sum([cond_rsi_crossed_below_70, cond_duration_overbought_met, cond_rsi_slope_down_met, cond_price_below_sma50_met])
+
+        # Initialize SL/TP in base_return to None before any calculation attempt
+        base_return['sl_price'] = None
+        base_return['tp_price'] = None
+        calculated_sl = None # To store results from dynamic_sl_tp
+        calculated_tp = None # To store results from dynamic_sl_tp
         
-        num_core_buy_conditions_true = sum(active_core_buy_conditions_results)
-        base_return['all_conditions_status']['num_core_buy_conditions_met'] = num_core_buy_conditions_true
-        
-        # --- Determine active core conditions for SELL ---
-        active_core_sell_conditions_results = []
-        if condition_configs.get("s5_rsi_cross", True): active_core_sell_conditions_results.append(evaluated_rsi_crossed_below_70)
-        if condition_configs.get("s5_duration_osob", True): active_core_sell_conditions_results.append(evaluated_duration_overbought_met)
-        if condition_configs.get("s5_rsi_slope", True): active_core_sell_conditions_results.append(evaluated_rsi_slope_down_met)
-        if condition_configs.get("s5_price_sma", True): active_core_sell_conditions_results.append(evaluated_price_below_sma50_met)
+        # Determine initial signal based on conditions
+        if num_core_buy_conditions_met >= 2: 
+            base_return['signal'] = 'up'
+            base_return['conditions_met_count'] = num_core_buy_conditions_met
+        elif num_core_sell_conditions_met >= 2: 
+            base_return['signal'] = 'down'
+            base_return['conditions_met_count'] = num_core_sell_conditions_met
+        else: 
+            base_return['conditions_met_count'] = max(num_core_buy_conditions_met, num_core_sell_conditions_met)
+            base_return['signal'] = 'none'
 
-        num_core_sell_conditions_true = sum(active_core_sell_conditions_results)
-        base_return['all_conditions_status']['num_core_sell_conditions_met'] = num_core_sell_conditions_true
-
-        # --- Signal Generation ---
-        final_signal_str = 'none'
-        calculated_sl, calculated_tp = None, None
-        REQUIRED_S5_CORE_CONDITIONS = base_return['conditions_for_full_signal_threshold'] # e.g. 2
-
-        if num_core_buy_conditions_true >= REQUIRED_S5_CORE_CONDITIONS:
-            # Check divergence if enabled
-            if not condition_configs.get("s5_rsi_divergence", False) or \
-               (condition_configs.get("s5_rsi_divergence", False) and evaluated_bullish_divergence_found):
-                final_signal_str = 'up'
-                base_return['conditions_met_count'] = num_core_buy_conditions_true + (1 if condition_configs.get("s5_rsi_divergence", False) and evaluated_bullish_divergence_found else 0)
-        
-        if final_signal_str == 'none' and num_core_sell_conditions_true >= REQUIRED_S5_CORE_CONDITIONS:
-            if not condition_configs.get("s5_rsi_divergence", False) or \
-               (condition_configs.get("s5_rsi_divergence", False) and evaluated_bearish_divergence_found):
-                final_signal_str = 'down'
-                base_return['conditions_met_count'] = num_core_sell_conditions_true + (1 if condition_configs.get("s5_rsi_divergence", False) and evaluated_bearish_divergence_found else 0)
-
-        if final_signal_str == 'none': # If no full signal yet
-            base_return['conditions_met_count'] = max(num_core_buy_conditions_true, num_core_sell_conditions_true)
-            # No need to set base_return['signal'] = 'none' as it's default
-            # return base_return # Exit if no signal formed by core + optional divergence
-
-        # SL/TP Calculation
-        base_return['signal'] = final_signal_str # Set signal before potential SL/TP invalidation
+        # If a signal is determined, calculate SL/TP based on mode
         if base_return['signal'] != 'none':
             if SL_TP_MODE == "ATR/Dynamic":
                 entry_price = current_price
@@ -4522,32 +4879,31 @@ def strategy_rsi_enhanced(symbol, condition_configs=None): # Added condition_con
     return base_return
 
 # --- Strategy 6: Market Structure S/D ---
-def strategy_market_structure_sd(symbol: str, condition_configs=None) -> dict: # Added condition_configs
-    if condition_configs is None:
-        condition_configs = {
-            "s6_market_trend": True, "s6_price_in_zone": True, "s6_rr_met": True
-        }
-        print(f"Warning: strategy_market_structure_sd for {symbol} called without condition_configs. Using defaults.")
-
+def strategy_market_structure_sd(symbol: str) -> dict:
+    """
+    Strategy based on Market Structure (HH, HL, LL, LH), Supply/Demand zones,
+    and a minimum Risk-Reward ratio of 2.5:1.
+    """
     base_return = {
-        'signal': 'none',
+        'signal': 'none', # 'up', 'down', or 'none'
         'conditions_met_count': 0, 
-        'conditions_to_start_wait_threshold': 1, # S6 is more sequential, this might not be used as directly
-        'conditions_for_full_signal_threshold': 3, # Default to all 3, adjusted if some are disabled
+        'conditions_to_start_wait_threshold': 1, 
+        'conditions_for_full_signal_threshold': 1, 
         'all_conditions_status': { 
-            's6_market_trend': {'evaluated_to': 'N/A', 'is_enabled': condition_configs.get("s6_market_trend", True)}, # Stores trend_bias
-            's6_price_in_zone': {'evaluated_to': False, 'is_enabled': condition_configs.get("s6_price_in_zone", True)},
-            's6_rr_met': {'evaluated_to': False, 'is_enabled': condition_configs.get("s6_rr_met", True)},
-            # Additional details for UI/logging
+            'trend_bias': 'N/A',
             'zone_type_found': 'N/A', 
-            'last_valid_low': None, 'last_valid_high': None,
-            'current_sd_zone_start': None, 'current_sd_zone_end': None,
+            'price_in_zone': False,
+            'rr_ok': False,
+            'last_valid_low': None,
+            'last_valid_high': None,
+            'current_sd_zone_start': None,
+            'current_sd_zone_end': None,
         },
         'sl_price': None,
         'tp_price': None,
         'entry_price_estimate': None, 
         'error': None,
-        'account_risk_percent': 0.01,
+        'account_risk_percent': 0.01, 
         'signal_candle_timestamp': None
     }
 
@@ -4593,160 +4949,176 @@ def strategy_market_structure_sd(symbol: str, condition_configs=None) -> dict: #
         print(f"{s6_log_prefix} Identifying market structure...")
         market_structure = identify_market_structure(kl_df, swing_highs_bool, swing_lows_bool)
         print(f"{s6_log_prefix} Market Structure: {market_structure}")
-        base_return['all_conditions_status']['s6_market_trend']['evaluated_to'] = market_structure['trend_bias']
+        base_return['all_conditions_status']['trend_bias'] = market_structure['trend_bias']
         base_return['all_conditions_status']['last_valid_low'] = market_structure['last_valid_low_price']
         base_return['all_conditions_status']['last_valid_high'] = market_structure['last_valid_high_price']
 
         # 2. Identify Supply & Demand Zones
         print(f"{s6_log_prefix} Identifying S/D zones...")
         sd_zones = identify_supply_demand_zones(kl_df, atr_period=14, lookback_candles=10, consolidation_atr_factor=0.7, sharp_move_atr_factor=1.5)
+        # Zone Count Logging
         print(f"{s6_log_prefix} Zones detected: {len(sd_zones)}")
-        base_return['all_conditions_status']['zone_type_found'] = 'None' # Default
+
         if not sd_zones:
             print(f"{s6_log_prefix} No S/D zones identified. No trade signal.")
+            base_return['all_conditions_status']['zone_type_found'] = 'None'
             return base_return
 
         current_price = kl_df['Close'].iloc[-1]
         print(f"{s6_log_prefix} Current price: {current_price}")
         potential_trade = None
-        met_conditions_count = 0
-
-        # 3. Strategy Logic with condition checks
-        # Condition 1: Market Trend Alignment (s6_market_trend)
-        market_trend_aligned = False
-        if condition_configs.get("s6_market_trend", True):
-            if market_structure['trend_bias'] != 'ranging':
-                market_trend_aligned = True
-                met_conditions_count +=1
-            else:
-                print(f"{s6_log_prefix} Market trend is ranging, condition 's6_market_trend' not met.")
-                base_return['error'] = "Trend is ranging, trade condition not met."
-                return base_return # Stop if trend is ranging and condition is enabled
-        else: # s6_market_trend is disabled, so proceed regardless of trend
-            market_trend_aligned = True 
-            # Not incrementing met_conditions_count here as it's for *passed enabled* conditions
-
-        if market_trend_aligned: # Only proceed if trend is aligned or trend check is disabled
-            print(f"{s6_log_prefix} Market trend aligned (or check disabled). Current bias: {market_structure['trend_bias']}")
-            
-            target_zone_type = 'demand' if market_structure['trend_bias'] == 'bullish' else 'supply'
-            # If trend check disabled, default to checking demand for 'up' signals, supply for 'down'.
-            # This part needs refinement if trend is disabled: which zones to check?
-            # For now, if trend disabled, it won't have a bias. Let's assume it tries both.
-            # This complexifies logic. Simpler: if trend disabled, it won't filter zones by trend.
-            # This means it might try to buy in a supply or sell in a demand if other conditions allow.
-            # Let's assume if trend is disabled, we check for both demand (for long) and supply (for short)
-            # and the first valid setup is taken.
-
-            # --- Bullish Scenario Check (Demand Zone) ---
-            if market_structure['trend_bias'] == 'bullish' or not condition_configs.get("s6_market_trend", True):
-                relevant_zones_bullish = [z for z in sd_zones if z['type'] == 'demand' and z['timestamp_end'] < kl_df.index[-1]]
-                relevant_zones_bullish.sort(key=lambda z: z['timestamp_end'], reverse=True)
-                if relevant_zones_bullish:
-                    zone = relevant_zones_bullish[0]
-                    base_return['all_conditions_status']['zone_type_found'] = 'demand'
-                    base_return['all_conditions_status']['current_sd_zone_start'] = zone['price_start']
-                    base_return['all_conditions_status']['current_sd_zone_end'] = zone['price_end']
-
-                    price_in_zone_eval = zone['price_start'] <= current_price <= zone['price_end']
-                    base_return['all_conditions_status']['s6_price_in_zone']['evaluated_to'] = price_in_zone_eval
-                    
-                    if price_in_zone_eval or not condition_configs.get("s6_price_in_zone", True):
-                        if condition_configs.get("s6_price_in_zone", True) and price_in_zone_eval: met_conditions_count +=1
-                        
-                        entry_price = current_price
-                        sl_raw = zone['price_start'] - ((zone['price_end'] - zone['price_start']) * 0.10)
-                        sl = round(sl_raw, get_price_precision(symbol))
-                        if sl >= zone['price_start']: sl = round(zone['price_start'] - (current_price * 0.001), get_price_precision(symbol))
-                        
-                        tp_target = market_structure.get('last_valid_high_price') or market_structure.get('current_swing_high_price')
-                        if tp_target: tp_target = round(tp_target, get_price_precision(symbol))
-
-                        if tp_target and tp_target > entry_price and sl < entry_price:
-                            reward = tp_target - entry_price
-                            risk = entry_price - sl
-                            if risk > 0:
-                                rr = reward / risk
-                                base_return['all_conditions_status']['s6_rr_met']['evaluated_to'] = (rr >= 1.5)
-                                if (rr >= 1.5 or not condition_configs.get("s6_rr_met", True)):
-                                    if condition_configs.get("s6_rr_met", True) and (rr >= 1.5): met_conditions_count +=1
-                                    potential_trade = {'signal': 'up', 'sl': sl, 'tp': tp_target, 'entry': entry_price}
-                                else: base_return['error'] = f"R:R too low ({rr:.2f}) for demand."
-                            else: base_return['error'] = "Risk <= 0 for bullish."
-                        else: base_return['error'] = "Invalid SL/TP for bullish."
-                    else: base_return['error'] = "Price not in demand zone."
-                else: print(f"{s6_log_prefix} No relevant historical demand zones for bullish check.")
-            
-            # --- Bearish Scenario Check (Supply Zone) ---
-            if not potential_trade and (market_structure['trend_bias'] == 'bearish' or not condition_configs.get("s6_market_trend", True)):
-                # Reset met_conditions_count if checking bearish side after bullish failed due to non-trend conditions
-                if market_structure['trend_bias'] != 'bearish' and condition_configs.get("s6_market_trend", True): # only reset if trend was bullish but other conds failed
-                     met_conditions_count = 1 if condition_configs.get("s6_market_trend", True) else 0 # Start with trend met (or 0 if disabled)
-
-                relevant_zones_bearish = [z for z in sd_zones if z['type'] == 'supply' and z['timestamp_end'] < kl_df.index[-1]]
-                relevant_zones_bearish.sort(key=lambda z: z['timestamp_end'], reverse=True)
-                if relevant_zones_bearish:
-                    zone = relevant_zones_bearish[0]
-                    base_return['all_conditions_status']['zone_type_found'] = 'supply' # Overwrites if demand was found but failed later
-                    base_return['all_conditions_status']['current_sd_zone_start'] = zone['price_start']
-                    base_return['all_conditions_status']['current_sd_zone_end'] = zone['price_end']
-
-                    price_in_zone_eval = zone['price_start'] <= current_price <= zone['price_end']
-                    base_return['all_conditions_status']['s6_price_in_zone']['evaluated_to'] = price_in_zone_eval # Might overwrite if checked both sides
-
-                    if price_in_zone_eval or not condition_configs.get("s6_price_in_zone", True):
-                        if condition_configs.get("s6_price_in_zone", True) and price_in_zone_eval: met_conditions_count +=1
-
-                        entry_price = current_price
-                        sl_raw = zone['price_end'] + ((zone['price_end'] - zone['price_start']) * 0.10)
-                        sl = round(sl_raw, get_price_precision(symbol))
-                        if sl <= zone['price_end']: sl = round(zone['price_end'] + (current_price * 0.001), get_price_precision(symbol))
-
-                        tp_target = market_structure.get('last_valid_low_price') or market_structure.get('current_swing_low_price')
-                        if tp_target: tp_target = round(tp_target, get_price_precision(symbol))
-
-                        if tp_target and tp_target < entry_price and sl > entry_price:
-                            reward = entry_price - tp_target
-                            risk = sl - entry_price
-                            if risk > 0:
-                                rr = reward / risk
-                                base_return['all_conditions_status']['s6_rr_met']['evaluated_to'] = (rr >= 1.5)
-                                if (rr >= 1.5 or not condition_configs.get("s6_rr_met", True)):
-                                    if condition_configs.get("s6_rr_met", True) and (rr >= 1.5): met_conditions_count +=1
-                                    potential_trade = {'signal': 'down', 'sl': sl, 'tp': tp_target, 'entry': entry_price}
-                                else: base_return['error'] = f"R:R too low ({rr:.2f}) for supply."
-                            else: base_return['error'] = "Risk <= 0 for bearish."
-                        else: base_return['error'] = "Invalid SL/TP for bearish."
-                    else: base_return['error'] = "Price not in supply zone." # Overwrites previous error if any
-                else: print(f"{s6_log_prefix} No relevant historical supply zones for bearish check.")
         
-        # Final signal decision based on potential_trade and met_conditions_count
-        num_enabled_s6_conditions = sum(1 for cid in ["s6_market_trend", "s6_price_in_zone", "s6_rr_met"] if condition_configs.get(cid,True))
-        base_return['conditions_for_full_signal_threshold'] = num_enabled_s6_conditions if num_enabled_s6_conditions > 0 else 1
+        # 3. Strategy Logic
+        print(f"{s6_log_prefix} Current trend bias: {market_structure['trend_bias']}")
+        if market_structure['trend_bias'] == 'bullish':
+            relevant_zones = [z for z in sd_zones if z['type'] == 'demand' and z['timestamp_end'] < kl_df.index[-1]]
+            relevant_zones.sort(key=lambda z: z['timestamp_end'], reverse=True)
+            print(f"{s6_log_prefix} Found {len(relevant_zones)} relevant demand zones for bullish trend.")
 
-        if potential_trade and met_conditions_count >= base_return['conditions_for_full_signal_threshold']:
+            if relevant_zones:
+                zone = relevant_zones[0]
+                print(f"{s6_log_prefix} Considering demand zone: Start={zone['price_start']}, End={zone['price_end']}, TimestampEnd={zone['timestamp_end']}")
+                base_return['all_conditions_status']['zone_type_found'] = 'demand'
+                base_return['all_conditions_status']['current_sd_zone_start'] = zone['price_start']
+                base_return['all_conditions_status']['current_sd_zone_end'] = zone['price_end']
+                
+                # Price-in-Zone Logging (Bullish)
+                print(f"{s6_log_prefix} Bullish Zone Check: Zone bounds: {zone['price_start']}–{zone['price_end']}, Price: {current_price}")
+                if zone['price_start'] <= current_price <= zone['price_end']:
+                    print(f"{s6_log_prefix} Price {current_price} is within demand zone.")
+                    base_return['all_conditions_status']['price_in_zone'] = True
+                    entry_price = current_price 
+                    
+                    sl_price_raw = zone['price_start']
+                    sl_buffer = (zone['price_end'] - zone['price_start']) * 0.10 # 10% of zone height as buffer
+                    sl_price = round(sl_price_raw - sl_buffer, get_price_precision(symbol))
+                    # Ensure SL is actually below the zone start after buffer and rounding
+                    if sl_price >= zone['price_start']: sl_price = round(zone['price_start'] - (kl_df['Close'].iloc[-1] * 0.001), get_price_precision(symbol)) # Minimal fallback SL if buffer logic fails
+
+                    print(f"{s6_log_prefix} Calculated SL for long: {sl_price} (Zone bottom: {sl_price_raw}, Buffer: {sl_buffer})")
+
+                    tp_price = market_structure.get('last_valid_high_price') or market_structure.get('current_swing_high_price')
+                    if tp_price: tp_price = round(tp_price, get_price_precision(symbol))
+                    print(f"{s6_log_prefix} Calculated TP for long: {tp_price} (LastValidHigh: {market_structure.get('last_valid_high_price')}, CurrentSwingHigh: {market_structure.get('current_swing_high_price')})")
+
+                    if tp_price is None or tp_price <= entry_price:
+                        base_return['error'] = f"Invalid TP for bullish (TP {tp_price} <= entry {entry_price} or None)."
+                        print(f"{s6_log_prefix} {base_return['error']}")
+                    elif sl_price >= entry_price:
+                        base_return['error'] = f"Invalid SL for bullish (SL {sl_price} >= entry {entry_price})."
+                        print(f"{s6_log_prefix} {base_return['error']}")
+                    else:
+                        reward_potential = tp_price - entry_price
+                        risk_potential = entry_price - sl_price
+                        if risk_potential <= 0: 
+                            base_return['error'] = "Risk potential <= 0 for bullish."
+                            print(f"{s6_log_prefix} {base_return['error']}")
+                        else:
+                            rr_ratio = reward_potential / risk_potential
+                            # Risk-Reward Logging (Bullish)
+                            print(f"{s6_log_prefix} Bullish Risk/Reward: Risk: {risk_potential:.4f}, Reward: {reward_potential:.4f}, R:R = {rr_ratio:.2f}")
+                            # Adjust R:R Threshold
+                            if rr_ratio >= 1.5: # Temporarily lowered from 2.5
+                                base_return['all_conditions_status']['rr_ok'] = True
+                                potential_trade = {'signal': 'up', 'sl': sl_price, 'tp': tp_price, 'entry': entry_price}
+                                print(f"{s6_log_prefix} Bullish trade meets R:R. Signal: up, SL: {sl_price}, TP: {tp_price}")
+                            else:
+                                base_return['error'] = f"R:R too low ({rr_ratio:.2f}) for demand."
+                                print(f"{s6_log_prefix} {base_return['error']}")
+                else:
+                    print(f"{s6_log_prefix} Price {current_price} not in most recent demand zone.")
+            else:
+                print(f"{s6_log_prefix} No relevant historical demand zones found for bullish trend.")
+        
+        elif market_structure['trend_bias'] == 'bearish':
+            relevant_zones = [z for z in sd_zones if z['type'] == 'supply' and z['timestamp_end'] < kl_df.index[-1]]
+            relevant_zones.sort(key=lambda z: z['timestamp_end'], reverse=True)
+            print(f"{s6_log_prefix} Found {len(relevant_zones)} relevant supply zones for bearish trend.")
+
+            if relevant_zones:
+                zone = relevant_zones[0]
+                print(f"{s6_log_prefix} Considering supply zone: Start={zone['price_start']}, End={zone['price_end']}, TimestampEnd={zone['timestamp_end']}")
+                base_return['all_conditions_status']['zone_type_found'] = 'supply'
+                base_return['all_conditions_status']['current_sd_zone_start'] = zone['price_start']
+                base_return['all_conditions_status']['current_sd_zone_end'] = zone['price_end']
+
+                # Price-in-Zone Logging (Bearish)
+                print(f"{s6_log_prefix} Bearish Zone Check: Zone bounds: {zone['price_start']}–{zone['price_end']}, Price: {current_price}")
+                if zone['price_start'] <= current_price <= zone['price_end']:
+                    print(f"{s6_log_prefix} Price {current_price} is within supply zone.")
+                    base_return['all_conditions_status']['price_in_zone'] = True
+                    entry_price = current_price
+                    
+                    sl_price_raw = zone['price_end']
+                    sl_buffer = (zone['price_end'] - zone['price_start']) * 0.10 # 10% of zone height as buffer
+                    sl_price = round(sl_price_raw + sl_buffer, get_price_precision(symbol))
+                    # Ensure SL is actually above the zone end after buffer and rounding
+                    if sl_price <= zone['price_end']: sl_price = round(zone['price_end'] + (kl_df['Close'].iloc[-1] * 0.001), get_price_precision(symbol)) # Minimal fallback SL
+
+                    print(f"{s6_log_prefix} Calculated SL for short: {sl_price} (Zone top: {sl_price_raw}, Buffer: {sl_buffer})")
+
+                    tp_price = market_structure.get('last_valid_low_price') or market_structure.get('current_swing_low_price')
+                    if tp_price: tp_price = round(tp_price, get_price_precision(symbol))
+                    print(f"{s6_log_prefix} Calculated TP for short: {tp_price} (LastValidLow: {market_structure.get('last_valid_low_price')}, CurrentSwingLow: {market_structure.get('current_swing_low_price')})")
+
+                    if tp_price is None or tp_price >= entry_price:
+                        base_return['error'] = f"Invalid TP for bearish (TP {tp_price} >= entry {entry_price} or None)."
+                        print(f"{s6_log_prefix} {base_return['error']}")
+                    elif sl_price <= entry_price:
+                         base_return['error'] = f"Invalid SL for bearish (SL {sl_price} <= entry {entry_price})."
+                         print(f"{s6_log_prefix} {base_return['error']}")
+                    else:
+                        reward_potential = entry_price - tp_price
+                        risk_potential = sl_price - entry_price
+                        if risk_potential <= 0: 
+                            base_return['error'] = "Risk potential <= 0 for bearish."
+                            print(f"{s6_log_prefix} {base_return['error']}")
+                        else:
+                            rr_ratio = reward_potential / risk_potential
+                            # Risk-Reward Logging (Bearish)
+                            print(f"{s6_log_prefix} Bearish Risk/Reward: Risk: {risk_potential:.4f}, Reward: {reward_potential:.4f}, R:R = {rr_ratio:.2f}")
+                            # Adjust R:R Threshold
+                            if rr_ratio >= 1.5: # Temporarily lowered from 2.5
+                                base_return['all_conditions_status']['rr_ok'] = True
+                                potential_trade = {'signal': 'down', 'sl': sl_price, 'tp': tp_price, 'entry': entry_price}
+                                print(f"{s6_log_prefix} Bearish trade meets R:R. Signal: down, SL: {sl_price}, TP: {tp_price}")
+                            else:
+                                base_return['error'] = f"R:R too low ({rr_ratio:.2f}) for supply."
+                                print(f"{s6_log_prefix} {base_return['error']}")
+                else:
+                    print(f"{s6_log_prefix} Price {current_price} not in most recent supply zone.")
+            else:
+                print(f"{s6_log_prefix} No relevant historical supply zones found for bearish trend.")
+        else: # Ranging trend
+            print(f"{s6_log_prefix} Trend is ranging. No S/D trades taken in ranging market.")
+            base_return['error'] = "Trend is ranging, no trade."
+
+
+        if potential_trade:
             base_return['signal'] = potential_trade['signal']
-            base_return['sl_price'] = potential_trade['sl']
-            base_return['tp_price'] = potential_trade['tp']
+            base_return['sl_price'] = potential_trade['sl'] 
+            base_return['tp_price'] = potential_trade['tp'] # TP already rounded
             base_return['entry_price_estimate'] = round(potential_trade['entry'], get_price_precision(symbol))
-            base_return['conditions_met_count'] = met_conditions_count
-            if base_return['error'] and base_return['all_conditions_status']['s6_rr_met']['evaluated_to']: # If RR was ok, clear prior error
+            base_return['conditions_met_count'] = 1 
+            if base_return['error'] and base_return['all_conditions_status']['rr_ok']:
+                print(f"{s6_log_prefix} Clearing previous error as R:R is OK for trade: {base_return['error']}")
                 base_return['error'] = None 
         else:
+            # This 'else' means no 'potential_trade' was formed.
+            # The error might have been set above (e.g. R:R too low, invalid SL/TP)
+            # Or, no conditions to form a trade were met (e.g., price not in zone, no relevant zones)
             base_return['signal'] = 'none'
             base_return['sl_price'] = None
             base_return['tp_price'] = None
-            base_return['conditions_met_count'] = met_conditions_count # Store how many were met anyway
-            if not base_return['error']: # If no specific error like R:R low, set a generic one
-                 if num_enabled_s6_conditions > 0 and met_conditions_count < num_enabled_s6_conditions :
-                     base_return['error'] = "Not all enabled S6 conditions were met for a trade."
-                 elif num_enabled_s6_conditions == 0 : # All conditions disabled
-                     base_return['error'] = "All S6 conditions disabled, no trade possible."
-                 else: # Should not be reached if logic is sound, means potential_trade was None for other reasons
-                     base_return['error'] = "No S6 trade setup found."
-            # Log final error if any
+            if not base_return['error']: # If no specific error was set by R:R or SL/TP validation
+                if base_return['all_conditions_status']['zone_type_found'] not in ['N/A', 'None']:
+                    if not base_return['all_conditions_status']['price_in_zone']:
+                        base_return['error'] = "Price not in S/D zone."
+                elif market_structure['trend_bias'] != 'ranging': # Only set this if not ranging and no other error
+                     base_return['error'] = "No valid trade setup found (e.g. no zone entry, or other rule failed)."
             if base_return['error']: print(f"{s6_log_prefix} No trade signal. Reason: {base_return['error']}")
-            else: print(f"{s6_log_prefix} No trade signal. Conditions not met or no valid setup.")
+            else: print(f"{s6_log_prefix} No trade signal. Conditions not met.")
+
 
     except ImportError as e_imp: 
         base_return['error'] = f"ImportError S6 {symbol}: {e_imp}. Check scipy/talib/pandas_ta."
@@ -6065,54 +6437,43 @@ def run_bot_logic():
                     conditions_to_start_wait_threshold = item['conditions_to_start_wait_threshold']
                     conditions_for_full_signal_threshold = item['conditions_for_full_signal_threshold']
                     time_elapsed_seconds = (current_time_utc_for_pending_manage - timestamp).total_seconds()
-                        
-                        # --- Retrieve condition configs for the specific strategy of the pending signal ---
-                        pending_signal_condition_configs = {}
-                        pending_strategy_name = STRATEGIES.get(strategy_id)
-                        if pending_strategy_name:
-                            # Build from global_strategy_condition_vars if available for most up-to-date UI settings
-                            if pending_strategy_name in global_strategy_condition_vars:
-                                for cond_id_pending, cond_data_pending in global_strategy_condition_vars[pending_strategy_name].items():
-                                    pending_signal_condition_configs[cond_id_pending] = cond_data_pending['enabled'].get()
-                            else: # Fallback to defaults from `strategies` list
-                                strategy_def_pending_live = next((s for s in strategies if s["name"] == pending_strategy_name), None)
-                                if strategy_def_pending_live and "conditions" in strategy_def_pending_live:
-                                    for cond_info_live_pending in strategy_def_pending_live["conditions"]:
-                                        pending_signal_condition_configs[cond_info_live_pending["id"]] = cond_info_live_pending["enabled"]
-                            print(f"Run_bot_logic (Pending Re-eval): Using condition_configs for {pending_strategy_name} ({strategy_id}): {pending_signal_condition_configs}")
-                        # --- End Retrieve condition configs for pending signal ---
-
                     current_strategy_output = {}
-                        if strategy_id == 0: current_strategy_output = scalping_strategy_signal(symbol, condition_configs=pending_signal_condition_configs)
-                        elif strategy_id == 1: current_strategy_output = strategy_ema_supertrend(symbol, condition_configs=pending_signal_condition_configs)
-                        elif strategy_id == 2: current_strategy_output = strategy_bollinger_band_mean_reversion(symbol, condition_configs=pending_signal_condition_configs)
-                        elif strategy_id == 3: current_strategy_output = strategy_vwap_breakout_momentum(symbol, condition_configs=pending_signal_condition_configs)
-                        # S4, S5, S6, S7 do not use this g_conditional_pending_signals system.
-                        
-                        current_met_count = 0 # This will be updated by the strategy function based on its internal logic and configs
-                        if current_strategy_output: # Ensure strategy_output is not None
-                            current_met_count = current_strategy_output.get('conditions_met_count',0)
-                            # The all_conditions_status is now more detailed within strategy_output
-                        
-                        if key in g_conditional_pending_signals: # Check if not deleted by another condition
+                    if strategy_id == 0: current_strategy_output = scalping_strategy_signal(symbol)
+                    elif strategy_id == 1: current_strategy_output = strategy_ema_supertrend(symbol)
+                    elif strategy_id == 2: current_strategy_output = strategy_bollinger_band_mean_reversion(symbol)
+                    elif strategy_id == 3: current_strategy_output = strategy_vwap_breakout_momentum(symbol)
+                    current_met_count = 0
+                    if current_strategy_output and current_strategy_output.get('all_conditions_status'):
+                        all_conds = current_strategy_output['all_conditions_status']
+                        if strategy_id == 0:
+                            if side == 'up': current_met_count = all_conds.get('num_buy_conditions_met', 0)
+                            elif side == 'down': current_met_count = all_conds.get('num_sell_conditions_met', 0)
+                        elif strategy_id == 1:
+                            if side == 'up': relevant_keys = ['ema_cross_up', 'st_green', 'rsi_long_ok']
+                            else: relevant_keys = ['ema_cross_down', 'st_red', 'rsi_short_ok']
+                            current_met_count = sum(1 for k, v in all_conds.items() if k in relevant_keys and v)
+                        elif strategy_id == 2:
+                            if side == 'up': relevant_keys = ['price_below_lower_bb', 'rsi_oversold', 'volume_confirms_long']
+                            else: relevant_keys = ['price_above_upper_bb', 'rsi_overbought', 'volume_confirms_short']
+                            current_met_count = sum(1 for k, v in all_conds.items() if k in relevant_keys and v)
+                        elif strategy_id == 3:
+                            if side == 'up': relevant_keys = ['price_above_vwap_2bar_long', 'macd_positive_rising', 'atr_volatility_confirms_long']
+                            else: relevant_keys = ['price_below_vwap_2bar_short', 'macd_negative_falling', 'atr_volatility_confirms_short']
+                            current_met_count = sum(1 for k, v in all_conds.items() if k in relevant_keys and v)
+                    if key in g_conditional_pending_signals:
                         g_conditional_pending_signals[key]['current_conditions_met_count'] = current_met_count
-                            if current_strategy_output: # Ensure output exists
+                        if current_strategy_output:
                             g_conditional_pending_signals[key]['last_evaluated_all_conditions_status'] = current_strategy_output.get('all_conditions_status', {}).copy()
                             g_conditional_pending_signals[key]['potential_sl_price'] = current_strategy_output.get('sl_price')
                             g_conditional_pending_signals[key]['potential_tp_price'] = current_strategy_output.get('tp_price')
-                                # Threshold might be dynamic based on enabled conditions, strategy function should return the relevant one
-                                conditions_for_full_signal_threshold = current_strategy_output.get('conditions_for_full_signal_threshold', conditions_for_full_signal_threshold)
-                                g_conditional_pending_signals[key]['conditions_for_full_signal_threshold'] = conditions_for_full_signal_threshold
-
-
+                            if strategy_id == 0:
+                                 g_conditional_pending_signals[key]['conditions_for_full_signal_threshold'] = current_strategy_output.get('conditions_for_full_signal_threshold', conditions_for_full_signal_threshold)
+                                 conditions_for_full_signal_threshold = g_conditional_pending_signals[key]['conditions_for_full_signal_threshold']
                     remaining_seconds = max(0, 300 - time_elapsed_seconds)
-                        
-                        # Enhanced UI Update for pending signals (using the new structure of all_conditions_status)
                     _activity_set(f"S{strategy_id} {symbol} ({side}): {current_met_count}/{conditions_for_full_signal_threshold} cond. {int(remaining_seconds)}s left.")
-
                     if root and root.winfo_exists() and current_strategy_output and conditions_text_widget:
                         param_display_content_pending = get_formatted_strategy_parameters_and_conditions(
-                                strategy_id=strategy_id, 
+                            strategy_id=strategy_id, # Use item's strategy_id
                             symbol=symbol,
                             conditions_data=current_strategy_output.get('all_conditions_status'),
                             error_message=current_strategy_output.get('error')
@@ -6195,8 +6556,7 @@ def run_bot_logic():
                         # Check if this symbol already has an S5 trade or if S5 has a 1-trade-at-a-time rule (not specified, assuming can trade multiple symbols)
 
                         _activity_set(f"S5: Scanning {sym_to_check}...")
-                        # Pass live_condition_configs to S5
-                        signal_data_s5 = strategy_rsi_enhanced(sym_to_check, condition_configs=live_condition_configs) 
+                        signal_data_s5 = strategy_rsi_enhanced(sym_to_check)
                         print(f"DEBUG: S5: Data for {sym_to_check}: {signal_data_s5}")
 
                         if root and root.winfo_exists() and conditions_text_widget:
@@ -6252,8 +6612,7 @@ def run_bot_logic():
                     elif current_active_strategy_id == 6: # Market Structure S/D Strategy
                         print(f"DEBUG: S6: Active for symbol: {sym_to_check}")
                         _activity_set(f"S6: Scanning {sym_to_check}...")
-                        # Pass live_condition_configs to S6
-                        signal_data_s6 = strategy_market_structure_sd(sym_to_check, condition_configs=live_condition_configs) 
+                        signal_data_s6 = strategy_market_structure_sd(sym_to_check) # Call the new strategy function
                         print(f"DEBUG: S6: Data for {sym_to_check}: {signal_data_s6}")
 
                         if root and root.winfo_exists() and conditions_text_widget: # Update UI with conditions
@@ -6315,9 +6674,8 @@ def run_bot_logic():
                             _activity_set(f"S7 ({sym_to_check}): Cooldown until {cooldown_ends_at}.")
                             sleep(0.1)
                             continue # Skip to next symbol if on cooldown
-                        
-                        # Pass live_condition_configs to S7
-                        signal_data_s7 = strategy_candlestick_patterns_signal(sym_to_check, condition_configs=live_condition_configs) 
+
+                        signal_data_s7 = strategy_candlestick_patterns_signal(sym_to_check)
                         print(f"DEBUG: S7: Data for {sym_to_check}: {signal_data_s7}")
 
                         if root and root.winfo_exists() and conditions_text_widget: # Update UI with conditions
@@ -6386,8 +6744,7 @@ def run_bot_logic():
 
                         _activity_set(f"S4: Scanning {sym_to_check}...") # More specific S4 scan message
                         
-                        # Pass live_condition_configs to S4
-                        signal_data_s4 = strategy_macd_divergence_pivot(sym_to_check, condition_configs=live_condition_configs) 
+                        signal_data_s4 = strategy_macd_divergence_pivot(sym_to_check)
                         current_signal_s4 = signal_data_s4.get('signal', 'none')
                         error_message_s4 = signal_data_s4.get('error')
 
@@ -6482,31 +6839,11 @@ def run_bot_logic():
                         if current_active_strategy_id == 3 and strategy3_active_trade_info['symbol'] is not None:
                              sleep(0.05); continue
                         
-                        # --- Retrieve condition configurations for the active strategy ---
-                        live_condition_configs = {}
-                        active_strategy_name = STRATEGIES.get(current_active_strategy_id)
-                        if active_strategy_name:
-                            # This assumes apply_settings will update the main `strategies` list in memory,
-                            # or we fetch from global_strategy_condition_vars.
-                            # For now, let's build it from global_strategy_condition_vars if available,
-                            # otherwise default to all true (consistent with strategy func defaults).
-                            if active_strategy_name in global_strategy_condition_vars:
-                                for cond_id, cond_data in global_strategy_condition_vars[active_strategy_name].items():
-                                    live_condition_configs[cond_id] = cond_data['enabled'].get()
-                            else: # Fallback if UI vars not populated for some reason (e.g. new strategy not yet fully UI-integrated)
-                                strategy_def_live = next((s for s in strategies if s["name"] == active_strategy_name), None)
-                                if strategy_def_live and "conditions" in strategy_def_live:
-                                    for cond_info_live in strategy_def_live["conditions"]:
-                                        live_condition_configs[cond_info_live["id"]] = cond_info_live["enabled"] # Default from strategies list
-                                print(f"Run_bot_logic: Using condition_configs for {active_strategy_name}: {live_condition_configs}")
-                        # --- End Retrieve condition configurations ---
-
                         strategy_output = {}
-                        if current_active_strategy_id == 0: strategy_output = scalping_strategy_signal(sym_to_check, condition_configs=live_condition_configs)
-                        elif current_active_strategy_id == 1: strategy_output = strategy_ema_supertrend(sym_to_check, condition_configs=live_condition_configs)
-                        elif current_active_strategy_id == 2: strategy_output = strategy_bollinger_band_mean_reversion(sym_to_check, condition_configs=live_condition_configs)
-                        elif current_active_strategy_id == 3: strategy_output = strategy_vwap_breakout_momentum(sym_to_check, condition_configs=live_condition_configs)
-                        # Note: S4, S5, S6, S7 are handled in their own blocks above, this is for S0-S3 pending system
+                        if current_active_strategy_id == 0: strategy_output = scalping_strategy_signal(sym_to_check)
+                        elif current_active_strategy_id == 1: strategy_output = strategy_ema_supertrend(sym_to_check)
+                        elif current_active_strategy_id == 2: strategy_output = strategy_bollinger_band_mean_reversion(sym_to_check)
+                        elif current_active_strategy_id == 3: strategy_output = strategy_vwap_breakout_momentum(sym_to_check)
                         
                         if not strategy_output: 
                             sleep(0.1); continue
@@ -6829,80 +7166,20 @@ def apply_settings():
                         print(f"Warning: Parameter '{param_name}' not found in UI vars for strategy '{selected_strategy_name}'. Using default if available in strategy logic.")
                 
                 if valid_params:
-                    current_strategy_active_params = temp_params # This stores strategy-level params
-
-                    # --- Now, update the global `strategies` list with these parameters AND condition settings ---
-                    # Find the strategy dictionary in the main `strategies` list
-                    for i, strat_dict_global in enumerate(strategies):
-                        if strat_dict_global["name"] == selected_strategy_name:
-                            # Update strategy-level parameters in the global list
-                            for p_idx_global, param_def_global in enumerate(strat_dict_global["parameters"]):
-                                param_id_global = param_def_global["id"] # Use ID as the reliable key
-                                if param_id_global in temp_params: # temp_params should be keyed by id from global_strategy_param_vars
-                                    val_to_set = temp_params[param_id_global]
-                                    param_type_global = param_def_global.get("type", "string")
-                                    try:
-                                        typed_val_strat_param = None
-                                        if param_type_global == "int": typed_val_strat_param = int(val_to_set)
-                                        elif param_type_global == "float": typed_val_strat_param = float(val_to_set)
-                                        else: typed_val_strat_param = val_to_set # string or other
-                                        strategies[i]["parameters"][p_idx_global]["default"] = typed_val_strat_param
-                                        print(f"Updated global strategy param: {param_def_global['name']} to {typed_val_strat_param}")
-                                    except ValueError:
-                                        messagebox.showerror("Settings Error", f"Invalid value for '{param_def_global['name']}' in strategy '{selected_strategy_name}'. Expected {param_type_global}.")
-                                        return False # Stop applying settings
-                                elif param_def_global["name"] in temp_params: # Fallback to name if ID wasn't primary key in temp_params (less ideal)
-                                    val_to_set = temp_params[param_def_global["name"]]
-                                    param_type_global = param_def_global.get("type", "string")
-                                    try:
-                                        typed_val_strat_param_name = None
-                                        if param_type_global == "int": typed_val_strat_param_name = int(val_to_set)
-                                        elif param_type_global == "float": typed_val_strat_param_name = float(val_to_set)
-                                        else: typed_val_strat_param_name = val_to_set # string or other
-                                        strategies[i]["parameters"][p_idx_global]["default"] = typed_val_strat_param_name
-                                        print(f"Updated global strategy param (by name): {param_def_global['name']} to {typed_val_strat_param_name}")
-                                    except ValueError:
-                                        messagebox.showerror("Settings Error", f"Invalid value for '{param_def_global['name']}' (by name) in strategy '{selected_strategy_name}'. Expected {param_type_global}.")
-                                        return False
-
-                            # Update condition settings (enabled status and their parameters)
-                            if "conditions" in strat_dict_global and selected_strategy_name in global_strategy_condition_vars:
-                                for cond_idx, cond_def_global in enumerate(strat_dict_global["conditions"]):
-                                    cond_id_global = cond_def_global["id"]
-                                    if cond_id_global in global_strategy_condition_vars[selected_strategy_name]:
-                                        # Update enabled status
-                                        strategies[i]["conditions"][cond_idx]["enabled"] = global_strategy_condition_vars[selected_strategy_name][cond_id_global]['enabled'].get()
-                                        
-                                        # Update parameters of this condition
-                                        if "parameters" in cond_def_global and cond_def_global["parameters"]:
-                                            for cond_param_idx, cond_param_def_global in enumerate(cond_def_global["parameters"]):
-                                                cond_param_id_global = cond_param_def_global["id"]
-                                                if cond_param_id_global in global_strategy_condition_vars[selected_strategy_name][cond_id_global]['parameters']:
-                                                    cond_param_val_str = global_strategy_condition_vars[selected_strategy_name][cond_id_global]['parameters'][cond_param_id_global].get()
-                                                    cond_param_type_global = cond_param_def_global.get("type", "string")
-                                                    try:
-                                                        typed_val = None
-                                                        if cond_param_type_global == "int": typed_val = int(cond_param_val_str)
-                                                        elif cond_param_type_global == "float": typed_val = float(cond_param_val_str)
-                                                        else: typed_val = cond_param_val_str
-                                                        strategies[i]["conditions"][cond_idx]["parameters"][cond_param_idx]["default"] = typed_val # Update the 'default' which acts as current value
-                                                    except ValueError:
-                                                        messagebox.showerror("Settings Error", f"Invalid value for '{cond_param_def_global['name']}' in condition '{cond_def_global['name']}'. Expected {cond_param_type_global}.")
-                                                        return False # Stop applying settings
-                            break # Found and updated the strategy in global list
-                    # --- End update to global `strategies` list ---
+                    current_strategy_active_params = temp_params
                 else:
-                    return False # Indicate settings application failed due to invalid strategy params
+                    # Invalidate ACTIVE_STRATEGY_ID or prevent bot start if specific params are bad?
+                    # For now, an error message is shown, and current_strategy_active_params remains empty or outdated.
+                    # This might lead to issues if the bot starts. It's better to return False here.
+                    return False # Indicate settings application failed
             else:
                 print(f"No specific parameters defined or UI vars missing for strategy: {selected_strategy_name}")
         else:
             messagebox.showerror("Settings Error", f"Currently selected strategy ID {active_strategy_id_val} is invalid.")
             return False
 
+
         messagebox.showinfo("Settings", "Settings applied successfully!")
-        # For debugging: print the updated strategies structure
-        # import json
-        # print("Updated strategies global list:", json.dumps(strategies, indent=2))
         return True
 
     except ValueError as ve: 
