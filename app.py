@@ -5110,102 +5110,96 @@ def strategy_advance_ema_cross(symbol: str) -> dict:
 
             if not candles_clear:
                 trade_signal = 'none' # Invalidate signal
-                if not base_return['error']: # If no specific error was set during loop
-                     base_return['error'] = "S8: Last 20 candles touched/crossed EMAs."
-                print(f"{s8_log_prefix} Signal invalidated by 20-candle check. Error: {base_return['error']}")
+                # Specific error for 20-candle validation failure
+                base_return['error'] = "S8: Signal invalidated, last 20 candles touched/crossed EMAs."
+                print(f"{s8_log_prefix} {base_return['error']}")
+                # Do not proceed to SL/TP validation if 20-candle check fails
 
 
-        if trade_signal != 'none':
+        if trade_signal != 'none': # Only proceed if signal is still valid after 20-candle check
             print(f"{s8_log_prefix} Signal '{trade_signal}' passed 20-candle validation. Proceeding to SL/TP.")
-            entry_price = current_price # Price of the crossover candle's close
+            entry_price = current_price 
             sl_price = None
             tp_price = None
-            sl_validation_ok = False
+            sl_validation_ok = False # Initialize SL validation status
 
-            # Define a small buffer for SL calculation (e.g., 0.05% of price, or a fixed small amount based on symbol's tick size)
-            # For simplicity, let's use a small fraction of the EMA value itself, e.g., 0.02%
-            # This needs to be small enough not to push SL too far but large enough to avoid immediate stop-outs.
-            # A more robust buffer might use ATR or tick size. For now, a small percentage of EMA100.
-            ema_buffer_percent = 0.0002 # 0.02% of EMA100 value
+            ema_buffer_percent = 0.0002 
             ema_buffer = last_ema100 * ema_buffer_percent
 
             if trade_signal == 'up':
-                # SL: slightly above 100 EMA line but maximum 1% percentage
-                potential_sl_above_ema = round(last_ema100 + ema_buffer, price_precision) # SL is *above* EMA for buy (this seems counterintuitive, usually SL is below for buy)
-                                                                                      # Re-reading: "sl always littlebit above the 100ema line" - this is unusual for a long.
-                                                                                      # Assuming it means "SL is based on 100 EMA, placed defensively (below for long)".
-                                                                                      # If it truly means SL is *above* EMA100 for a long, that's a very specific setup.
-                                                                                      # Let's assume standard placement: SL below entry/EMA for long.
-                                                                                      # "place sl always littlebit *below* the 100ema line" makes more sense for a long.
-                                                                                      # Given the phrasing, I will implement "above 100 EMA" and note it's unusual.
-                                                                                      # If this is a typo and should be "below", the logic is:
-                                                                                      # potential_sl_based_on_ema = round(last_ema100 - ema_buffer, price_precision)
-
-                # Sticking to "above 100ema line" as per prompt:
-                # This implies SL for a BUY is placed ABOVE the 100 EMA. This is highly unusual.
-                # Let's assume the user meant the 100 EMA is a reference point and the SL is placed on the "other side" of price relative to EMA.
-                # Or, it's a stop-and-reverse type logic.
-                # Given "maximum 1% percentage", it suggests a normal SL placement.
-                # I will proceed with SL below 100 EMA for BUY, and above for SELL, as is conventional.
-                # If user insists on "SL above 100 EMA for BUY", I can change it.
-
-                potential_sl_based_on_ema = round(last_ema100 - ema_buffer, price_precision) # SL below EMA100 for BUY
-                max_sl_price_1percent = round(entry_price * (1 - 0.01), price_precision) # Max 1% loss
-
-                # SL is the tighter (closer to entry) of the two, but must be at least the 1% distance if EMA is too close
-                # No, SL is based on EMA, but *validated* by 1%.
-                # If potential_sl_based_on_ema is further than 1% away (i.e., potential_sl_based_on_ema < max_sl_price_1percent), it's invalid.
+                potential_sl_based_on_ema = round(last_ema100 - ema_buffer, price_precision) 
+                max_sl_price_1percent = round(entry_price * (1 - 0.01), price_precision)
                 
                 sl_price = potential_sl_based_on_ema
-                if sl_price >= entry_price: # SL must be below entry for a buy
+                if sl_price >= entry_price:
                     sl_validation_ok = False
-                    base_return['error'] = f"S8 BUY SL Error: SL based on EMA100 ({sl_price}) is not below entry price ({entry_price})."
-                elif sl_price < max_sl_price_1percent: # EMA is too far, SL would be > 1%
+                    base_return['error'] = f"S8 BUY SL Error: EMA-based SL ({sl_price}) not below entry price ({entry_price})."
+                elif sl_price < max_sl_price_1percent: 
                     sl_validation_ok = False
-                    base_return['error'] = f"S8 BUY SL Error: SL based on EMA100 ({sl_price}) is >1% away from entry ({entry_price}). Max SL allowed: {max_sl_price_1percent}."
+                    base_return['error'] = f"S8 BUY SL Error: EMA-based SL ({sl_price}) is >1% from entry. Max SL: {max_sl_price_1percent}."
                 else:
                     sl_validation_ok = True
                 
                 if sl_validation_ok:
                     tp_price = round(entry_price * (1 + 0.01), price_precision)
+                else: # SL validation failed
+                    trade_signal = 'none' # Invalidate signal
+                    print(f"{s8_log_prefix} BUY signal invalidated by SL validation. Error: {base_return['error']}")
                 
             elif trade_signal == 'down':
-                potential_sl_based_on_ema = round(last_ema100 + ema_buffer, price_precision) # SL above EMA100 for SELL
-                max_sl_price_1percent = round(entry_price * (1 + 0.01), price_precision) # Max 1% loss (SL is 1% above entry)
+                potential_sl_based_on_ema = round(last_ema100 + ema_buffer, price_precision) 
+                max_sl_price_1percent = round(entry_price * (1 + 0.01), price_precision)
 
                 sl_price = potential_sl_based_on_ema
-                if sl_price <= entry_price: # SL must be above entry for a sell
+                if sl_price <= entry_price: 
                     sl_validation_ok = False
-                    base_return['error'] = f"S8 SELL SL Error: SL based on EMA100 ({sl_price}) is not above entry price ({entry_price})."
-                elif sl_price > max_sl_price_1percent: # EMA is too far, SL would be > 1%
+                    base_return['error'] = f"S8 SELL SL Error: EMA-based SL ({sl_price}) not above entry price ({entry_price})."
+                elif sl_price > max_sl_price_1percent: 
                     sl_validation_ok = False
-                    base_return['error'] = f"S8 SELL SL Error: SL based on EMA100 ({sl_price}) is >1% away from entry ({entry_price}). Max SL allowed: {max_sl_price_1percent}."
+                    base_return['error'] = f"S8 SELL SL Error: EMA-based SL ({sl_price}) is >1% from entry. Max SL: {max_sl_price_1percent}."
                 else:
                     sl_validation_ok = True
 
                 if sl_validation_ok:
                     tp_price = round(entry_price * (1 - 0.01), price_precision)
+                else: # SL validation failed
+                    trade_signal = 'none' # Invalidate signal
+                    print(f"{s8_log_prefix} SELL signal invalidated by SL validation. Error: {base_return['error']}")
 
             base_return['all_conditions_status']['sl_validation_passed'] = sl_validation_ok
-            print(f"{s8_log_prefix} SL Validation for {trade_signal}: {sl_validation_ok}. Proposed SL: {sl_price}, TP: {tp_price}. Error if any: {base_return['error']}")
+            # Removed redundant print here, errors are logged when they occur
 
-            if sl_validation_ok and sl_price is not None and tp_price is not None:
+            if trade_signal != 'none' and sl_validation_ok and sl_price is not None and tp_price is not None:
                 base_return['signal'] = trade_signal
                 base_return['sl_price'] = sl_price
                 base_return['tp_price'] = tp_price
-                # Trailing SL logic (0.5% profit -> move SL to 0.2% profit) will be handled in run_bot_logic
-                # by checking strategy_id of the active trade.
-            else:
-                base_return['signal'] = 'none' # Invalidate signal if SL validation failed
-                # Error message is already set by the SL validation logic.
-                print(f"{s8_log_prefix} Signal invalidated by SL/TP calculation. Final Error: {base_return['error']}")
+            else: # If signal was invalidated by SL/TP logic or they are None
+                base_return['signal'] = 'none'
+                # Error message should already be set by the failing validation step
+                if not base_return['error']: # Fallback if somehow error wasn't set
+                    base_return['error'] = "S8: Signal invalidated during SL/TP calculation."
+                print(f"{s8_log_prefix} {base_return['error']}")
         
-        # If no crossover or initial signal, error might be None, signal 'none'
+        # Determine primary conditions met count
+        primary_conditions_true_count = 0
+        if base_return['all_conditions_status']['crossover_occurred']:
+            primary_conditions_true_count += 1
+            if base_return['all_conditions_status']['last_20_candles_clear_of_emas']:
+                primary_conditions_true_count += 1
+                if base_return['all_conditions_status']['sl_validation_passed']:
+                    primary_conditions_true_count += 1
+        base_return['all_conditions_status']['primary_conditions_met_count'] = primary_conditions_true_count
+        
+        # Final error message if no signal and no specific error was set earlier
         if base_return['signal'] == 'none' and not base_return['error']:
-            base_return['error'] = "S8: No valid EMA crossover or conditions not met."
-            # This is informational if no signal, not necessarily a hard error.
-            # print(f"{s8_log_prefix} {base_return['error']}")
-
+            if not base_return['all_conditions_status']['crossover_occurred']:
+                base_return['error'] = "S8: No EMA crossover detected."
+            # If crossover occurred but other conditions failed, the error would have been set specifically.
+            # If it reaches here with crossover_occurred = True, it implies a logic gap or a very specific non-signal state.
+            # The generic message can still be a fallback.
+            else: # Crossover occurred, but other checks failed and didn't set a specific error (should be rare now)
+                 base_return['error'] = "S8: Conditions not fully met for a valid signal (e.g. 20-candle or SL validation failed quietly)."
+            # print(f"{s8_log_prefix} Final fallback error set: {base_return['error']}")
 
     except Exception as e:
         import traceback
