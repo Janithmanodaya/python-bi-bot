@@ -6807,6 +6807,13 @@ def run_bot_logic():
                 else:
                     _activity_set(activity_msg_prefix + f"Max open positions ({qty_concurrent_positions}) reached. Monitoring.")
                     can_open_new_trade_overall = False
+            elif current_active_strategy_id == 8: # Strategy 8 logic for can_open_new_trade_overall
+                if len(open_position_symbols) < qty_concurrent_positions :
+                    can_open_new_trade_overall = True
+                    _activity_set(activity_msg_prefix + "Ready. Seeking.")
+                else:
+                    _activity_set(activity_msg_prefix + f"Max open positions ({qty_concurrent_positions}) reached. Monitoring.")
+                    can_open_new_trade_overall = False
             
             # --- Manage Pending Signals (Part 2) ---
             # (This loop was inserted in the previous step and is assumed to be correct)
@@ -7050,10 +7057,6 @@ def run_bot_logic():
                     elif current_active_strategy_id == 7: # Candlestick Patterns Strategy
                         print(f"DEBUG: S7: Active for symbol: {sym_to_check}")
                         _activity_set(f"S7: Scanning {sym_to_check}...")
-                    elif current_active_strategy_id == 8: # Advance EMA cross
-                        print(f"DEBUG: S8: Active for symbol: {sym_to_check}")
-                        _activity_set(f"S8: Scanning {sym_to_check}...")
-
                         # Cooldown Check for S7
                         cooldown_key_s7 = (7, sym_to_check)
                         if cooldown_key_s7 in strategy_cooldown_timers and pd.Timestamp.now(tz='UTC') < strategy_cooldown_timers[cooldown_key_s7]:
@@ -7075,14 +7078,10 @@ def run_bot_logic():
                             )
                             root.after(0, update_text_widget_content, conditions_text_widget, param_display_content_s7)
                         
-                        # Process S7 error: only continue to order if signal is present, even if there's a non-critical error string
-                        # Critical errors (like insufficient klines) should already return signal='none' from the strategy.
-                        # Non-critical errors (like "No specific pattern detected") might still accompany signal='none'.
                         if signal_data_s7.get('error') and signal_data_s7.get('signal', 'none') == 'none':
-                            # Log the error if it's not one of the common "no signal" messages
                             if signal_data_s7['error'] not in ["S7: No specific pattern detected.", f"S7: {signal_data_s7.get('all_conditions_status',{}).get('detected_pattern','N/A')} filters failed: No volume spike, EMA filter failed", f"S7: {signal_data_s7.get('all_conditions_status',{}).get('detected_pattern','N/A')} filters failed: No volume spike", f"S7: {signal_data_s7.get('all_conditions_status',{}).get('detected_pattern','N/A')} filters failed: EMA filter failed"]:
                                 print(f"S7 Error ({sym_to_check}): {signal_data_s7['error']}")
-                            sleep(0.1); continue # Move to next symbol
+                            sleep(0.1); continue 
                         
                         current_signal_s7 = signal_data_s7.get('signal', 'none')
                         if current_signal_s7 in ['up', 'down']:
@@ -7097,7 +7096,6 @@ def run_bot_logic():
                                        strategy_account_risk_percent=signal_data_s7.get('account_risk_percent'))
                             
                             if order_outcome_s7:
-                                # Set cooldown for S7 after successful order
                                 cooldown_key_s7_set = (7, sym_to_check)
                                 strategy_cooldown_timers[cooldown_key_s7_set] = pd.Timestamp.now(tz='UTC') + pd.Timedelta(minutes=S7_COOLDOWN_PERIOD_MINUTES)
                                 cooldown_ends_at_set = strategy_cooldown_timers[cooldown_key_s7_set].strftime('%Y-%m-%d %H:%M:%S UTC')
@@ -7105,25 +7103,19 @@ def run_bot_logic():
                                 _activity_set(f"S7 ({sym_to_check}): Trade placed. Cooldown until {cooldown_ends_at_set}.")
 
                                 g_active_positions_details[sym_to_check] = {
-                                    'sl_order_id': order_outcome_s7.get('sl_order_id'),
-                                    'sl_price': order_outcome_s7.get('sl_price'),
-                                    'tp_order_id': order_outcome_s7.get('tp_order_id'),
-                                    'tp_price': order_outcome_s7.get('tp_price'),
-                                    'entry_price': order_outcome_s7.get('entry_price'),
-                                    'qty': order_outcome_s7.get('qty'),
-                                    'side': order_outcome_s7.get('side'),
-                                    'entry_order_id': order_outcome_s7.get('entry_order_id'),
-                                    'strategy_id': 7 # Strategy ID for S7
+                                    'sl_order_id': order_outcome_s7.get('sl_order_id'), 'sl_price': order_outcome_s7.get('sl_price'),
+                                    'tp_order_id': order_outcome_s7.get('tp_order_id'), 'tp_price': order_outcome_s7.get('tp_price'),
+                                    'entry_price': order_outcome_s7.get('entry_price'), 'qty': order_outcome_s7.get('qty'),
+                                    'side': order_outcome_s7.get('side'), 'entry_order_id': order_outcome_s7.get('entry_order_id'),
+                                    'strategy_id': 7, 'signal_candle_timestamp': signal_data_s7.get('signal_candle_timestamp'),
+                                    'initial_tp_price': order_outcome_s7.get('tp_price')
                                 }
                                 print(f"DEBUG: Stored in g_active_positions_details for S7 {sym_to_check}: {g_active_positions_details[sym_to_check]}")
-
                             _activity_set(f"S7: Trade initiated for {sym_to_check}.")
-                            # S7, like S5 and S6, might allow multiple trades across symbols.
-                            # No specific single-trade tracker for S7 implemented yet.
                             sleep(1) 
-                        else: # No signal from S7 after evaluation
+                        else: 
                             _activity_set(f"S7: No signal for {sym_to_check}. Next..."); sleep(0.1)
-                        
+
                     elif current_active_strategy_id == 8: # Advance EMA cross
                         print(f"DEBUG: S8: Evaluating symbol: {sym_to_check}")
                         _activity_set(f"S8: Scanning {sym_to_check}...")
@@ -7166,22 +7158,20 @@ def run_bot_logic():
                                     'qty': order_outcome_s8.get('qty'),
                                     'side': order_outcome_s8.get('side'),
                                     'entry_order_id': order_outcome_s8.get('entry_order_id'),
-                                    'strategy_id': 8, # Strategy ID for S8
-                                    'signal_candle_timestamp': signal_data_s8.get('signal_candle_timestamp'), # For potential future use
-                                    'initial_tp_price': order_outcome_s8.get('tp_price') # For trailing SL
+                                    'strategy_id': 8, 
+                                    'signal_candle_timestamp': signal_data_s8.get('signal_candle_timestamp'),
+                                    'initial_tp_price': order_outcome_s8.get('tp_price') 
                                 }
                                 print(f"DEBUG: Stored in g_active_positions_details for S8 {sym_to_check}: {g_active_positions_details[sym_to_check]}")
                                 _activity_set(f"S8: Trade initiated for {sym_to_check}.")
-                                # TODO: Add cooldown for S8 if needed, similar to S7
                                 sleep(1)
-                            else: # Order failed
+                            else: 
                                 _activity_set(f"S8: Order failed for {sym_to_check}.")
-                                sleep(0.1) # Brief pause after failed order
-                        else: # No signal from S8
+                                sleep(0.1) 
+                        else: 
                             _activity_set(f"S8: No signal for {sym_to_check}. Next..."); sleep(0.1)
 
-
-                    elif current_active_strategy_id == 4:
+                    elif current_active_strategy_id == 4: # Strategy 4 (MACD Divergence + Pivot)
                         if strategy4_active_trade_info['symbol'] is not None:
                             _activity_set(f"S4: Already in an active trade with {strategy4_active_trade_info['symbol']}. Skipping scan for {sym_to_check}")
                             sleep(0.05)
