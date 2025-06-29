@@ -2330,81 +2330,81 @@ class BacktestStrategyWrapper(Strategy):
             if self.position:
                 return
 
-            if len(self.ema100_s8) < 2 or len(self.ema200_s8) < 2 or len(self.data.Close) < 221: # EMA lengths + 20 lookback + current
-                print(f"{log_prefix_bt_next} S8 BT: Insufficient data for EMAs or lookback. EMA100:{len(self.ema100_s8)}, EMA200:{len(self.ema200_s8)}, Close:{len(self.data.Close)}")
+            # Min klines: EMA200 needs 200. To check crossover on prev vs prev-prev, need at least 3 data points for EMAs.
+            # So, 200 + 2 = 202 candles for EMAs. Plus 1 for current price. Total ~203.
+            min_len_s8 = 203 
+            if len(self.ema100_s8) < 3 or len(self.ema200_s8) < 3 or len(self.data.Close) < min_len_s8:
+                # print(f"{log_prefix_bt_next} S8 BT: Insufficient data. EMA100:{len(self.ema100_s8)}, EMA200:{len(self.ema200_s8)}, Close:{len(self.data.Close)}, Need EMAs >=3, Close >={min_len_s8}")
                 return
 
-            last_ema100 = self.ema100_s8[-1]; prev_ema100 = self.ema100_s8[-2]
-            last_ema200 = self.ema200_s8[-1]; prev_ema200 = self.ema200_s8[-2]
+            # EMA values for the latest fully closed candle (N-1) -> self.emaX_s8[-2] in backtesting.py context
+            # EMA values for the candle before that (N-2) -> self.emaX_s8[-3]
+            
+            ema100_prev = self.ema100_s8[-2]
+            ema200_prev = self.ema200_s8[-2]
+            ema100_prev_prev = self.ema100_s8[-3]
+            ema200_prev_prev = self.ema200_s8[-3]
 
-            buy_crossover = prev_ema100 < prev_ema200 and last_ema100 > last_ema200
-            sell_crossover = prev_ema100 > prev_ema200 and last_ema100 < last_ema200
+            if any(pd.isna(val) for val in [ema100_prev, ema200_prev, ema100_prev_prev, ema200_prev_prev]):
+                # print(f"{log_prefix_bt_next} S8 BT: NaN in EMA data. Skipping.")
+                return
+
+            buy_crossover_on_prev_candle = ema100_prev_prev < ema200_prev_prev and ema100_prev > ema200_prev
+            sell_crossover_on_prev_candle = ema100_prev_prev > ema200_prev_prev and ema100_prev < ema200_prev
             
             trade_side_s8 = None
-            if buy_crossover: trade_side_s8 = 'buy'
-            elif sell_crossover: trade_side_s8 = 'sell'
+            if buy_crossover_on_prev_candle:
+                trade_side_s8 = 'buy'
+            elif sell_crossover_on_prev_candle:
+                trade_side_s8 = 'sell'
 
             if trade_side_s8:
-                # 20-candle validation
-                candles_clear_s8 = True
-                # Check from self.data.Close[-2] back to self.data.Close[-21]
-                # EMAs for comparison are self.ema100_s8[-i] and self.ema200_s8[-i]
-                for i in range(2, 22): # Indices -2 to -21
-                    if len(self.data.High) <= i or len(self.data.Low) <=i or len(self.ema100_s8) <=i or len(self.ema200_s8) <=i:
-                        candles_clear_s8 = False; break
-                    
-                    candle_h = self.data.High[-i]; candle_l = self.data.Low[-i]
-                    hist_ema100 = self.ema100_s8[-i]; hist_ema200 = self.ema200_s8[-i]
-                    if pd.isna(candle_h) or pd.isna(candle_l) or pd.isna(hist_ema100) or pd.isna(hist_ema200):
-                        candles_clear_s8 = False; break
-                    if (candle_l <= hist_ema100 <= candle_h) or \
-                       (candle_l <= hist_ema200 <= candle_h):
-                        candles_clear_s8 = False; break
+                # Signal is valid for the current bar (self.data.Close[-1])
+                entry_price_s8 = price # current close price, `price` is self.data.Close[-1]
+                sl_price_s8, tp_price_s8 = None, None
                 
-                if not candles_clear_s8:
-                    print(f"{log_prefix_bt_next} S8 BT: Signal invalidated by 20-candle check.")
+                # SL: 0.7%
+                if trade_side_s8 == 'buy':
+                    sl_price_s8 = round(entry_price_s8 * (1 - 0.007), self.PRICE_PRECISION_BT)
+                else: # sell
+                    sl_price_s8 = round(entry_price_s8 * (1 + 0.007), self.PRICE_PRECISION_BT)
+                
+                # TP: 0.2%
+                if trade_side_s8 == 'buy':
+                    tp_price_s8 = round(entry_price_s8 * (1 + 0.002), self.PRICE_PRECISION_BT)
+                else: # sell
+                    tp_price_s8 = round(entry_price_s8 * (1 - 0.002), self.PRICE_PRECISION_BT)
+
+                # Validate SL/TP prices (basic checks)
+                if sl_price_s8 is None or tp_price_s8 is None or sl_price_s8 <= 0 or tp_price_s8 <= 0:
+                    # print(f"{log_prefix_bt_next} S8 BT: SL/TP calculation resulted in None or non-positive. SL={sl_price_s8}, TP={tp_price_s8}")
+                    return
+                if trade_side_s8 == 'buy' and (sl_price_s8 >= entry_price_s8 or tp_price_s8 <= entry_price_s8):
+                    # print(f"{log_prefix_bt_next} S8 BT BUY: Invalid SL/TP relation. Entry={entry_price_s8}, SL={sl_price_s8}, TP={tp_price_s8}")
+                    return
+                if trade_side_s8 == 'sell' and (sl_price_s8 <= entry_price_s8 or tp_price_s8 >= entry_price_s8):
+                    # print(f"{log_prefix_bt_next} S8 BT SELL: Invalid SL/TP relation. Entry={entry_price_s8}, SL={sl_price_s8}, TP={tp_price_s8}")
                     return
 
-                # SL/TP Logic
-                entry_price_s8 = price # current close
-                sl_price_s8, tp_price_s8 = None, None
-                sl_percentage_for_sizing_s8 = None
+                # Sizing
+                sl_percentage_for_sizing_s8 = 0.007 # Fixed 0.7%
+                final_trade_size_s8 = 0.02 # Default
+                if self.account_risk_percent_bt > 0:
+                    calculated_size_s8 = self.account_risk_percent_bt / sl_percentage_for_sizing_s8
+                    final_trade_size_s8 = min(calculated_size_s8, 1.0) # Cap at 100% of cash
                 
-                ema_buffer_bt = self.ema100_s8[-1] * 0.0002 # 0.02% buffer
-
+                # Place order
                 if trade_side_s8 == 'buy':
-                    potential_sl_ema = round(self.ema100_s8[-1] - ema_buffer_bt, self.PRICE_PRECISION_BT)
-                    max_sl_1pct = round(entry_price_s8 * 0.99, self.PRICE_PRECISION_BT)
-                    
-                    if potential_sl_ema < entry_price_s8 and potential_sl_ema >= max_sl_1pct:
-                        sl_price_s8 = potential_sl_ema
-                        tp_price_s8 = round(entry_price_s8 * 1.01, self.PRICE_PRECISION_BT)
-                        sl_percentage_for_sizing_s8 = 0.01 # Max 1% SL for sizing
-                    else:
-                        print(f"{log_prefix_bt_next} S8 BT BUY: SL validation failed. EMA_SL={potential_sl_ema}, Max_SL_1pct={max_sl_1pct}, Entry={entry_price_s8}")
-
-                elif trade_side_s8 == 'sell':
-                    potential_sl_ema = round(self.ema100_s8[-1] + ema_buffer_bt, self.PRICE_PRECISION_BT)
-                    max_sl_1pct = round(entry_price_s8 * 1.01, self.PRICE_PRECISION_BT)
-
-                    if potential_sl_ema > entry_price_s8 and potential_sl_ema <= max_sl_1pct:
-                        sl_price_s8 = potential_sl_ema
-                        tp_price_s8 = round(entry_price_s8 * 0.99, self.PRICE_PRECISION_BT)
-                        sl_percentage_for_sizing_s8 = 0.01 # Max 1% SL for sizing
-                    else:
-                        print(f"{log_prefix_bt_next} S8 BT SELL: SL validation failed. EMA_SL={potential_sl_ema}, Max_SL_1pct={max_sl_1pct}, Entry={entry_price_s8}")
-
-                if sl_price_s8 and tp_price_s8:
-                    final_trade_size_s8 = 0.02 # Default
-                    if sl_percentage_for_sizing_s8 and sl_percentage_for_sizing_s8 > 0 and self.account_risk_percent_bt > 0:
-                        calculated_size_s8 = self.account_risk_percent_bt / sl_percentage_for_sizing_s8
-                        final_trade_size_s8 = min(calculated_size_s8, 1.0)
-                    
-                    if trade_side_s8 == 'buy':
-                        self.buy(sl=sl_price_s8, tp=tp_price_s8, size=final_trade_size_s8)
-                    else: # sell
-                        self.sell(sl=sl_price_s8, tp=tp_price_s8, size=final_trade_size_s8)
-                    print(f"{log_prefix_bt_next} S8 BT Trade: Side={trade_side_s8}, Entry={entry_price_s8:.{self.PRICE_PRECISION_BT}f}, SL={sl_price_s8:.{self.PRICE_PRECISION_BT}f}, TP={tp_price_s8:.{self.PRICE_PRECISION_BT}f}, Size={final_trade_size_s8:.4f}")
+                    self.buy(sl=sl_price_s8, tp=tp_price_s8, size=final_trade_size_s8)
+                    print(f"{log_prefix_bt_next} S8 BT Trade: BUY, Entry={entry_price_s8:.{self.PRICE_PRECISION_BT}f}, SL={sl_price_s8:.{self.PRICE_PRECISION_BT}f}, TP={tp_price_s8:.{self.PRICE_PRECISION_BT}f}, Size={final_trade_size_s8:.4f}")
+                elif trade_side_s8 == 'sell': 
+                    self.sell(sl=sl_price_s8, tp=tp_price_s8, size=final_trade_size_s8)
+                    print(f"{log_prefix_bt_next} S8 BT Trade: SELL, Entry={entry_price_s8:.{self.PRICE_PRECISION_BT}f}, SL={sl_price_s8:.{self.PRICE_PRECISION_BT}f}, TP={tp_price_s8:.{self.PRICE_PRECISION_BT}f}, Size={final_trade_size_s8:.4f}")
+                    # No 'else' needed here as trade_side_s8 is guaranteed to be 'buy' or 'sell' if this block is reached.
+            # else: # This else corresponds to "if not candles_clear_s8" or "if not sl_price_s8 and tp_price_s8"
+                # print(f"{log_prefix_bt_next} S8 BT: Signal invalidated or SL/TP calculation failed. No trade.")
+                # The detailed reasons should be printed within the S8 logic block itself.
+                pass
 
 
         # else: # Other strategies not yet updated for this new SL/TP structure
@@ -4619,16 +4619,17 @@ def strategy_macd_divergence_pivot(symbol):
 
     base_return = {
         'signal': 'none',
-        'conditions': {},
+        'conditions': {}, # For S4, this holds detailed conditions. S8 will use all_conditions_status
         'sl_price': None,
         'tp_price': None,
         'error': None,
         'divergence_price_point': None, # Specific to S4
         'account_risk_percent': 0.012, # Strategy 4 specific risk
-        'signal_candle_timestamp': None
+        'signal_candle_timestamp': None,
+        # S8 will use 'all_conditions_status' like other strategies, S4 keeps 'conditions' for its unique structure.
     }
 
-    if strategy4_active_trade_info['symbol'] is not None:
+    if strategy4_active_trade_info['symbol'] is not None: # This check is specific to S4's single-trade nature
         base_return['error'] = "Strategy 4 already has an active trade."
         # print(f"Strategy 4 ({symbol}): Skipped, active trade exists for {strategy4_active_trade_info['symbol']}") # Can be noisy
         return base_return
@@ -5012,18 +5013,23 @@ def strategy_advance_ema_cross(symbol: str) -> dict:
         'sl_price': None,
         'tp_price': None,
         'error': None,
-        'account_risk_percent': 0.01, # Standard 1% risk per trade
+        'account_risk_percent': 0.01, # Standard 1% risk per trade for this strategy
         'signal_candle_timestamp': None,
         'all_conditions_status': {
-            'ema100': None, 'ema200': None,
-            'crossover_occurred': False,
-            'last_20_candles_clear_of_emas': False,
-            'sl_validation_passed': False,
+            'ema100_val': None, 'ema200_val': None,
+            'crossover_on_prev_candle': False, # True if crossover happened on N-1 candle for signal on N
+            'is_buy_signal': False,
+            'is_sell_signal': False,
             'current_price_for_calc': None,
+            'calculated_sl': None,
+            'calculated_tp': None,
+            'signal_valid_for_current_candle': False
         }
     }
 
-    min_klines_needed = 221 # 200 for EMA, +20 for lookback, +1 for current
+    # Min klines: EMA200 needs 200. To check crossover on prev vs prev-prev, need at least 3 data points for EMAs.
+    # So, 200 + 2 = 202 candles for EMAs. Plus 1 for current price. Total ~203.
+    min_klines_needed = 203
     kl_df = klines(symbol)
 
     if kl_df is None or len(kl_df) < min_klines_needed:
@@ -5031,8 +5037,8 @@ def strategy_advance_ema_cross(symbol: str) -> dict:
         print(f"{s8_log_prefix} Error: {base_return['error']}")
         return base_return
 
-    base_return['signal_candle_timestamp'] = kl_df.index[-1]
     current_price = kl_df['Close'].iloc[-1]
+    base_return['signal_candle_timestamp'] = kl_df.index[-1] # Timestamp of the current candle
     base_return['all_conditions_status']['current_price_for_calc'] = current_price
     price_precision = get_price_precision(symbol)
 
@@ -5041,174 +5047,115 @@ def strategy_advance_ema_cross(symbol: str) -> dict:
         ema200 = ta.trend.EMAIndicator(close=kl_df['Close'], window=200).ema_indicator()
 
         if ema100 is None or ema200 is None or ema100.empty or ema200.empty or \
-           len(ema100) < min_klines_needed or len(ema200) < min_klines_needed: # Check length again after indicator calc
-            base_return['error'] = "S8: EMA calculation failed or resulted in insufficient data."
+           len(ema100) < 3 or len(ema200) < 3: # Need at least 3 values for prev_prev, prev, current
+            base_return['error'] = "S8: EMA calculation failed or resulted in insufficient data for crossover check."
             print(f"{s8_log_prefix} Error: {base_return['error']}")
             return base_return
 
-        last_ema100 = ema100.iloc[-1]
+        # EMA values for the latest fully closed candle (N-1)
         prev_ema100 = ema100.iloc[-2]
-        last_ema200 = ema200.iloc[-1]
         prev_ema200 = ema200.iloc[-2]
-        
-        base_return['all_conditions_status']['ema100'] = round(last_ema100, price_precision) if not pd.isna(last_ema100) else 'NaN'
-        base_return['all_conditions_status']['ema200'] = round(last_ema200, price_precision) if not pd.isna(last_ema200) else 'NaN'
+        # EMA values for the candle before that (N-2)
+        prev_prev_ema100 = ema100.iloc[-3]
+        prev_prev_ema200 = ema200.iloc[-3]
 
-        if pd.isna(last_ema100) or pd.isna(prev_ema100) or pd.isna(last_ema200) or pd.isna(prev_ema200):
+        base_return['all_conditions_status']['ema100_val'] = round(prev_ema100, price_precision) if not pd.isna(prev_ema100) else 'NaN'
+        base_return['all_conditions_status']['ema200_val'] = round(prev_ema200, price_precision) if not pd.isna(prev_ema200) else 'NaN'
+
+        if any(pd.isna(val) for val in [prev_ema100, prev_ema200, prev_prev_ema100, prev_prev_ema200]):
             base_return['error'] = "S8: NaN values in EMA data for signal determination."
             print(f"{s8_log_prefix} Error: {base_return['error']}")
             return base_return
 
-        # Signal conditions
-        buy_crossover = prev_ema100 < prev_ema200 and last_ema100 > last_ema200
-        sell_crossover = prev_ema100 > prev_ema200 and last_ema100 < last_ema200
-        base_return['all_conditions_status']['crossover_occurred'] = buy_crossover or sell_crossover
+        # --- Crossover Detection on the PREVIOUSLY CLOSED candle (N-1) ---
+        # This means the crossover happened at the close of N-1 / open of N. Signal is for candle N.
+        buy_crossover_on_prev = prev_prev_ema100 < prev_prev_ema200 and prev_ema100 > prev_ema200
+        sell_crossover_on_prev = prev_prev_ema100 > prev_prev_ema200 and prev_ema100 < prev_ema200
+        
+        base_return['all_conditions_status']['crossover_on_prev_candle'] = buy_crossover_on_prev or sell_crossover_on_prev
+        base_return['all_conditions_status']['is_buy_signal'] = buy_crossover_on_prev
+        base_return['all_conditions_status']['is_sell_signal'] = sell_crossover_on_prev
 
-        trade_signal = 'none'
-        if buy_crossover:
-            trade_signal = 'up'
-        elif sell_crossover:
-            trade_signal = 'down'
+        trade_signal_type = 'none'
+        if buy_crossover_on_prev:
+            trade_signal_type = 'up'
+            base_return['all_conditions_status']['signal_valid_for_current_candle'] = True
+        elif sell_crossover_on_prev:
+            trade_signal_type = 'down'
+            base_return['all_conditions_status']['signal_valid_for_current_candle'] = True
+        else:
+            # No crossover on the previous candle, so no signal for the current candle.
+            base_return['error'] = "S8: No EMA crossover on the previous candle."
+            # print(f"{s8_log_prefix} {base_return['error']}") # Can be noisy if printed every time
+            return base_return # No valid signal
 
-        if trade_signal != 'none':
-            print(f"{s8_log_prefix} Initial signal: {trade_signal} based on EMA crossover.")
-            # Validate last 20 candles
-            candles_clear = True
-            # We check candles from index -2 (previous candle) back to -21 (20 candles before previous)
-            # relative to the crossover candle (which is index -1, but its EMAs depend on -2).
-            # The EMAs for comparison should be from the respective historical candle's calculation.
-            # Indices for lookback: from -2 (candle before current) down to -21.
-            # Total 20 candles.
-            for i in range(2, 22): # Check kl_df.iloc[-2] down to kl_df.iloc[-21]
-                if len(kl_df) <= i or len(ema100) <= i or len(ema200) <= i: # Boundary check
-                    candles_clear = False
-                    base_return['error'] = f"S8: Not enough historical data for 20-candle check at index -{i}."
-                    print(f"{s8_log_prefix} Error: {base_return['error']}")
-                    break
-                
-                candle_low = kl_df['Low'].iloc[-i]
-                candle_high = kl_df['High'].iloc[-i]
-                historical_ema100 = ema100.iloc[-i]
-                historical_ema200 = ema200.iloc[-i]
-
-                if pd.isna(candle_low) or pd.isna(candle_high) or pd.isna(historical_ema100) or pd.isna(historical_ema200):
-                    candles_clear = False
-                    base_return['error'] = f"S8: NaN in data during 20-candle check at index -{i}."
-                    print(f"{s8_log_prefix} Error: {base_return['error']}")
-                    break
-
-                # Check if the candle (low to high range) touched or crossed either EMA
-                # Touched/Crossed EMA100: (Low <= EMA100 <= High)
-                # Touched/Crossed EMA200: (Low <= EMA200 <= High)
-                if (candle_low <= historical_ema100 <= candle_high) or \
-                   (candle_low <= historical_ema200 <= candle_high):
-                    candles_clear = False
-                    print(f"{s8_log_prefix} 20-candle validation FAILED at index -{i}: Candle L:{candle_low:.{price_precision}f}, H:{candle_high:.{price_precision}f} touched/crossed EMA100:{historical_ema100:.{price_precision}f} or EMA200:{historical_ema200:.{price_precision}f}")
-                    break
+        # If crossover occurred on N-1, signal is valid for current candle N.
+        if base_return['all_conditions_status']['signal_valid_for_current_candle']:
+            print(f"{s8_log_prefix} Valid signal: {trade_signal_type} for current candle based on crossover on previous candle.")
             
-            base_return['all_conditions_status']['last_20_candles_clear_of_emas'] = candles_clear
-
-            if not candles_clear:
-                trade_signal = 'none' # Invalidate signal
-                # Specific error for 20-candle validation failure
-                base_return['error'] = "S8: Signal invalidated, last 20 candles touched/crossed EMAs."
-                print(f"{s8_log_prefix} {base_return['error']}")
-                # Do not proceed to SL/TP validation if 20-candle check fails
-
-
-        if trade_signal != 'none': # Only proceed if signal is still valid after 20-candle check
-            print(f"{s8_log_prefix} Signal '{trade_signal}' passed 20-candle validation. Proceeding to SL/TP.")
-            entry_price = current_price 
+            entry_price = current_price # Trade at current market price if signal is valid
             sl_price = None
             tp_price = None
-            sl_validation_ok = False # Initialize SL validation status
 
-            ema_buffer_percent = 0.0002 
-            ema_buffer = last_ema100 * ema_buffer_percent
+            # SL: 0.7%
+            if trade_signal_type == 'up':
+                sl_price = round(entry_price * (1 - 0.007), price_precision)
+            elif trade_signal_type == 'down':
+                sl_price = round(entry_price * (1 + 0.007), price_precision)
+            
+            # TP: 0.2%
+            if trade_signal_type == 'up':
+                tp_price = round(entry_price * (1 + 0.002), price_precision)
+            elif trade_signal_type == 'down':
+                tp_price = round(entry_price * (1 - 0.002), price_precision)
 
-            if trade_signal == 'up':
-                potential_sl_based_on_ema = round(last_ema100 - ema_buffer, price_precision) 
-                max_sl_price_1percent = round(entry_price * (1 - 0.01), price_precision)
-                
-                sl_price = potential_sl_based_on_ema
+            base_return['all_conditions_status']['calculated_sl'] = sl_price
+            base_return['all_conditions_status']['calculated_tp'] = tp_price
+
+            # Validate SL/TP prices
+            if sl_price is None or tp_price is None or sl_price <= 0 or tp_price <= 0:
+                base_return['error'] = "S8: Calculated SL/TP is invalid (None or non-positive)."
+                print(f"{s8_log_prefix} Error: {base_return['error']}")
+                base_return['signal'] = 'none' # Invalidate signal
+                return base_return
+
+            if trade_signal_type == 'up':
                 if sl_price >= entry_price:
-                    sl_validation_ok = False
-                    base_return['error'] = f"S8 BUY SL Error: EMA-based SL ({sl_price}) not below entry price ({entry_price})."
-                elif sl_price < max_sl_price_1percent: 
-                    sl_validation_ok = False
-                    base_return['error'] = f"S8 BUY SL Error: EMA-based SL ({sl_price}) is >1% from entry. Max SL: {max_sl_price_1percent}."
-                else:
-                    sl_validation_ok = True
-                
-                if sl_validation_ok:
-                    tp_price = round(entry_price * (1 + 0.01), price_precision)
-                else: # SL validation failed
-                    trade_signal = 'none' # Invalidate signal
-                    print(f"{s8_log_prefix} BUY signal invalidated by SL validation. Error: {base_return['error']}")
-                
-            elif trade_signal == 'down':
-                potential_sl_based_on_ema = round(last_ema100 + ema_buffer, price_precision) 
-                max_sl_price_1percent = round(entry_price * (1 + 0.01), price_precision)
+                    base_return['error'] = f"S8 BUY SL Error: SL ({sl_price}) not below entry ({entry_price})."
+                    trade_signal_type = 'none'
+                if tp_price <= entry_price:
+                    base_return['error'] = f"S8 BUY TP Error: TP ({tp_price}) not above entry ({entry_price})."
+                    trade_signal_type = 'none'
+            elif trade_signal_type == 'down':
+                if sl_price <= entry_price:
+                    base_return['error'] = f"S8 SELL SL Error: SL ({sl_price}) not above entry ({entry_price})."
+                    trade_signal_type = 'none'
+                if tp_price >= entry_price:
+                    base_return['error'] = f"S8 SELL TP Error: TP ({tp_price}) not below entry ({entry_price})."
+                    trade_signal_type = 'none'
+            
+            if trade_signal_type == 'none': # If any validation failed
+                print(f"{s8_log_prefix} Signal invalidated due to SL/TP calculation error: {base_return['error']}")
+                return base_return
 
-                sl_price = potential_sl_based_on_ema
-                if sl_price <= entry_price: 
-                    sl_validation_ok = False
-                    base_return['error'] = f"S8 SELL SL Error: EMA-based SL ({sl_price}) not above entry price ({entry_price})."
-                elif sl_price > max_sl_price_1percent: 
-                    sl_validation_ok = False
-                    base_return['error'] = f"S8 SELL SL Error: EMA-based SL ({sl_price}) is >1% from entry. Max SL: {max_sl_price_1percent}."
-                else:
-                    sl_validation_ok = True
+            base_return['signal'] = trade_signal_type
+            base_return['sl_price'] = sl_price
+            base_return['tp_price'] = tp_price
+            print(f"{s8_log_prefix} Signal: {base_return['signal']}, Entry: {entry_price:.{price_precision}f}, SL: {sl_price:.{price_precision}f}, TP: {tp_price:.{price_precision}f}")
 
-                if sl_validation_ok:
-                    tp_price = round(entry_price * (1 - 0.01), price_precision)
-                else: # SL validation failed
-                    trade_signal = 'none' # Invalidate signal
-                    print(f"{s8_log_prefix} SELL signal invalidated by SL validation. Error: {base_return['error']}")
-
-            base_return['all_conditions_status']['sl_validation_passed'] = sl_validation_ok
-            # Removed redundant print here, errors are logged when they occur
-
-            if trade_signal != 'none' and sl_validation_ok and sl_price is not None and tp_price is not None:
-                base_return['signal'] = trade_signal
-                base_return['sl_price'] = sl_price
-                base_return['tp_price'] = tp_price
-            else: # If signal was invalidated by SL/TP logic or they are None
-                base_return['signal'] = 'none'
-                # Error message should already be set by the failing validation step
-                if not base_return['error']: # Fallback if somehow error wasn't set
-                    base_return['error'] = "S8: Signal invalidated during SL/TP calculation."
-                print(f"{s8_log_prefix} {base_return['error']}")
-        
-        # Determine primary conditions met count
-        primary_conditions_true_count = 0
-        if base_return['all_conditions_status']['crossover_occurred']:
-            primary_conditions_true_count += 1
-            if base_return['all_conditions_status']['last_20_candles_clear_of_emas']:
-                primary_conditions_true_count += 1
-                if base_return['all_conditions_status']['sl_validation_passed']:
-                    primary_conditions_true_count += 1
-        base_return['all_conditions_status']['primary_conditions_met_count'] = primary_conditions_true_count
-        
-        # Final error message if no signal and no specific error was set earlier
-        if base_return['signal'] == 'none' and not base_return['error']:
-            if not base_return['all_conditions_status']['crossover_occurred']:
-                base_return['error'] = "S8: No EMA crossover detected."
-            # If crossover occurred but other conditions failed, the error would have been set specifically.
-            # If it reaches here with crossover_occurred = True, it implies a logic gap or a very specific non-signal state.
-            # The generic message can still be a fallback.
-            else: # Crossover occurred, but other checks failed and didn't set a specific error (should be rare now)
-                 base_return['error'] = "S8: Conditions not fully met for a valid signal (e.g. 20-candle or SL validation failed quietly)."
-            # print(f"{s8_log_prefix} Final fallback error set: {base_return['error']}")
+        else: # Should not be reached if logic above is correct, but as a fallback
+            if not base_return['error']: # If no specific error like "No crossover" was set
+                 base_return['error'] = "S8: Signal not valid for current candle (e.g., crossover too old)."
+            # print(f"{s8_log_prefix} {base_return['error']}") # Can be noisy
 
     except Exception as e:
         import traceback
         print(f"{s8_log_prefix} Exception: {str(e)}")
         print(traceback.format_exc())
         base_return['error'] = f"S8 Exception: {str(e)}"
-        base_return['signal'] = 'none'
+        base_return['signal'] = 'none' # Ensure signal is none on error
     
-    print(f"{s8_log_prefix} Final return: {base_return}")
+    # print(f"{s8_log_prefix} Final return: {base_return}") # Can be noisy
     return base_return
 
 # --- Strategy 6: Market Structure S/D ---
@@ -6689,80 +6636,147 @@ def run_bot_logic():
                         print(f"ERROR TRAIL_SL: Inner exception processing {symbol_to_trail}: {e_trail_inner}")
                     sleep(0.2) # Small delay between processing each symbol's trailing stop
             
-            # --- Strategy 8 Specific Trailing Stop (0.5% profit -> SL to +0.2% profit) ---
+            # --- Strategy 8 Specific "Comeback TP" and Trailing SL Logic ---
             if g_active_positions_details:
-                for s8_trail_symbol, s8_pos_details in list(g_active_positions_details.items()):
+                for s8_symbol, s8_pos_details in list(g_active_positions_details.items()): # Iterate copy for safe modification
                     if not bot_running: break
-                    if s8_pos_details.get('strategy_id') == 8 and not s8_pos_details.get('s8_trailing_sl_activated', False):
-                        _activity_set(f"S8 Trailing SL Check: {s8_trail_symbol}")
-                        print(f"DEBUG S8_TRAIL: Checking {s8_trail_symbol} for S8 specific trailing SL. Details: {s8_pos_details}")
+                    if s8_pos_details.get('strategy_id') == 8:
+                        _activity_set(f"S8 Logic Check: {s8_symbol}")
+                        s8_log_prefix_loop = f"[S8 Loop {s8_symbol}]"
+                        print(f"{s8_log_prefix_loop} Checking trade. Details: {s8_pos_details}")
                         
-                        entry_price_s8_trail = s8_pos_details.get('entry_price')
-                        current_side_s8_trail = s8_pos_details.get('side') # 'buy' or 'sell'
-                        current_sl_price_s8_trail = s8_pos_details.get('sl_price')
-                        sl_order_id_s8_trail = s8_pos_details.get('sl_order_id')
-                        position_qty_s8_trail = s8_pos_details.get('qty')
+                        entry_price_s8 = s8_pos_details.get('entry_price')
+                        side_s8 = s8_pos_details.get('side') # 'buy' or 'sell'
+                        qty_s8 = s8_pos_details.get('qty')
+                        # These are the original 0.7% SL and 0.2% TP targets
+                        s8_initial_sl_target = s8_pos_details.get('s8_target_sl_price') 
+                        s8_initial_tp_target = s8_pos_details.get('s8_target_tp_price') 
+                        drawdown_occurred_s8 = s8_pos_details.get('s8_drawdown_occurred', False)
+                        
+                        # Current SL/TP orders on Binance
+                        current_sl_order_id_s8 = s8_pos_details.get('sl_order_id')
+                        current_tp_order_id_s8 = s8_pos_details.get('tp_order_id')
+                        
+                        # Flag to see if SL was already trailed to 0.2% profit (after 0.5% profit reached)
+                        s8_trailing_sl_activated = s8_pos_details.get('s8_trailing_sl_activated', False)
 
-                        if not all([entry_price_s8_trail, current_side_s8_trail, current_sl_price_s8_trail, sl_order_id_s8_trail, position_qty_s8_trail]):
-                            print(f"WARNING S8_TRAIL: Insufficient details for {s8_trail_symbol} to apply S8 trailing SL. Skipping.")
+                        if not all([entry_price_s8, side_s8, qty_s8, s8_initial_sl_target, s8_initial_tp_target, current_sl_order_id_s8, current_tp_order_id_s8]):
+                            print(f"{s8_log_prefix_loop} Insufficient details for S8 Comeback/Trail logic. Skipping. Details: {s8_pos_details}")
                             continue
 
                         try:
-                            market_price_s8_trail = float(client.ticker_price(s8_trail_symbol)['price'])
-                            price_precision_s8_trail = get_price_precision(s8_trail_symbol)
-                            profit_achieved = False
-                            
-                            if current_side_s8_trail == 'buy': # Long position
-                                if market_price_s8_trail >= entry_price_s8_trail * 1.005: # 0.5% profit
-                                    profit_achieved = True
-                            elif current_side_s8_trail == 'sell': # Short position
-                                if market_price_s8_trail <= entry_price_s8_trail * 0.995: # 0.5% profit
-                                    profit_achieved = True
-                            
-                            if profit_achieved:
-                                print(f"INFO S8_TRAIL: {s8_trail_symbol} ({current_side_s8_trail}) hit 0.5% profit target. Current Price: {market_price_s8_trail}, Entry: {entry_price_s8_trail}. Adjusting SL.")
-                                new_sl_s8_trail = None
-                                if current_side_s8_trail == 'buy':
-                                    new_sl_s8_trail = round(entry_price_s8_trail * 1.002, price_precision_s8_trail) # Move SL to +0.2% profit
-                                elif current_side_s8_trail == 'sell':
-                                    new_sl_s8_trail = round(entry_price_s8_trail * 0.998, price_precision_s8_trail) # Move SL to +0.2% profit (0.2% below entry)
+                            market_price_s8 = float(client.ticker_price(s8_symbol)['price'])
+                            price_precision_s8 = get_price_precision(s8_symbol)
 
-                                # Validate new SL: For buy, new SL must be > entry. For sell, new SL must be < entry.
-                                # And it must be a "better" SL than current_sl_price_s8_trail (higher for buy, lower for sell)
-                                valid_new_sl_for_s8 = False
-                                if current_side_s8_trail == 'buy' and new_sl_s8_trail > entry_price_s8_trail and new_sl_s8_trail > current_sl_price_s8_trail and new_sl_s8_trail < market_price_s8_trail:
-                                    valid_new_sl_for_s8 = True
-                                elif current_side_s8_trail == 'sell' and new_sl_s8_trail < entry_price_s8_trail and new_sl_s8_trail < current_sl_price_s8_trail and new_sl_s8_trail > market_price_s8_trail:
-                                    valid_new_sl_for_s8 = True
+                            # 1. Update Drawdown Status (if SL hasn't been trailed yet)
+                            if not drawdown_occurred_s8 and not s8_trailing_sl_activated:
+                                if side_s8 == 'buy' and market_price_s8 < entry_price_s8:
+                                    if market_price_s8 > s8_initial_sl_target: # Ensure SL not hit
+                                        g_active_positions_details[s8_symbol]['s8_drawdown_occurred'] = True # Update global dict
+                                        drawdown_occurred_s8 = True # Update local var for current iteration
+                                        print(f"{s8_log_prefix_loop} Drawdown occurred (BUY). Price: {market_price_s8}, Entry: {entry_price_s8}")
+                                elif side_s8 == 'sell' and market_price_s8 > entry_price_s8:
+                                    if market_price_s8 < s8_initial_sl_target: # Ensure SL not hit
+                                        g_active_positions_details[s8_symbol]['s8_drawdown_occurred'] = True
+                                        drawdown_occurred_s8 = True
+                                        print(f"{s8_log_prefix_loop} Drawdown occurred (SELL). Price: {market_price_s8}, Entry: {entry_price_s8}")
+                            
+                            # 2. Check for "Comeback TP" (0.2% profit after drawdown)
+                            # This should only trigger if SL has NOT been trailed to positive yet.
+                            if drawdown_occurred_s8 and not s8_trailing_sl_activated:
+                                comeback_tp_hit_condition = False
+                                if side_s8 == 'buy' and market_price_s8 >= s8_initial_tp_target: # Target is the original 0.2% TP
+                                    comeback_tp_hit_condition = True
+                                elif side_s8 == 'sell' and market_price_s8 <= s8_initial_tp_target: # Target is the original 0.2% TP
+                                    comeback_tp_hit_condition = True
                                 
-                                if new_sl_s8_trail is not None and valid_new_sl_for_s8:
-                                    print(f"Attempting to cancel old SL Order ID {sl_order_id_s8_trail} for {s8_trail_symbol} (S8 Trail)")
-                                    client.cancel_order(symbol=s8_trail_symbol, orderId=sl_order_id_s8_trail)
-                                    print(f"Old SL Order ID {sl_order_id_s8_trail} for {s8_trail_symbol} (S8 Trail) cancelled.")
+                                if comeback_tp_hit_condition:
+                                    print(f"{s8_log_prefix_loop} 'Comeback TP' hit for {side_s8} trade. Price: {market_price_s8}, Target TP: {s8_initial_tp_target}. Closing position.")
+                                    _activity_set(f"S8 Comeback TP: {s8_symbol}")
+                                    try:
+                                        # Cancel existing SL and TP orders
+                                        if current_tp_order_id_s8: client.cancel_order(symbol=s8_symbol, orderId=current_tp_order_id_s8, recvWindow=6000)
+                                        if current_sl_order_id_s8: client.cancel_order(symbol=s8_symbol, orderId=current_sl_order_id_s8, recvWindow=6000)
+                                        
+                                        # Market close the position
+                                        close_side = 'SELL' if side_s8 == 'buy' else 'BUY'
+                                        client.new_order(symbol=s8_symbol, side=close_side, type='MARKET', quantity=abs(float(qty_s8)), reduceOnly=True, recvWindow=6000)
+                                        print(f"{s8_log_prefix_loop} Position closed via Comeback TP market order.")
+                                        # Position will be removed from g_active_positions_details in the main cleanup section later
+                                    except ClientError as ce_comeback_close:
+                                        print(f"{s8_log_prefix_loop} ClientError closing for Comeback TP: {ce_comeback_close}")
+                                    except Exception as e_comeback_close:
+                                        print(f"{s8_log_prefix_loop} Exception closing for Comeback TP: {e_comeback_close}")
+                                    sleep(0.5) 
+                                    continue # Move to next symbol as this one is being exited
 
-                                    new_sl_order_side_s8 = 'SELL' if current_side_s8_trail == 'buy' else 'BUY'
-                                    new_sl_order_resp_s8 = client.new_order(
-                                        symbol=s8_trail_symbol, side=new_sl_order_side_s8, type='STOP_MARKET',
-                                        quantity=abs(float(position_qty_s8_trail)), timeInForce='GTC',
-                                        stopPrice=new_sl_s8_trail, reduceOnly=True
-                                    )
-                                    print(f"New S8 Trailing SL order placed for {s8_trail_symbol}: {new_sl_order_resp_s8}")
+                            # 3. Trailing SL to +0.2% profit (activates if price hits +0.5% profit first)
+                            # This logic should not run if Comeback TP already closed the trade.
+                            # The 's8_trailing_sl_activated' flag prevents this from running multiple times.
+                            if not s8_trailing_sl_activated:
+                                profit_target_for_trailing_sl_activation_hit = False
+                                if side_s8 == 'buy' and market_price_s8 >= entry_price_s8 * 1.005: # +0.5% profit
+                                    profit_target_for_trailing_sl_activation_hit = True
+                                elif side_s8 == 'sell' and market_price_s8 <= entry_price_s8 * 0.995: # +0.5% profit (price is 0.5% lower)
+                                    profit_target_for_trailing_sl_activation_hit = True
+                                
+                                if profit_target_for_trailing_sl_activation_hit:
+                                    print(f"{s8_log_prefix_loop} Hit 0.5% profit for Trailing SL activation. Current Price: {market_price_s8}, Entry: {entry_price_s8}. Adjusting SL to +0.2% profit.")
+                                    new_sl_price_s8_trail = None
+                                    if side_s8 == 'buy':
+                                        new_sl_price_s8_trail = round(entry_price_s8 * 1.002, price_precision_s8) # SL to +0.2% profit
+                                    elif side_s8 == 'sell':
+                                        new_sl_price_s8_trail = round(entry_price_s8 * 0.998, price_precision_s8) # SL to +0.2% profit (0.2% below entry for short)
+                                    
+                                    # Get current SL price from details for comparison
+                                    current_sl_price_from_details = s8_pos_details.get('sl_price') 
+                                    
+                                    # Validate new SL: For buy, must be > entry. For sell, must be < entry.
+                                    # And it must be a "better" SL than current_sl_price_from_details.
+                                    # And also ensure it's a valid stop given current market price.
+                                    is_new_sl_valid_and_better = False
+                                    if side_s8 == 'buy':
+                                        if new_sl_price_s8_trail > entry_price_s8 and \
+                                           new_sl_price_s8_trail > current_sl_price_from_details and \
+                                           new_sl_price_s8_trail < market_price_s8: # New SL must be below current market price
+                                            is_new_sl_valid_and_better = True
+                                    elif side_s8 == 'sell':
+                                        if new_sl_price_s8_trail < entry_price_s8 and \
+                                           new_sl_price_s8_trail < current_sl_price_from_details and \
+                                           new_sl_price_s8_trail > market_price_s8: # New SL must be above current market price
+                                            is_new_sl_valid_and_better = True
 
-                                    s8_pos_details['sl_order_id'] = new_sl_order_resp_s8.get('orderId')
-                                    s8_pos_details['sl_price'] = new_sl_s8_trail
-                                    s8_pos_details['s8_trailing_sl_activated'] = True # Mark as activated
-                                    _activity_set(f"S8 TRAIL SL: {s8_trail_symbol} to {new_sl_s8_trail}")
-                                    print(f"DEBUG S8_TRAIL: Updated g_active_positions_details for {s8_trail_symbol} with S8 trail: {s8_pos_details}")
+                                    if new_sl_price_s8_trail is not None and is_new_sl_valid_and_better:
+                                        print(f"{s8_log_prefix_loop} Attempting to cancel old SL Order ID {current_sl_order_id_s8} (S8 Trail)")
+                                        client.cancel_order(symbol=s8_symbol, orderId=current_sl_order_id_s8, recvWindow=6000)
+                                        print(f"{s8_log_prefix_loop} Old SL Order ID {current_sl_order_id_s8} (S8 Trail) cancelled.")
+
+                                        new_sl_order_side_s8_api = 'SELL' if side_s8 == 'buy' else 'BUY'
+                                        new_sl_order_resp_s8 = client.new_order(
+                                            symbol=s8_symbol, side=new_sl_order_side_s8_api, type='STOP_MARKET',
+                                            quantity=abs(float(qty_s8)), timeInForce='GTC',
+                                            stopPrice=new_sl_price_s8_trail, reduceOnly=True, recvWindow=6000
+                                        )
+                                        print(f"{s8_log_prefix_loop} New S8 Trailing SL order placed: {new_sl_order_resp_s8}")
+
+                                        # Update g_active_positions_details
+                                        g_active_positions_details[s8_symbol]['sl_order_id'] = new_sl_order_resp_s8.get('orderId')
+                                        g_active_positions_details[s8_symbol]['sl_price'] = new_sl_price_s8_trail
+                                        g_active_positions_details[s8_symbol]['s8_trailing_sl_activated'] = True # Mark as activated
+                                        _activity_set(f"S8 TRAIL SL: {s8_symbol} to {new_sl_price_s8_trail}")
+                                        print(f"{s8_log_prefix_loop} Updated g_active_positions_details with S8 trail: {g_active_positions_details[s8_symbol]}")
+                                    else:
+                                        print(f"{s8_log_prefix_loop} New SL {new_sl_price_s8_trail} for S8 trailing not valid or not better. CurrentSL: {current_sl_price_from_details}, Entry: {entry_price_s8}, Market: {market_price_s8}")
                                 else:
-                                    print(f"WARNING S8_TRAIL: New SL {new_sl_s8_trail} for {s8_trail_symbol} not valid or not better. CurrentSL: {current_sl_price_s8_trail}, Entry: {entry_price_s8_trail}, Market: {market_price_s8_trail}")
-                            else:
-                                print(f"DEBUG S8_TRAIL: {s8_trail_symbol} not yet at 0.5% profit for S8 trailing SL. Market: {market_price_s8_trail}, Entry: {entry_price_s8_trail}")
+                                    # This means 0.5% profit not yet hit, so S8 trailing SL to +0.2% is not active.
+                                    # Comeback TP logic (if drawdown occurred) would still be checked above.
+                                    print(f"{s8_log_prefix_loop} Not yet at 0.5% profit for S8 trailing SL activation. Market: {market_price_s8}, Entry: {entry_price_s8}")
 
-                        except ClientError as ce_s8_trail:
-                            print(f"ERROR S8_TRAIL: ClientError during S8 trailing SL for {s8_trail_symbol}: {ce_s8_trail}")
-                        except Exception as e_s8_trail:
-                            print(f"ERROR S8_TRAIL: Exception during S8 trailing SL for {s8_trail_symbol}: {e_s8_trail}")
-                        sleep(0.2)
+                        except ClientError as ce_s8_logic:
+                            print(f"{s8_log_prefix_loop} ClientError during S8 logic: {ce_s8_logic}")
+                        except Exception as e_s8_logic:
+                            print(f"{s8_log_prefix_loop} Exception during S8 logic: {e_s8_logic}")
+                        sleep(0.2) # Small delay after processing each S8 symbol
 
 
             # --- Position Closure Detection and Resetting Strategy Trackers ---
@@ -7205,11 +7219,15 @@ def run_bot_logic():
                                     'tp_price': order_outcome_s8.get('tp_price'),
                                     'entry_price': order_outcome_s8.get('entry_price'),
                                     'qty': order_outcome_s8.get('qty'),
-                                    'side': order_outcome_s8.get('side'),
+                                    'side': order_outcome_s8.get('side'), # 'buy' or 'sell'
                                     'entry_order_id': order_outcome_s8.get('entry_order_id'),
-                                    'strategy_id': 8, 
+                                    'strategy_id': 8,
                                     'signal_candle_timestamp': signal_data_s8.get('signal_candle_timestamp'),
-                                    'initial_tp_price': order_outcome_s8.get('tp_price') 
+                                    'initial_tp_price': order_outcome_s8.get('tp_price'), # Original 0.2% TP
+                                    # For S8 Comeback TP logic:
+                                    's8_target_sl_price': order_outcome_s8.get('sl_price'), # Original 0.7% SL
+                                    's8_target_tp_price': order_outcome_s8.get('tp_price'), # Original 0.2% TP (same as initial_tp_price)
+                                    's8_drawdown_occurred': False # Initialize drawdown flag
                                 }
                                 print(f"DEBUG: Stored in g_active_positions_details for S8 {sym_to_check}: {g_active_positions_details[sym_to_check]}")
                                 _activity_set(f"S8: Trade initiated for {sym_to_check}.")
