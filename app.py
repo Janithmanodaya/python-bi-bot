@@ -3132,8 +3132,7 @@ S7_COOLDOWN_PERIOD_MINUTES = 180 # Cooldown period for Strategy 7 (Candlestick p
 #        'entry_price_at_pending_start', 'potential_sl_price', 'potential_tp_price'
 g_conditional_pending_signals = {}
 
-TARGET_SYMBOLS = ["BTCUSDT", "ETHUSDT", "XRPUSDT", "BNBUSDT", "SOLUSDT", "TRXUSDT", "DOGEUSDT", "ADAUSDT", "HYPEUSDT", "BCHUSDT", "SUIUSDT", "LINKUSDT", "LEOUSDT", "AVAXUSDT", "XLMUSDT", "TONUSDT", "SHIBUSDT", "LTCUSDT", "HBARUSDT", "XMRUSDT", "BGBUSDT", "DOTUSDT", "UNIUSDT", "PIUSDT", "AAVEUSDT", "PEPEUSDT", "APTUSDT", "OKBUSDT", "TAOUSDT", "NEARUSDT", "ICPUSDT", "CROUSDT", "ETCUSDT", "ONDOUSDT", "MNTUSDT", "KASUSDT", "GTUSDT", "POLUSDT", "TRUMPUSDT", "VETUSDT", "SKYUSDT", "SEIUSDT", "FETUSDT", "RENDERUSDT", "ENAUSDT", "ATOMUSDT", "ARBUSDT", "ALGOUSDT", "FILUSDT", "WLDUSDT", "KCSUSDT", "QNTUSDT", "JUPUSDT", "FLRUSDT"
-]
+TARGET_SYMBOLS = [] # Initialize as empty, will be populated from API
 ACCOUNT_RISK_PERCENT = 0.005
 SCALPING_REQUIRED_BUY_CONDITIONS = 1
 SCALPING_REQUIRED_SELL_CONDITIONS = 1
@@ -3823,6 +3822,37 @@ def get_tickers_usdt():
     except ClientError as error: print(f"Error get_tickers_usdt: {error}")
     except Exception as e: print(f"Unexpected error get_tickers_usdt: {e}")
     return tickers
+
+def fetch_all_usdt_pairs_from_binance():
+    """
+    Fetches all active USDT trading pairs from Binance.
+    """
+    global client
+    if not client:
+        print("Error: Binance client not initialized. Cannot fetch USDT pairs.")
+        return []
+    
+    usdt_pairs = []
+    try:
+        exchange_info = client.exchange_info()
+        if exchange_info and 'symbols' in exchange_info:
+            for symbol_info in exchange_info['symbols']:
+                if symbol_info.get('quoteAsset') == 'USDT' and \
+                   symbol_info.get('status') == 'TRADING' and \
+                   symbol_info.get('contractType') == 'PERPETUAL': # Ensure it's a perpetual futures contract
+                    usdt_pairs.append(symbol_info['symbol'])
+            print(f"Fetched {len(usdt_pairs)} active USDT perpetual futures pairs from Binance.")
+        else:
+            print("Error: Could not retrieve symbols from exchange info or exchange info is malformed.")
+            return [] # Return empty if structure is not as expected
+    except ClientError as ce:
+        print(f"ClientError fetching exchange info for USDT pairs: {ce}")
+        return [] # Return empty on API error
+    except Exception as e:
+        print(f"Unexpected error fetching exchange info for USDT pairs: {e}")
+        return [] # Return empty on other errors
+    
+    return sorted(usdt_pairs) # Return sorted list
 
 def klines(symbol):
     global client
@@ -6046,8 +6076,13 @@ def scheduled_account_summary_update():
 
 def reinitialize_client():
     global client, current_env, status_var, current_env_var, api_mainnet, secret_mainnet, api_testnet, secret_testnet, BINANCE_MAINNET_URL, BINANCE_TESTNET_URL
+    global TARGET_SYMBOLS, target_symbols_var # Add TARGET_SYMBOLS and its Tkinter var
     _status_set = lambda msg: status_var.set(msg) if status_var and root and root.winfo_exists() else None
     print(f"Attempting to reinitialize client for: {current_env}")
+    
+    # Store previous client to check if it was successfully reinitialized
+    previous_client_state_is_none = client is None
+
     if current_env == "testnet":
         if not api_testnet or not secret_testnet:
             msg = "Error: Testnet keys missing."; _status_set(msg); messagebox.showerror("Error", msg)
@@ -6105,6 +6140,26 @@ def reinitialize_client():
     else:
         msg = "Error: Invalid environment."; _status_set(msg); messagebox.showerror("Error", msg)
         return False
+    
+    # If client initialization was successful, fetch USDT pairs
+    if client is not None and (previous_client_state_is_none or client.base_url != ""): # Check if client is newly/successfully initialized
+        print("Client initialized. Fetching USDT pairs...")
+        fetched_symbols = fetch_all_usdt_pairs_from_binance()
+        if fetched_symbols:
+            TARGET_SYMBOLS = fetched_symbols
+            if target_symbols_var and root and root.winfo_exists(): # Check if UI elements exist
+                root.after(0, lambda: target_symbols_var.set(",".join(TARGET_SYMBOLS)))
+            print(f"Successfully fetched and updated {len(TARGET_SYMBOLS)} target symbols.")
+            _status_set(f"Client {current_env} ready. {len(TARGET_SYMBOLS)} USDT pairs loaded.")
+        else:
+            print("Failed to fetch USDT pairs or no pairs returned. TARGET_SYMBOLS will be empty or retain previous value if not overwritten.")
+            # Optionally, keep existing TARGET_SYMBOLS or set to a default small list if fetch fails
+            # For now, if fetch fails, TARGET_SYMBOLS might be empty.
+            # If target_symbols_var exists, it will reflect the (potentially empty) TARGET_SYMBOLS.
+            if target_symbols_var and root and root.winfo_exists():
+                 root.after(0, lambda: target_symbols_var.set(",".join(TARGET_SYMBOLS))) # Update with current (possibly empty) TARGET_SYMBOLS
+            _status_set(f"Client {current_env} ready. Failed to fetch USDT pairs.")
+            
     return True
 
 def toggle_environment():
@@ -7945,9 +8000,9 @@ if __name__ == "__main__":
 
 
     # Row 5: Target Symbols Entry
-    ttk.Label(params_input_frame, text="Target Symbols (CSV):").grid(row=5, column=0, padx=2, pady=2, sticky='w')
-    target_symbols_var = tk.StringVar(value=",".join(TARGET_SYMBOLS))
-    target_symbols_entry = ttk.Entry(params_input_frame, textvariable=target_symbols_var, width=40) 
+    ttk.Label(params_input_frame, text="Target Symbols (Auto-fetched, Editable):").grid(row=5, column=0, padx=2, pady=2, sticky='w')
+    target_symbols_var = tk.StringVar(value=",".join(TARGET_SYMBOLS)) # Initial value will be empty, then populated
+    target_symbols_entry = ttk.Entry(params_input_frame, textvariable=target_symbols_var, width=60) 
     target_symbols_entry.grid(row=5, column=1, columnspan=3, padx=2, pady=2, sticky='we')
 
     # Row 6: Trailing Stop Configuration
