@@ -8541,7 +8541,7 @@ if __name__ == "__main__":
             status_var.set(f"Client initialized for {current_env}. Bot ready.")
             activity_status_var.set("Bot Idle - Ready")
         
-        update_conditions_display_content("System", None, initial_conditions_msg) # Initial displa
+        update_conditions_display_content("System", None, initial_conditions_msg) # Initial display
 
         # Initial data load for Account Summary
         update_account_summary_data() 
